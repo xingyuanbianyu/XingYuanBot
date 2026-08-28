@@ -1,5 +1,5 @@
 {
-  "name": "插件分组",
-  "type": "event",
-  "entry": "index.js"
+  "name": "plugin-group",
+  "description": "轻量级子插件调度器",
+  "keywords": []
 }

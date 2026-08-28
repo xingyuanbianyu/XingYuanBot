@@ -1,146 +1,110 @@
-console.log('===== index.js 被加载了 =====');
-import { readFileSync, readdirSync, existsSync } from 'fs';
+import { readFileSync, existsSync, statSync } from 'fs';
 import { join, dirname } from 'path';
-import { pathToFileURL, fileURLToPath } from 'url';
-import yaml from 'yaml';
+import { fileURLToPath } from 'url';
+import { parse } from 'yaml';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-// ====== 加载配置 ======
-function loadGroupConfig() {
-  const yamlPath = join(__dirname, 'group.yaml');
-  try {
-    const raw = readFileSync(yamlPath, 'utf-8');
-    return yaml.parse(raw);
-  } catch (err) {
-    console.error('[plugin-group] 读取 group.yaml 失败:', err.message);
-    return {};
+let loadedPlugins = [];
+let groupConfig = null;
+
+// ============ 初始化：读取 config.yaml 并加载启用的子插件 ============
+async function init() {
+  const configPath = join(__dirname, 'config.yaml');
+  if (!existsSync(configPath)) {
+    console.log('⚠ config.yaml 不存在，跳过加载');
+    return;
   }
-}
 
-// ====== 加载所有启用的子插件 ======
-async function loadPlugins(config) {
-  const plugins = {};
-  const pluginDir = join(__dirname, 'plugin');
+  const yamlStr = readFileSync(configPath, 'utf-8');
+  groupConfig = parse(yamlStr);  // ← 这里用 parse，不是 load
 
-  for (const [name, conf] of Object.entries(config.plugins || {})) {
-    if (!conf.enabled) continue;
+  for (const cfg of groupConfig.plugins) {
+    if (!cfg.enabled) {
+      console.log(`⏭ 插件 [${cfg.name}] 未启用，跳过`);
+      continue;
+    }
 
-    const scriptPath = join(pluginDir, conf.entry);
-    if (!existsSync(scriptPath)) {
-      console.warn(`[plugin-group] 找不到子插件: ${name} => ${conf.entry}`);
+    const entryPath = join(__dirname, cfg.entry);
+    if (!existsSync(entryPath)) {
+      console.log(`⚠ 插件 [${cfg.name}] 入口文件不存在: ${cfg.entry}`);
       continue;
     }
 
     try {
-      const module = await import(pathToFileURL(scriptPath).href);
-      plugins[name] = {
-        config: conf,
-        module: module,
-      };
-    } catch (err) {
-      console.error(`[plugin-group] 加载子插件失败 (${name}):`, err);
+      const moduleURL = new URL(`file://${entryPath}`).href;
+      const mod = await import(moduleURL);
+      loadedPlugins.push({
+        name: cfg.name,
+        type: cfg.type,       // 'command' | 'event'
+        handler: mod.default || mod,
+      });
+      console.log(`✅ 插件 [${cfg.name}] 加载成功`);
+    } catch (e) {
+      console.error(`❌ 插件 [${cfg.name}] 加载失败: ${e.message}`);
     }
   }
-  return plugins;
+
+  console.log(`📦 成功加载 ${loadedPlugins.length} 个子插件`);
 }
 
-// ====== 指令匹配逻辑 ======
-function matchCommand(msg, conf) {
-  if (!conf) return false;
-  const prefix = [...(conf.keywords || [])];
-
-  // 1. 前缀匹配
-  if (prefix.length > 0) {
-    const hasPrefix = prefix.some(p => msg.startsWith(p));
-    if (!hasPrefix) return false;
-  }
-
-  // 2. 关键词匹配
-  if (conf.keys && conf.keys.length > 0) {
-    const hasKey = conf.keys.some(kw => msg.includes(kw));
-    if (!hasKey) return false;
-  }
-
-  // 前缀和关键词都满足（或无配置），匹配成功
-  return true;
+// ============ 超时包装器 ============
+function withTimeout(promise, ms) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`超时 ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-// ====== 主入口 ======
-export default {
-  async handle(e) {
-    // 【核心修复】从消息数组中提取纯文本
-    let msg = '';
-    if (Array.isArray(e.message)) {
-      for (const item of e.message) {
-        if (item.type === 'text' && item.data && item.data.text) {
-          msg += item.data.text;
-        }
+// ============ 消息处理入口 ============
+export default async function handle(msg) {
+  // 懒加载：首次调用时初始化
+  if (loadedPlugins.length === 0 && !groupConfig) {
+    await init();
+  }
+
+  // 提取消息文本
+  let text = '';
+  if (Array.isArray(msg.message)) {
+    for (const seg of msg.message) {
+      if (seg.type === 'text') {
+        text += seg.data.text.trim();
       }
-    } else if (typeof e.message === 'string') {
-      msg = e.message;
-    } else if (e.msg) {
-      msg = String(e.msg);
     }
+  } else if (typeof msg.message === 'string') {
+    text = msg.message;
+  }
 
-    if (!msg) return false;
+  // 遍历已启用的子插件
+  for (const plugin of loadedPlugins) {
+    const handler = plugin.handler;
 
-    const config = loadGroupConfig();
-    const plugins = await loadPlugins(config);
-
-    let handled = false;
-
-    for (const [name, plugin] of Object.entries(plugins)) {
-      const conf = plugin.config;
-      console.log(`检查插件 ${name}, enabled=${conf.enabled}, conf:`, conf);
-      if (!conf.enabled) continue;
-
-      try {
-        const codeType = conf.type || 'command';
-        const fn = plugin.module.default || plugin.module.main;
-
-        if (codeType === 'command') {
-          if (matchCommand(msg, conf)) {
-            if (typeof fn === 'function') {
-              console.log(`[plugin-group] 命中函数插件: ${name}`);
-              await fn(e, msg);
-              handled = true;
-              break;
-            } else if (typeof fn === 'object' && fn !== null) {
-              console.log(`[plugin-group] 命中对象插件: ${name}`);
-              // 自动按关键词路由到对象中的方法
-              if (msg.includes('设置主人') && typeof fn.setOwner === 'function') {
-                await fn.setOwner(e, msg);
-                handled = true;
-              } else if (fn.onCommand && typeof fn.onCommand === 'function') {
-                await fn.onCommand(e, msg);
-                handled = true; 
-              }
-              if (handled) break;
-            }
-          }
-        } else if (codeType === 'event') {
-          const eventName = e.eventType || e.type || '';
-          if (eventName === (conf.event_name || '')) {
-            if (typeof fn === 'function') {
-              await fn(e);
-              handled = true;
-              break;
-            } else if (typeof fn === 'object' && fn !== null) {
-              if (fn.onEvent && typeof fn.onEvent === 'function') {
-                await fn.onEvent(e);
-                handled = true;
-              }
-              if (handled) break;
-            }
-          }
-        }
-      } catch (err) {
-        console.error(`[plugin-group] 执行插件 ${name} 出错:`, err);
+    // --- 指令类型：需要匹配 ---
+    if (plugin.type === 'command') {
+      if (typeof handler.match !== 'function' || !handler.match(text)) {
+        continue; // 不匹配 → 跳过
       }
     }
 
-    return handled;
-  }
-};
+    try {
+      const reply = await withTimeout(
+        handler.handle({ text, msg }),
+        groupConfig.timeout
+      );
 
+      if (reply) {
+        console.log(`↩ [${plugin.name}] 已回复，终止传递`);
+        return reply; // ✅ 有回复 → 终止循环，不再传给后续插件
+      }
+    } catch (e) {
+      console.log(`⏭ [${plugin.name}] ${e.message}，跳过`);
+    }
+  }
+
+  // 所有插件都没有回复
+  return null;
+}
+
+// 启动时预加载
+init();

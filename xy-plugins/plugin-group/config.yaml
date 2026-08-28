@@ -1,0 +1,26 @@
+# 插件组调度配置
+group:
+  name: plugin-group
+  timeout: 1000          # 单插件超时 ms
+
+# 子插件列表（按顺序匹配）
+plugins:
+  - name: plugin-a
+    entry: ./plugin/plugin-a.js
+    type: command        # command(指令) | event(事件)
+    enabled: false
+
+  - name: plugin-b
+    entry: ./plugin/plugin-b.js
+    type: command
+    enabled: false       # 禁用 = 不加载、不匹配、不传递
+
+  - name: plugin-c
+    entry: ./plugin/plugin-c.js
+    type: event
+    enabled: true
+
+  - name: plugin-welcome
+    entry: ./plugin/plugin-welcome.js
+    type: even
+    enabled: true

@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url';
 import path from 'path';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+// 从插件目录回到 bot 根目录，再定位到 config.yaml
 const CONFIG_PATH = path.join(process.cwd(), 'xy-config', 'config', 'config.yaml');
 
 // 存储待验证的验证码：Map<qq号, {code, time}>
@@ -12,33 +13,8 @@ const CODE_EXPIRE = 5 * 60 * 1000; // 5分钟过期
 
 // ============ 配置文件操作 ============
 
-function initConfig() {
-  const configDir = path.join(process.cwd(), 'xy-config', 'config');
-
-  if (!fs.existsSync(configDir)) {
-    fs.mkdirSync(configDir, { recursive: true });
-  }
-
-  if (!fs.existsSync(CONFIG_PATH)) {
-    const examplePath = path.join(configDir, 'config.yaml.example');
-    if (fs.existsSync(examplePath)) {
-      const template = fs.readFileSync(examplePath, 'utf-8');
-      fs.writeFileSync(CONFIG_PATH, template, 'utf-8');
-    } else {
-      const defaultConfig = {
-        permissions: {
-          owners: {},
-          admins: {},
-          permission_switch: {},
-        },
-      };
-      fs.writeFileSync(CONFIG_PATH, yaml.stringify(defaultConfig), 'utf-8');
-    }
-  }
-}
-
 function loadConfig() {
-  initConfig();
+  if (!fs.existsSync(CONFIG_PATH)) return null;
   const content = fs.readFileSync(CONFIG_PATH, 'utf-8');
   return yaml.parse(content);
 }
@@ -104,28 +80,26 @@ export default {
   // ---- 设置主人（大主人验证 / 已有大主人时提示设置小主人） ----
   async handleSetMaster(args, senderQQ, role) {
     const config = loadConfig();
+    if (!config) return '配置文件不存在';
+
     const masterQQ = getMasterQQ(config);
 
     if (!masterQQ) {
       // 还没有大主人，进入验证流程
       if (args.length === 1) {
-       
-      // 第一次触发，生成验证码
-      const code = generateCode();
-      verificationCodes.set(sendQQ, { code, time: Date.now() });
+        // 第一次触发：生成验证码
+        const code = generateCode();
+        verificationCodes.set(senderQQ, { code, time: Date.now() });
 
-      // 【修改点 1】：控制台日志保持不变，打印明文方便你自己看
-      console.log("\n===== 🛡️ 大主人权限设置验证码 =====");
-      console.log(`   QQ号 : ${sendQQ}`);
-      console.log(`   验证码: ${code}`); // 这里依然是明文
-      console.log(`   指令 : 设置主人 ${sendQQ} ${code}`);
-      console.log("====================================\n");
+        console.log('\n╔══════════════════════════════════════╗');
+        console.log('       📌 大主人权限设置验证码');
+        console.log(`       QQ号  : ${senderQQ}`);
+        console.log(`       验证码: ${code}`);
+        console.log(`       指令  : 设置主人 ${senderQQ} ${code}`);
+        console.log('╚══════════════════════════════════════╝\n');
 
-      // 【修改点 2】：发送给群里的消息，把验证码替换成星号
-      // 假设验证码长度固定是5位，如果不是，可以用 '*'.repeat(code.length)
-      const maskedCode = "*****"; 
+        return `✅ 验证码已生成，请在控制台查看，然后发送："设置主人 ${senderQQ} ${code}"（5分钟内有效）`;
 
-      return `✅ 验证码已生成，请在控制台查看，然后发送：设置主人 ${sendQQ} ${maskedCode} (5分钟内有效)`;
       } else if (args.length === 3) {
         // 验证阶段：设置主人 <QQ> <验证码>
         const qq = args[1];
@@ -149,15 +123,16 @@ export default {
         verificationCodes.delete(qq);
 
         return '✅ 验证成功，你已经是大主人了';
+
       } else {
-        return '✧ 指令格式：设置主人 <QQ号> <验证码>';
+        return '📌 指令格式：设置主人 <QQ号> <验证码>';
       }
     } else {
       // 已有大主人
       if (String(senderQQ) !== masterQQ) {
         return '❌ 已有大主人，只有大主人才能设置小主人';
       }
-      return '✧ 请使用"设置小主人 <QQ号>"指令来设置小主人';
+      return '📌 请使用"设置小主人 <QQ号>"指令来设置小主人';
     }
   },
 
@@ -171,7 +146,7 @@ export default {
     }
 
     if (args.length < 2) {
-      return '✧ 指令格式：设置小主人 <QQ号>';
+      return '📌 指令格式：设置小主人 <QQ号>';
     }
 
     const targetQQ = args[1];
@@ -180,7 +155,7 @@ export default {
     }
 
     ensurePermissions(config);
-    config.permissions.owners[targetQQ] = false;     // 小主人标记
+    config.permissions.owners[targetQQ] = false;       // 小主人标记
     config.permissions.permission_switch[targetQQ] = 0; // 默认权限关闭
     saveConfig(config);
 
@@ -197,7 +172,7 @@ export default {
     }
 
     if (args.length < 2) {
-      return '✧ 指令格式：取消主人 <QQ号>';
+      return '📌 指令格式：取消主人 <QQ号>';
     }
 
     const targetQQ = args[1];
@@ -224,7 +199,7 @@ export default {
     const masterQQ = getMasterQQ(config);
 
     if (args.length < 2) {
-      return '✧ 指令格式：权限状态 <开/关/查询> [QQ号]';
+      return '📌 指令格式：权限状态 <开/关/查询> [QQ号]';
     }
 
     const action = args[1];
@@ -232,7 +207,7 @@ export default {
 
     // ===== 查询（任何人可查） =====
     if (action === '查询') {
-      if (!targetQQ) return '✧ 指令格式：权限状态 查询 <QQ号>';
+      if (!targetQQ) return '📌 指令格式：权限状态 查询 <QQ号>';
 
       const owners = config.permissions?.owners || {};
       const permSwitch = config.permissions?.permission_switch || {};
@@ -240,13 +215,12 @@ export default {
       if (owners[targetQQ] === undefined) {
         return `❌ ${targetQQ} 不是主人`;
       }
-
       if (owners[targetQQ] === true) {
-        return `✧ ${targetQQ} 是大主人，权限永久开启（不可关闭）`;
+        return `📌 ${targetQQ} 是大主人，权限永久开启（不可关闭）`;
       }
 
       const status = permSwitch[targetQQ] === 1 ? '✅ 开启' : '❌ 关闭（失效）';
-      return `✧ ${targetQQ} 是小主人，当前权限状态：${status}`;
+      return `📌 ${targetQQ} 是小主人，当前权限状态：${status}`;
     }
 
     // ===== 开 / 关（仅大主人可用） =====
@@ -255,7 +229,7 @@ export default {
     }
 
     if (!targetQQ) {
-      return `✧ 指令格式：权限状态 ${action} <QQ号>`;
+      return `📌 指令格式：权限状态 ${action} <QQ号>`;
     }
 
     const owners = config.permissions?.owners || {};
@@ -263,7 +237,6 @@ export default {
     if (owners[targetQQ] === undefined) {
       return `❌ ${targetQQ} 不是主人`;
     }
-
     if (owners[targetQQ] === true) {
       return '❌ 不能修改大主人的权限状态';
     }
@@ -281,5 +254,5 @@ export default {
     } else {
       return '❌ 未知操作，请使用：开 / 关 / 查询';
     }
-  },
+  }
 };

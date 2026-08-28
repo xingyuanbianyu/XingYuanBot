@@ -1,6 +1,6 @@
-import { WebSocketServer } from 'ws';
+import { WebSocket, WebSocketServer } from 'ws';
 import { loadPlugins } from './plugin-loader.js';
-import { getRole } from '../xy-config/config/permissions.js'; // ✅ 引入权限函数
+import { getRole } from '../xy-config/config/permissions.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -8,148 +8,250 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const WS_PORT = 3001;
+// ==================== 配置 ====================
+const WS_PORT = process.env.WS_PORT || 3001;
+const REMOTE_WS_URL = process.env.REMOTE_WS_URL || 'ws://127.0.0.1:3001';
+
 let plugins = [];
 let wsClient = null;
+let wsServer = null;
+let connected = false;
+let clientTimer = null;
 
-export async function connectOneBot() {
-  plugins = await loadPlugins();
-
-  const wss = new WebSocketServer({ port: WS_PORT });
-  console.log(`◆ 机器人服务端已启动，监听端口 ${WS_PORT}...\n`);
-  console.log('ws连接: 127.0.0.1:3001')
-
-  wss.on('connection', (ws) => {
-    console.log('◆ NapCat 已连接！');
-    wsClient = ws;
-
-    ws.on('message', async (data) => {
-      try {
-        const msg = JSON.parse(data.toString());
-        // 【优化】只提取核心信息打印，过滤掉无用的元数据
-        if (msg.post_type === 'message') {
-            // 1. 提取基础信息
-            const senderId = msg.sender?.user_id || msg.user_id;
-            const nickname = msg.sender?.card || msg.sender?.nickname || '未知用户';
-            const groupId = msg.group_id;
-            
-            // 2. 简单处理一下消息内容（防止内容太长刷屏）
-            // 这里我们只取原始消息的前50个字符作为预览
-            let contentPreview = JSON.stringify(msg.message).substring(0, 50); 
-
-            console.log(`[收到消息] 群:${groupId} | 用户:${nickname}(${senderId}) | 内容预览: ${contentPreview}...`);
-        }
-
-        if (msg.post_type !== 'message') return;
-
-        const isGroup = msg.message_type === 'group';
-        const chatId = isGroup ? msg.group_id : msg.user_id;
-        const senderName = msg.sender?.card || msg.sender?.nickname || '未知';
-        const senderQQ = String(msg.user_id); // ✅ 提取发送者QQ号
-
-       // 提取文本
-       let text = "";
-       let atId = "";
-       let replyMsgId = "";
-       if (Array.isArray(msg.message)) {
-           for (const seg of msg.message) {
-                 if (seg.type === 'text') {
-                     text += seg.data.text.trim();
-                 } else if (seg.type === 'at') {
-                      atId = seg.data.qq || seg.data.id || seg.data.user_id || seg.data.target;
-                      text += ` @${atId}`;
-                 } else if (seg.type === 'reply') {
-                      if (seg.data.text) {
-                          text += ` [引用:${seg.data.text}]`;
-                     } else if (seg.data.id) {
-                          text += ` [引用ID:${seg.data.id}]`;
-                     }
-                }
-           }
-       } else if (msg.raw_message) {
-            text = msg.raw_message;
-       } else if (typeof msg.message === 'string') {
-            text = msg.message;
-       }
-
-        // ✅ 获取发送者的权限等级 (master / owner / admin / member)
-        const role = getRole(senderQQ);
-
-        // 遍历插件并匹配
-        for (const { name, handler } of plugins) {
-          if (typeof handler.match === 'function' && handler.match(text)) {
-            // ✅ 将 senderQQ 和 role 一起传给插件
-            const reply = await handler.handle({ 
-              text, 
-              chatId, 
-              isGroup, 
-              senderName, 
-              senderQQ, 
-              role,
-              replyMsgId,
-              msg,
-            });
-            
-            if (reply) {
-              await sendMsg(chatId, reply, isGroup);
-            }
-            break;
-          }
-        }
-      } catch (e) {
-        console.error('❌ 消息处理出错:', e);
-      }
-    });
-  });
+// ==================== 停止客户端重试 ====================
+function stopClientRetry() {
+    if (clientTimer) {
+        clearTimeout(clientTimer);
+        clientTimer = null;
+    }
 }
 
-// 发送消息给 NapCat（使用 OneBot V11 标准格式）
+// ==================== 关闭服务端 ====================
+function stopServer() {
+    if (wsServer) {
+        wsServer.close();
+        wsServer = null;
+        console.log('✅ 服务端已关闭');
+    }
+}
+
+// ==================== 消息处理（两种模式共用） ====================
+function setupMessageHandler(ws) {
+    ws.on('message', async (data) => {
+        try {
+            const msg = JSON.parse(data.toString());
+
+            // 🔴 放行 message 和 notice 事件
+            if (msg.post_type !== 'message' && msg.post_type !== 'notice') return;
+
+            // ============================================================
+            // 【绿色通道：Notice 事件 → 只走 type === 'event' 的插件】
+            // ============================================================
+            if (msg.post_type === 'notice') {
+                console.log(`📡 [通知] notice_type=${msg.notice_type}, sub_type=${msg.sub_type}, group_id=${msg.group_id}`);
+
+                for (const plugin of plugins) {
+                    // plugin-loader 返回的结构可能是 { name, handler } 或 { name, module }
+                    const handler = plugin.handler || plugin.module;
+                    if (!handler) continue;
+
+                    // 只交给 event 类型的插件
+                    if (handler.type !== 'event') continue;
+                    if (typeof handler.handle !== 'function') continue;
+
+                    try {
+                        const reply = await handler.handle({
+                            text: '',
+                            msg,
+                            isGroup: !!msg.group_id,
+                            chatId: msg.group_id || msg.user_id,
+                        });
+
+                        if (reply && (reply.text || reply.file)) {
+                            console.log(`🔔 [event 插件回复] ${plugin.name}`);
+                            await sendMsg(msg.group_id || msg.user_id, reply, !!msg.group_id);
+                        }
+                    } catch (e) {
+                        console.error(`❌ [${plugin.name}] 处理 notice 事件出错:`, e.message);
+                    }
+                }
+                return; // notice 事件处理完就结束
+            }
+
+            // ============================================================
+            // 【普通消息：走 match/handle 流程】
+            // ============================================================
+            const isGroup = msg.message_type === 'group';
+            const chatId = isGroup ? msg.group_id : msg.user_id;
+            const senderName = msg.sender?.card || msg.sender?.nickname || '未知';
+            const senderQQ = String(msg.user_id);
+            const role = getRole(senderQQ);
+
+            // 提取文本
+            let text = '';
+            let atId = '';
+            let replyMsgId = '';
+            if (Array.isArray(msg.message)) {
+                for (const seg of msg.message) {
+                    if (seg.type === 'text') {
+                        text += seg.data.text.trim();
+                    } else if (seg.type === 'at') {
+                        atId = seg.data.qq || seg.data.id || seg.data.user_id;
+                        text += `@[at:${atId}]`;
+                    } else if (seg.type === 'reply') {
+                        if (seg.data.text) {
+                            text += `[引用:${seg.data.text}]`;
+                        } else if (seg.data.id) {
+                            text += `[引用ID:${seg.data.id}]`;
+                        }
+                    }
+                }
+            } else if (msg.raw_message) {
+                text = msg.raw_message;
+            } else if (typeof msg.message === 'string') {
+                text = msg.message;
+            }
+
+            const preview = text.length > 30 ? text.substring(0, 30) + '...' : text;
+            console.log(`[收] [${isGroup ? '群' : '私'}] ${senderName}: ${preview}`);
+
+            // 遍历插件并匹配
+            for (const plugin of plugins) {
+                const handler = plugin.handler || plugin.module;
+                if (!handler) continue;
+
+                if (typeof handler.match === 'function' && handler.match(text)) {
+                    const reply = await handler.handle({
+                        text,
+                        chatId,
+                        isGroup,
+                        senderName,
+                        senderQQ,
+                        role,
+                        replyMsgId,
+                        msg,
+                    });
+
+                    if (reply) {
+                        await sendMsg(chatId, reply, isGroup);
+                    }
+                    break;
+                }
+            }
+        } catch (e) {
+            console.error('❌ 消息处理出错:', e);
+        }
+    });
+}
+
+// ==================== 发送消息 ====================
 export async function sendMsg(chatId, reply, isGroup) {
-  if (!wsClient) return;
+    if (!wsClient) return;
 
-  let messageSegs = [];
+    let messageSegs = [];
 
-  // 识别是图片还是文本
-  if (reply && typeof reply === 'object') {
-    // 图片格式：写临时文件后用本地路径发送（适配 LLOneBot）
-    const tempDir = path.join(__dirname, '../temp');
-    if (!fs.existsSync(tempDir)) {
-      fs.mkdirSync(tempDir);
+    if (reply && typeof reply === 'object') {
+        const tempDir = path.join(__dirname, '../temp');
+        if (!fs.existsSync(tempDir)) {
+            fs.mkdirSync(tempDir);
+        }
+        const fileName = 'pub.png';
+        const filePath = path.join(tempDir, fileName);
+        const buffer = Buffer.from(reply.file.file);
+        fs.writeFileSync(filePath, buffer);
+
+        messageSegs.push({
+            type: 'image',
+            data: { file: filePath },
+        });
+
+        console.log(`[发] [${isGroup ? '群' : '私'} ${chatId}]: [图片]`);
+    } else {
+        messageSegs.push({
+            type: 'text',
+            data: { text: String(reply) },
+        });
+
+        const replyStr = String(reply);
+        const rPreview = replyStr.length > 30 ? replyStr.substring(0, 30) + '...' : replyStr;
+        console.log(`[发] [${isGroup ? '群' : '私'} ${chatId}]: ${rPreview}`);
     }
 
-    const fileName = `pub.png`;
-    const filePath = path.join(tempDir, fileName);
+    const payload = {
+        action: 'send_msg',
+        params: {
+            message_type: isGroup ? 'group' : 'private',
+            [isGroup ? 'group_id' : 'user_id']: chatId,
+            message: messageSegs,
+        },
+    };
 
-    const buffer = Buffer.from(reply.file.file);
-    fs.writeFileSync(filePath, buffer);
+    wsClient.send(JSON.stringify(payload));
+}
 
-    messageSegs.push({
-      type: 'image',
-      data: {
-        file: filePath
-      }
-    });
-  } else {
-    // 文本格式
-    messageSegs.push({
-      type: 'text',
-      data: {
-        text: String(reply)
-      }
-    });
-  }
-
-  const payload = {
-    action: 'send_msg',
-    params: {
-      message_type: isGroup ? 'group' : 'private',
-      [isGroup ? 'group_id' : 'user_id']: chatId,
-      message: messageSegs
+// ==================== 客户端模式：主动去连 ====================
+async function tryConnectClient(retryCount) {
+    if (connected) return;
+    if (retryCount > 3) {
+        console.log(`⚠️  客户端连接失败已达3次，静默等待3分钟后重试...`);
+        clientTimer = setTimeout(() => {
+            tryConnectClient(1);
+        }, 3 * 60 * 1000);
+        return;
     }
-  };
 
-  wsClient.send(JSON.stringify(payload));
-  
-  // 终端日志
-  console.log(`[机器人 -> ${isGroup ? '群' : '私聊'} ${chatId}]: ${reply.type === 'image' ? '[图片]' : reply}`);
+    console.log(`🔄 客户端尝试连接 ${REMOTE_WS_URL}... (第 ${retryCount}/3 次)`);
+
+    try {
+        const ws = new WebSocket(REMOTE_WS_URL);
+
+        await new Promise((resolve, reject) => {
+            ws.on('open', () => { resolve(); });
+            ws.on('error', (err) => { reject(err); });
+            setTimeout(() => reject(new Error('timeout')), 5000);
+        });
+
+        connected = true;
+        wsClient = ws;
+        console.log(`✅ 客户端已连接: ${REMOTE_WS_URL}`);
+
+        setupMessageHandler(ws);
+        stopServer();
+
+    } catch (err) {
+        console.log(`❌ 第 ${retryCount} 次连接失败: ${err.message}`);
+        await new Promise(r => setTimeout(r, 2000));
+        tryConnectClient(retryCount + 1);
+    }
+}
+
+// ==================== 服务端模式：等待被连 ====================
+function startServer() {
+    wsServer = new WebSocketServer({ port: WS_PORT });
+    console.log(`📡 服务端已启动，监听端口 ${WS_PORT}...`);
+    console.log(`   等待 NapCat 或其他客户端连接...`);
+
+    wsServer.on('connection', (ws) => {
+        if (connected) {
+            console.log('⚠️  已有连接，拒绝新连接');
+            ws.close();
+            return;
+        }
+
+        connected = true;
+        wsClient = ws;
+        console.log(`✅ 客户端已连接（服务端模式）`);
+
+        setupMessageHandler(ws);
+        stopClientRetry();
+    });
+}
+
+// ==================== 启动入口 ====================
+export async function connectOneBot() {
+    plugins = await loadPlugins();
+    console.log(`📦 已加载 ${plugins.length} 个插件`);
+
+    startServer();
+    tryConnectClient(1);
 }

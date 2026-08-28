@@ -113,6 +113,9 @@ export default {
   },
 
   handle: async function({ text, chatId, isGroup, senderName, senderQQ, role }) {
+    console.log('[群管-调试] text 类型:', typeof text, '是否数组:', Array.isArray(text));
+    console.log('[群管-调试] text 内容:', JSON.stringify(text, null, 2));
+
     if (!text) return false;
 
     let textStr = parseText(text);
@@ -124,43 +127,53 @@ export default {
 
     const cmd = textStr.replace(/^#s#|#/g, '').trim();
 
-    // 提取目标QQ号
+     // 获取目标QQ号
     let targetQQ = null;
+
+    // 1. 数组格式处理（标准消息段）
     if (Array.isArray(text)) {
-      const atItem = text.find(item => item?.type === 'at');
-      if (atItem && atItem.data && atItem.data.qq) {
-        targetQQ = String(atItem.data.qq);
-      }
+        const atItem = text.find(item => item?.type === 'at');
+        if (atItem && atItem.data && (atItem.data.qq || atItem.data.target)) {
+            targetQQ = String(atItem.data.qq || atItem.data.target);
+        }
+    } 
+    // 2. 字符串格式处理（兼容你终端里打印出来的 @[at:3758575163] 格式）
+    else if (typeof text === 'string') {
+        const atMatch = text.match(/@\[at:(\d+)\]/);
+        if (atMatch) {
+            targetQQ = atMatch[1];
+        }
     }
 
+    // 3. 如果上面没拿到 QQ，尝试从文本里匹配昵称/备注（兼容手动输入名字踢人）
     if (!targetQQ) {
-      const match = textStr.match(/@([^\s]+)/);
-      if (match) {
-        const keyword = match[1];
-        try {
-          const memberRes = await fetch(`${API}/get_group_member_list?group_id=${chatId}`);
-          const memberData = await memberRes.json();
-          const members = memberData?.data || [];
+        const match = textStr.match(/@([^\s]+)/);
+        if (match) {
+            const keyword = match[1];
+            try {
+                const memberRes = await fetch(`${API}/get_group_member_list?group_id=${chatId}`);
+                const memberData = await memberRes.json();
+                const members = memberData?.data || [];
 
-          const found = members.find(m => {
-            const uid = String(m.user_id);
-            if (keyword.startsWith(uid)) return true;
-            if ((m.nickname && keyword.includes(m.nickname)) ||
-                (m.card && keyword.includes(m.card))) return true;
-            return false;
-          });
+                const found = members.find(m => {
+                    const uid = String(m.user_id);
+                    if (keyword.startsWith(uid)) return true;
+                    if ((m.nickname && keyword.includes(m.nickname)) || 
+                        (m.card && keyword.includes(m.card))) return true;
+                    return false;
+                });
 
-          if (found) {
-            targetQQ = String(found.user_id);
-            if (keyword.startsWith(targetQQ) && keyword.length > targetQQ.length) {
-              const remaining = keyword.slice(targetQQ.length);
-              textStr = textStr.replace(keyword, targetQQ + ' ' + remaining);
+                if (found) {
+                    targetQQ = String(found.user_id);
+                    if (keyword.startsWith(targetQQ) && keyword.length > targetQQ.length) {
+                        const remaining = keyword.slice(targetQQ.length);
+                        textStr = textStr.replace(keyword, targetQQ + ' ' + remaining);
+                    }
+                }
+            } catch (e) {
+                console.error('匹配群成员失败:', e);
             }
-          }
-        } catch (e) {
-          console.error('匹配群成员失败:', e);
         }
-      }
     }
 
     // 检查群权限
