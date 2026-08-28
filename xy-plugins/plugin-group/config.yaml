@@ -18,9 +18,9 @@ plugins:
   - name: plugin-c
     entry: ./plugin/plugin-c.js
     type: event
-    enabled: true
+    enabled: false
 
   - name: plugin-welcome
     entry: ./plugin/plugin-welcome.js
     type: even
-    enabled: true
+    enabled: false
