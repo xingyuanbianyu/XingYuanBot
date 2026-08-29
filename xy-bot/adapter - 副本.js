@@ -41,46 +41,40 @@ function setupMessageHandler(ws) {
         try {
             const msg = JSON.parse(data.toString());
 
-            // 🔴 放行 message 和 notice 事件
+            // 🔴 只处理 message 和 notice
             if (msg.post_type !== 'message' && msg.post_type !== 'notice') return;
 
-            // ============================================================
-            // 【绿色通道：Notice 事件 → 只走 type === 'event' 的插件】
-            // ============================================================
+            // ─────────────────────────────────────
+            // 【Notice 事件 → 走 event 类型插件】
+            // ─────────────────────────────────────
             if (msg.post_type === 'notice') {
-                console.log(`📡 [通知] notice_type=${msg.notice_type}, sub_type=${msg.sub_type}, group_id=${msg.group_id}`);
+                console.log(`📡 收到通知事件: notice_type=${msg.notice_type}, sub_type=${msg.sub_type || '无'}`);
 
-                for (const plugin of plugins) {
-                    // plugin-loader 返回的结构可能是 { name, handler } 或 { name, module }
-                    const handler = plugin.handler || plugin.module;
-                    if (!handler) continue;
-
-                    // 只交给 event 类型的插件
+                for (const { name, handler } of plugins) {
+                    // 🔴 先确认 handler 是个对象，且有 type 和 handle
+                    if (!handler || typeof handler !== 'object') continue;
                     if (handler.type !== 'event') continue;
                     if (typeof handler.handle !== 'function') continue;
 
                     try {
-                        const reply = await handler.handle({
-                            text: '',
-                            msg,
-                            isGroup: !!msg.group_id,
-                            chatId: msg.group_id || msg.user_id,
-                        });
-
-                        if (reply && (reply.text || reply.file)) {
-                            console.log(`🔔 [event 插件回复] ${plugin.name}`);
-                            await sendMsg(msg.group_id || msg.user_id, reply, !!msg.group_id);
+                        const reply = await handler.handle({ text: '', msg });
+                        if (reply && reply.text) {
+                            // notice 事件没有 chatId，需要从 msg 中取
+                            const chatId = msg.group_id || msg.user_id;
+                            const isGroup = !!msg.group_id;
+                            await sendMsg(chatId, reply, isGroup);
+                            console.log(`✅ 插件 [${name}] 回复成功`);
                         }
                     } catch (e) {
-                        console.error(`❌ [${plugin.name}] 处理 notice 事件出错:`, e.message);
+                        console.error(`❌ 插件 [${name}] 执行报错:`, e.message);
                     }
                 }
-                return; // notice 事件处理完就结束
+                return; // notice 处理完就结束，不走下面的 message 逻辑
             }
 
-            // ============================================================
-            // 【普通消息：走 match/handle 流程】
-            // ============================================================
+            // ─────────────────────────────────────
+            // 【Message 事件 → 走常规文本插件】
+            // ─────────────────────────────────────
             const isGroup = msg.message_type === 'group';
             const chatId = isGroup ? msg.group_id : msg.user_id;
             const senderName = msg.sender?.card || msg.sender?.nickname || '未知';
@@ -89,14 +83,13 @@ function setupMessageHandler(ws) {
 
             // 提取文本
             let text = '';
-            let atId = '';
             let replyMsgId = '';
             if (Array.isArray(msg.message)) {
                 for (const seg of msg.message) {
                     if (seg.type === 'text') {
                         text += seg.data.text.trim();
                     } else if (seg.type === 'at') {
-                        atId = seg.data.qq || seg.data.id || seg.data.user_id;
+                        const atId = seg.data.qq || seg.data.id || seg.data.user_id;
                         text += `@[at:${atId}]`;
                     } else if (seg.type === 'reply') {
                         if (seg.data.text) {
@@ -115,27 +108,30 @@ function setupMessageHandler(ws) {
             const preview = text.length > 30 ? text.substring(0, 30) + '...' : text;
             console.log(`[收] [${isGroup ? '群' : '私'}] ${senderName}: ${preview}`);
 
-            // 遍历插件并匹配
-            for (const plugin of plugins) {
-                const handler = plugin.handler || plugin.module;
-                if (!handler) continue;
+            // 遍历插件匹配
+            for (const { name, handler } of plugins) {
+                if (!handler || typeof handler !== 'object') continue;
+                if (typeof handler.match !== 'function') continue;
 
-                if (typeof handler.match === 'function' && handler.match(text)) {
-                    const reply = await handler.handle({
-                        text,
-                        chatId,
-                        isGroup,
-                        senderName,
-                        senderQQ,
-                        role,
-                        replyMsgId,
-                        msg,
-                    });
-
-                    if (reply) {
-                        await sendMsg(chatId, reply, isGroup);
+                try {
+                    if (handler.match(text)) {
+                        const reply = await handler.handle({
+                            text,
+                            chatId,
+                            isGroup,
+                            senderName,
+                            senderQQ,
+                            role,
+                            replyMsgId,
+                            msg,
+                        });
+                        if (reply) {
+                            await sendMsg(chatId, reply, isGroup);
+                        }
+                        break;
                     }
-                    break;
+                } catch (e) {
+                    console.error(`❌ 插件 [${name}] 执行报错:`, e.message);
                 }
             }
         } catch (e) {
@@ -150,7 +146,7 @@ export async function sendMsg(chatId, reply, isGroup) {
 
     let messageSegs = [];
 
-    if (reply && typeof reply === 'object') {
+    if (reply && typeof reply === 'object' && reply.file) {
         const tempDir = path.join(__dirname, '../temp');
         if (!fs.existsSync(tempDir)) {
             fs.mkdirSync(tempDir);
@@ -160,19 +156,12 @@ export async function sendMsg(chatId, reply, isGroup) {
         const buffer = Buffer.from(reply.file.file);
         fs.writeFileSync(filePath, buffer);
 
-        messageSegs.push({
-            type: 'image',
-            data: { file: filePath },
-        });
-
+        messageSegs.push({ type: 'image', data: { file: filePath } });
         console.log(`[发] [${isGroup ? '群' : '私'} ${chatId}]: [图片]`);
     } else {
-        messageSegs.push({
-            type: 'text',
-            data: { text: String(reply) },
-        });
+        const replyStr = reply && reply.text ? reply.text : String(reply);
+        messageSegs.push({ type: 'text', data: { text: replyStr } });
 
-        const replyStr = String(reply);
         const rPreview = replyStr.length > 30 ? replyStr.substring(0, 30) + '...' : replyStr;
         console.log(`[发] [${isGroup ? '群' : '私'} ${chatId}]: ${rPreview}`);
     }
@@ -194,9 +183,7 @@ async function tryConnectClient(retryCount) {
     if (connected) return;
     if (retryCount > 3) {
         console.log(`⚠️  客户端连接失败已达3次，静默等待3分钟后重试...`);
-        clientTimer = setTimeout(() => {
-            tryConnectClient(1);
-        }, 3 * 60 * 1000);
+        clientTimer = setTimeout(() => { tryConnectClient(1); }, 3 * 60 * 1000);
         return;
     }
 

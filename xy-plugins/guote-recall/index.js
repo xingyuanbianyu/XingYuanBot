@@ -17,7 +17,7 @@ export default {
         console.log('[撤回] 开始执行');
         
         let text = msg.text || "";
-        let m = text.match(/\[引用ID:(\d+)\]/);
+        let m = text.match(/\[引用ID:(-?\d+)\]/);
         
         if (!m) {
             console.log('[撤回] 未找到引用ID');
@@ -25,7 +25,8 @@ export default {
         }
 
         let refId = parseInt(m[1]);
-        let commandMsgId = msg.message_id;  // 指令消息本身的ID
+        let commandMsgId = msg.msg?.message_id;  // 指令消息本身的ID
+        
 
         console.log(`[撤回] 目标消息ID: ${refId}`);
         console.log(`[撤回] 指令消息ID: ${commandMsgId}`);
