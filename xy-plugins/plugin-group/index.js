@@ -1,110 +1,172 @@
-import { readFileSync, existsSync, statSync } from 'fs';
-import { join, dirname } from 'path';
+import fs from 'fs';
+import path from 'path';
 import { fileURLToPath } from 'url';
-import { parse } from 'yaml';
+import YAML from 'yaml';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-let loadedPlugins = [];
-let groupConfig = null;
-
-// ============ 初始化：读取 config.yaml 并加载启用的子插件 ============
-async function init() {
-  const configPath = join(__dirname, 'config.yaml');
-  if (!existsSync(configPath)) {
-    console.log('⚠ config.yaml 不存在，跳过加载');
-    return;
-  }
-
-  const yamlStr = readFileSync(configPath, 'utf-8');
-  groupConfig = parse(yamlStr);  // ← 这里用 parse，不是 load
-
-  for (const cfg of groupConfig.plugins) {
-    if (!cfg.enabled) {
-      console.log(`⏭ 插件 [${cfg.name}] 未启用，跳过`);
-      continue;
+class PluginGroup {
+    constructor() {
+        this.name = 'plugin-group';
+        this.prefixes = [];
+        this.keywords = [];
+        this.loadedPlugins = [];
+        this._ready = false;
+        
+        this._loadConfig();
+        this._loadSubPlugins();
     }
 
-    const entryPath = join(__dirname, cfg.entry);
-    if (!existsSync(entryPath)) {
-      console.log(`⚠ 插件 [${cfg.name}] 入口文件不存在: ${cfg.entry}`);
-      continue;
+    _loadConfig() {
+        const configPath = path.join(__dirname, 'config.yaml');
+        if (!fs.existsSync(configPath)) return;
+        const config = YAML.parse(fs.readFileSync(configPath, 'utf8'));
+        const global = config.global || {};
+        
+        if (global.prefixes) {
+            this.prefixes = global.prefixes;
+        } else if (global.prefix) {
+            this.prefixes = [global.prefix];
+        } else {
+            this.prefixes = ['#'];
+        }
+        
+        this.keywords = global.keywords || [];
+    }
+    
+    // ✅ 改为接收 data 对象，从原始消息取文本
+    match(data) {
+        if (!data) return false;
+
+        // 从原始消息中取文本（不会被主框架剥离前缀）
+        const rawText = data.msg?.raw_message || data.msg?.message || '';
+        if (!rawText) return false;
+
+        // 1. 检测前缀（必须匹配至少一个）
+        const hasPrefix = this.prefixes.some(p => rawText.startsWith(p));
+        if (!hasPrefix) return false;
+
+        // 2. 检测关键词（如果配了，必须包含至少一个）
+        if (this.keywords && this.keywords.length > 0) {
+            const hasKeyword = this.keywords.some(k => rawText.includes(k));
+            if (!hasKeyword) return false;
+        }
+
+        return true;
     }
 
-    try {
-      const moduleURL = new URL(`file://${entryPath}`).href;
-      const mod = await import(moduleURL);
-      loadedPlugins.push({
-        name: cfg.name,
-        type: cfg.type,       // 'command' | 'event'
-        handler: mod.default || mod,
-      });
-      console.log(`✅ 插件 [${cfg.name}] 加载成功`);
-    } catch (e) {
-      console.error(`❌ 插件 [${cfg.name}] 加载失败: ${e.message}`);
-    }
-  }
+    async _loadSubPlugins() {
+        console.log(`🚀 [调试] 开始加载子插件...`);
 
-  console.log(`📦 成功加载 ${loadedPlugins.length} 个子插件`);
+        const configPath = path.join(__dirname, 'config.yaml');
+        if (!fs.existsSync(configPath)) {
+            console.log('❌ [调试] 找不到 config.yaml，路径:', configPath);
+            return;
+        }
+
+        const config = YAML.parse(fs.readFileSync(configPath, 'utf8'));
+        const global = config.global || {};
+        const plugins = config.plugins || [];
+
+        if (plugins.length === 0) {
+            console.log('⚠️ [调试] config.yaml 中 plugins 为空');
+            return;
+        }
+        console.log(`📦 发现 ${plugins.length} 个插件配置`);
+
+        for (const item of plugins) {
+            const pluginConfig = {
+                name: item.name,
+                enabled: item.enabled ?? global.enabled ?? true,
+                path: item.path,
+                entry: item.entry || 'index.js',
+                type: item.type ?? global.type ?? 'command',
+                timeout: item.timeout ?? global.timeout ?? 1000,
+                // ✅ 子插件也拿到自己的前缀和关键词配置
+                prefixes: item.prefixes || this.prefixes,
+                keywords: item.keywords || this.keywords,
+            };
+
+            if (!pluginConfig.enabled) {
+                console.log(`⏭️  [跳过] ${pluginConfig.name}（未启用）`);
+                continue;
+            }
+
+            try {
+                const fullPath = path.join(__dirname, pluginConfig.path, pluginConfig.entry);
+
+                if (!fs.existsSync(fullPath)) {
+                    console.log(`❌ [失败] ${pluginConfig.name} 找不到文件: ${fullPath}`);
+                    continue;
+                }
+
+                const mod = await import(`file://${fullPath}`);
+                const PluginClass = mod.default;
+
+                if (typeof PluginClass !== 'function') {
+                    console.log(`❌ [失败] ${pluginConfig.name} 导出的不是类`);
+                    continue;
+                }
+
+                const instance = new PluginClass(pluginConfig);
+                instance.pluginConfig = pluginConfig;
+                this.loadedPlugins.push(instance);
+
+                console.log(`✅ [成功] ${pluginConfig.name}（类型: ${pluginConfig.type}, 超时: ${pluginConfig.timeout}ms）`);
+            } catch (err) {
+                console.error(`❌ [失败] ${pluginConfig.name}:`, err.message);
+            }
+        }
+
+        this._ready = true;
+        console.log(`🎉 共加载 ${this.loadedPlugins.length} 个子插件`);
+    }
+
+    async handle(data) {
+        const postType = data?.msg?.post_type || data?.post_type;
+        
+        // ✅ 获取原始消息
+        const rawText = data.msg?.raw_message || data.msg?.message || '';
+
+        console.log(`📥 [plugin-group] 收到事件 postType=${postType}, 原始消息: ${rawText}, 已加载插件数=${this.loadedPlugins.length}`);
+
+        if (!this._ready || this.loadedPlugins.length === 0) return null;
+
+        const targetType = postType === 'message' ? 'command' : 'event';
+
+        for (const plugin of this.loadedPlugins) {
+            const pluginType = plugin.pluginConfig?.type || 'command';
+
+            if (pluginType !== targetType) continue;
+
+            // ✅ 在 handle 里也用原始消息做匹配（双重保险，不依赖主框架调 match）
+            const config = plugin.pluginConfig || {};
+            const prefixes = config.prefixes || this.prefixes;
+            const keywords = config.keywords || this.keywords;
+
+            // 前缀匹配
+            const hasPrefix = prefixes.some(p => rawText.startsWith(p));
+            if (!hasPrefix) continue;
+
+            // 关键词匹配
+            if (keywords && keywords.length > 0) {
+                const hasKeyword = keywords.some(k => rawText.includes(k));
+                if (!hasKeyword) continue;
+            }
+
+            console.log(`🔄 [plugin-group] 调用子插件: ${plugin.pluginConfig?.name}`);
+
+            try {
+                if (typeof plugin.handle === 'function') {
+                    const result = await plugin.handle(data);
+                    if (result !== undefined && result !== null) return result;
+                }
+            } catch (err) {
+                console.error(`[plugin-group] 子插件 ${plugin.pluginConfig?.name} 报错:`, err.message);
+            }
+        }
+        return null;
+    }
 }
-
-// ============ 超时包装器 ============
-function withTimeout(promise, ms) {
-  let timer;
-  const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`超时 ${ms}ms`)), ms);
-  });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
-}
-
-// ============ 消息处理入口 ============
-export default async function handle(msg) {
-  // 懒加载：首次调用时初始化
-  if (loadedPlugins.length === 0 && !groupConfig) {
-    await init();
-  }
-
-  // 提取消息文本
-  let text = '';
-  if (Array.isArray(msg.message)) {
-    for (const seg of msg.message) {
-      if (seg.type === 'text') {
-        text += seg.data.text.trim();
-      }
-    }
-  } else if (typeof msg.message === 'string') {
-    text = msg.message;
-  }
-
-  // 遍历已启用的子插件
-  for (const plugin of loadedPlugins) {
-    const handler = plugin.handler;
-
-    // --- 指令类型：需要匹配 ---
-    if (plugin.type === 'command') {
-      if (typeof handler.match !== 'function' || !handler.match(text)) {
-        continue; // 不匹配 → 跳过
-      }
-    }
-
-    try {
-      const reply = await withTimeout(
-        handler.handle({ text, msg }),
-        groupConfig.timeout
-      );
-
-      if (reply) {
-        console.log(`↩ [${plugin.name}] 已回复，终止传递`);
-        return reply; // ✅ 有回复 → 终止循环，不再传给后续插件
-      }
-    } catch (e) {
-      console.log(`⏭ [${plugin.name}] ${e.message}，跳过`);
-    }
-  }
-
-  // 所有插件都没有回复
-  return null;
-}
-
-// 启动时预加载
-init();
+   
+export default new PluginGroup();

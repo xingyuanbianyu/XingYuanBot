@@ -10,6 +10,12 @@
 - 公开反馈
 - QQ群反馈：1026165109
 - Issues中进行反馈
+- Gutee[报告Bug](https://gitee.com/starry-language/XingYuanBot/issues/IK9BZH)
+- Gitee[功能建议](https://gitee.com/starry-language/XingYuanBot/issues/IK9BZM)
+- GitHub[报告Bug](https://github.com/xingyuanbianyu/XingYuanBot/issues/1)
+- GitHub[功能建议](https://github.com/xingyuanbianyu/XingYuanBot/issues/2)
+- GitCode[报告Bug](https://gitcode.com/xingyuan3739/XingYuanBot/issues/1)
+- GitCode[功能建议](https://gitcode.com/xingyuan3739/XingYuanBot/issues/2)
 
 ## ✨ 功能特性
 
@@ -89,16 +95,13 @@ pnpm py或者pnpm run py → python script.py
 ```
 ### 端口设计
 
-- 3001 ws服务端
 - 3000 http服务端
 - 3002 http服务端
-- 3004 ws客户端
 
 ### 端口介绍
-- 3001 用于ws连接XingYuan-Bot
+
 - 3000 该端口为发送消息设计
 - 3002：群管专用接口（处理禁言、踢人等指令）
-- 3004:用于后续服务，也可以进行连接获取消息和发消息
 
 ### 📅 开发计划 (Roadmap)
 
@@ -147,5 +150,31 @@ pnpm py或者pnpm run py → python script.py
 - 重新优化了撤回功能
 ```
 解决了无法撤回的问题，添加了群聊撤回以及撤回发消息的撤回指令
+```
+- 更新了插件分组功能
+```
+启动或禁用插件功能请进入xy-plugins/plugin-group目录，编辑config.yaml，只需要将enabled的值改成false或者true
+false代表禁用
+true代表启动
+```
+- 添加了黑名单和白名单功能
+```
+添加进黑名单的用户或者群聊，不会进行处理
+白名单功能，具体有什么功能尚未开发
+```
+- 优化了客户端与服务端的配置
+```
+打开xy-data文件夹找到bot_server.yaml或者bot_clint.yaml修改配置即可，下载即配置好了，以下配置
+bot_server.yaml的
+server:
+    host: 127.0.0.1
+    port: 3001
+    token: ''
+bot_clinet的
+clinet:
+    host: 127.0.0.1
+    port: 3004
+    token: ''
+只需要修改你对应的服务端或者客户端即可        
 ```
 - 待上传的优化

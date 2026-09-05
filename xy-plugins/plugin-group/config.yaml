@@ -1,26 +1,23 @@
-# 插件组调度配置
-group:
-  name: plugin-group
-  timeout: 1000          # 单插件超时 ms
+# 全局默认配置
+global:
+  enabled: true       # 默认全部启用
+  type: command       # 默认类型
+  timeout: 1000       # 默认超时 1000毫秒（1秒）
 
-# 子插件列表（按顺序匹配）
+# 插件列表
 plugins:
-  - name: plugin-a
-    entry: ./plugin/plugin-a.js
-    type: command        # command(指令) | event(事件)
-    enabled: false
+  - name: daily-tool
+    enabled: true
+    path: ./plugin
+    entry: index.js
+    type: command     # 这里的配置会覆盖全局的 type
+    timeout: 3500     # 这里的超时(3.5s)会覆盖全局的 1000ms
+    keywords: ['群打卡']
+    prefiex: '#'
 
-  - name: plugin-b
-    entry: ./plugin/plugin-b.js
-    type: command
-    enabled: false       # 禁用 = 不加载、不匹配、不传递
-
-  - name: plugin-c
-    entry: ./plugin/plugin-c.js
+  - name: plugin-welcome        # ← 新增
+    enabled: true
+    path: ./plugin
+    entry: inde.js
     type: event
-    enabled: false
-
-  - name: plugin-welcome
-    entry: ./plugin/plugin-welcome.js
-    type: even
-    enabled: false
+    timeout: 3000

@@ -1,5 +1,4 @@
 node_modules/
-xy-data/
 *.pem
 *.key
 *.env
@@ -20,4 +19,5 @@ xy-plugins/GH-plugin
 temp/*.png
 temp/*.txt
 *.lnk
-xy-plugins/plugin-group/plugin/
+xy-plugins\plugin-group\plugin/index.js
+xy-plugins\plugin-group\plugin/inde.js

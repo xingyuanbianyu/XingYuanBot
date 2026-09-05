@@ -1,5 +1,3 @@
 {
-  "name": "plugin-group",
-  "description": "轻量级子插件调度器",
-  "keywords": []
+  "entry": "index.js"
 }

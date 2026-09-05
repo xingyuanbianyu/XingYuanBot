@@ -1,146 +1,222 @@
 import { WebSocket, WebSocketServer } from 'ws';
 import { loadPlugins } from './plugin-loader.js';
 import { getRole } from '../xy-config/config/permissions.js';
+import config from './config.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import fetch from 'node-fetch';
+import YAML from 'yaml';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// ==================== 配置 ====================
-const WS_SERVER_PORT = process.env.WS_SERVER_PORT || 3001; // 服务端监听端口
-const WS_CLIENT_PORT = process.env.WS_CLIENT_PORT || 3004; // 客户端连接端口
-const REMOTE_WS_URL = process.env.REMOTE_WS_URL || `ws://127.0.0.1:${WS_CLIENT_PORT}`;
-const AI_DATA_API = 'http://127.0.0.1:8080/receive';
+// ==================== 配置读取 ====================
+function loadConfig(relativePath) {
+    try {
+        const fullPath = path.join(__dirname, relativePath);
+        if (fs.existsSync(fullPath)) {
+            const fileContents = fs.readFileSync(fullPath, 'utf8');
+            return YAML.parse(fileContents) || {};
+        }
+    } catch (e) {
+        console.error(`❌ 读取配置 ${relativePath} 失败:`, e.message);
+    }
+    return {};
+}
+
+const serverCfg = loadConfig('../xy-data/bot_server.yaml');
+const clientCfg = loadConfig('../xy-data/bot_client.yaml');
+
+// 优先从 YAML 配置文件读取，没有则 fallback 到环境变量或默认值
+const WS_PORT  = serverCfg.server?.port ?? Number(process.env.WS_PORT) ?? 3001;
+const WS_HOST  = serverCfg.server?.host ?? process.env.WS_HOST ?? '127.0.0.1';
+
+const clientHost = clientCfg.client?.host ?? process.env.CLIENT_HOST ?? '127.0.0.1';
+const clientPort = clientCfg.client?.port ?? Number(process.env.CLIENT_PORT) ?? 3001;
+const REMOTE_WS_URL = `ws://${clientHost}:${clientPort}`;
+
+console.log(`[配置] 服务端监听: ${WS_HOST}:${WS_PORT}`);
+console.log(`[配置] 客户端目标: ${REMOTE_WS_URL}`);
+
+// ==================== 以下逻辑全部保持不变 ====================
 
 let plugins = [];
 let wsClient = null;
 let wsServer = null;
+let connected = false;
 let clientTimer = null;
 
-// ==================== 🔴 向 Python 项目静默发送数据 ====================
-async function sendDataToAI(text, senderName, chatId, isGroup) {
-    if (!text.trim()) return;
-    try {
-        fetch(AI_DATA_API, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                time: new Date().toISOString(),
-                chatId: chatId,
-                isGroup: isGroup,
-                sender: senderName,
-                text: text
-            })
-        }).catch(() => {});
-    } catch (error) {}
-}
-
-// ==================== 清理函数 ====================
-
+// ==================== 停止客户端重试 ====================
 function stopClientRetry() {
     if (clientTimer) {
         clearTimeout(clientTimer);
         clientTimer = null;
-        console.log('🛑 客户端重连任务已停止');
     }
 }
 
+// ==================== 关闭服务端 ====================
 function stopServer() {
     if (wsServer) {
-        wsServer.close(() => {
-            console.log('🛑 本地服务端已关闭');
-        });
+        wsServer.close();
         wsServer = null;
+        console.log('✅ 服务端已关闭');
     }
 }
 
-// ==================== 消息处理（通用） ====================
+// ==================== 黑名单检查 ====================
+function isBlacklisted(userId, groupId) {
+    const qq = String(userId);
+    const blacklistQQ = config.blacklist_qq || [];
+    const blacklistGroup = config.blacklist_group || [];
+
+    // QQ 号命中黑名单
+    if (blacklistQQ.includes(qq)) {
+        console.log(`🚫 黑名单拦截: QQ ${qq}`);
+        return true;
+    }
+
+    // 群号命中黑名单
+    if (groupId && blacklistGroup.includes(String(groupId))) {
+        console.log(`🚫 黑名单拦截: 群 ${groupId}`);
+        return true;
+    }
+
+    return false;
+}
+
+// ==================== 消息处理（两种模式共用） ====================
 function setupMessageHandler(ws) {
     ws.on('message', async (data) => {
         try {
             const msg = JSON.parse(data.toString());
+
+            // 🔴 只处理 message 和 notice
             if (msg.post_type !== 'message' && msg.post_type !== 'notice') return;
 
+            // ─────────────────────────────────────
+            // 【Notice 事件 → 走 event 类型插件】
+            // ─────────────────────────────────────
             if (msg.post_type === 'notice') {
-                console.log(`📡 收到通知事件: ${msg.notice_type}`);
+                console.log(`📡 收到通知事件: notice_type=${msg.notice_type}, sub_type=${msg.sub_type || '无'}`);
+
+                // 黑名单检查
+                const noticeUserId = msg.user_id || msg.operator_id;
+                const noticeGroupId = msg.group_id;
+                if (isBlacklisted(noticeUserId, noticeGroupId)) return;
+
                 for (const { name, handler } of plugins) {
-                    if (handler?.type === 'event' && typeof handler.handle === 'function') {
-                        try {
-                            const reply = await handler.handle({ text: '', msg });
-                            if (reply && reply.text) {
-                                const chatId = msg.group_id || msg.user_id;
-                                await sendMsg(chatId, reply, !!msg.group_id);
-                            }
-                        } catch (e) { console.error(`❌ 插件 [${name}] 报错:`, e.message); }
+                    if (!handler || typeof handler !== 'object') continue;
+                    if (handler.type !== 'event') continue;
+                    if (typeof handler.handle !== 'function') continue;
+
+                    try {
+                        const reply = await handler.handle({ text: '', msg });
+                        if (reply && reply.text) {
+                            const chatId = msg.group_id || msg.user_id;
+                            const isGroup = !!msg.group_id;
+                            await sendMsg(chatId, reply, isGroup);
+                            console.log(`✅ 插件 [${name}] 回复成功`);
+                        }
+                    } catch (e) {
+                        console.error(`❌ 插件 [${name}] 执行报错:`, e.message);
                     }
                 }
                 return;
             }
 
+            // ─────────────────────────────────────
+            // 【Message 事件 → 走常规文本插件】
+            // ─────────────────────────────────────
             const isGroup = msg.message_type === 'group';
             const chatId = isGroup ? msg.group_id : msg.user_id;
             const senderName = msg.sender?.card || msg.sender?.nickname || '未知';
             const senderQQ = String(msg.user_id);
             const role = getRole(senderQQ);
 
+            // 🔴 黑名单拦截
+            if (isBlacklisted(senderQQ, isGroup ? msg.group_id : null)) return;
+
             let text = '';
+            let replyMsgId = '';
             if (Array.isArray(msg.message)) {
                 for (const seg of msg.message) {
-                    if (seg.type === 'text') text += seg.data.text.trim();
-                    else if (seg.type === 'at') text += `@[at:${seg.data.qq || seg.data.id}]`;
-                    else if (seg.type === 'reply') {
-                        const refId = seg.data?.id || seg.data?.message_id;
-                        text += `[引用ID:${refId}]`;
+                    if (seg.type === 'text') {
+                        text += seg.data.text.trim();
+                    } else if (seg.type === 'at') {
+                        const atId = seg.data.qq || seg.data.id || seg.data.user_id;
+                        text += `@[at:${atId}]`;
+                    } else if (seg.type === 'reply') {
+                        if (seg.data.text) {
+                            text += `[引用:${seg.data.text}]`;
+                        } else if (seg.data.id) {
+                            text += `[引用ID:${seg.data.id}]`;
+                        }
                     }
                 }
-            } else {
-                text = msg.raw_message || msg.message || '';
+            } else if (msg.raw_message) {
+                text = msg.raw_message;
+            } else if (typeof msg.message === 'string') {
+                text = msg.message;
             }
 
             const preview = text.length > 30 ? text.substring(0, 30) + '...' : text;
             console.log(`[收] [${isGroup ? '群' : '私'}] ${senderName}: ${preview}`);
 
-            sendDataToAI(text, senderName, chatId, isGroup);
-
             for (const { name, handler } of plugins) {
-                if (handler?.match && typeof handler.match === 'function' && handler.match(text)) {
-                    try {
+                if (!handler || typeof handler !== 'object') continue;
+                if (typeof handler.match !== 'function') continue;
+
+                try {
+                    if (handler.match(text)) {
                         const reply = await handler.handle({
-                            text, chatId, isGroup, senderName, senderQQ, role, msg,
+                            text,
+                            chatId,
+                            isGroup,
+                            senderName,
+                            senderQQ,
+                            role,
+                            replyMsgId,
+                            msg,
                         });
-                        if (reply) await sendMsg(chatId, reply, isGroup);
+                        if (reply) {
+                            await sendMsg(chatId, reply, isGroup);
+                        }
                         break;
-                    } catch (e) { console.error(`❌ 插件 [${name}] 报错:`, e.message); }
+                    }
+                } catch (e) {
+                    console.error(`❌ 插件 [${name}] 执行报错:`, e.message);
                 }
             }
-        } catch (e) { console.error('❌ 消息解析错误:', e); }
-    });
-
-    ws.on('close', () => {
-        console.log('🔌 连接已断开，准备重置状态...');
-        wsClient = null;
-        if (!wsServer) startServer();
-        if (!clientTimer) tryConnectClient(1);
+        } catch (e) {
+            console.error('❌ 消息处理出错:', e);
+        }
     });
 }
 
 // ==================== 发送消息 ====================
 export async function sendMsg(chatId, reply, isGroup) {
     if (!wsClient) return;
+
     let messageSegs = [];
 
     if (reply && typeof reply === 'object' && reply.file) {
         const tempDir = path.join(__dirname, '../temp');
-        if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir);
-        const filePath = path.join(tempDir, 'pub.png');
-        fs.writeFileSync(filePath, Buffer.from(reply.file.file));
+        if (!fs.existsSync(tempDir)) {
+            fs.mkdirSync(tempDir);
+        }
+        const fileName = 'pub.png';
+        const filePath = path.join(tempDir, fileName);
+        const buffer = Buffer.from(reply.file.file);
+        fs.writeFileSync(filePath, buffer);
+
         messageSegs.push({ type: 'image', data: { file: filePath } });
+        console.log(`[发] [${isGroup ? '群' : '私'} ${chatId}]: [图片]`);
     } else {
         const replyStr = reply && reply.text ? reply.text : String(reply);
         messageSegs.push({ type: 'text', data: { text: replyStr } });
+
+        const rPreview = replyStr.length > 30 ? replyStr.substring(0, 30) + '...' : replyStr;
+        console.log(`[发] [${isGroup ? '群' : '私'} ${chatId}]: ${rPreview}`);
     }
 
     const payload = {
@@ -151,68 +227,63 @@ export async function sendMsg(chatId, reply, isGroup) {
             message: messageSegs,
         },
     };
-    try {
-        wsClient.send(JSON.stringify(payload));
-    } catch (e) { console.error('发送失败，连接可能已断开'); }
+
+    wsClient.send(JSON.stringify(payload));
 }
 
-// ==================== 客户端模式：主动连接 ====================
+// ==================== 客户端模式：主动去连 ====================
 async function tryConnectClient(retryCount) {
-    if (wsClient) return;
-
+    if (connected) return;
     if (retryCount > 3) {
+        console.log(`⚠️  客户端连接失败已达3次，静默等待3分钟后重试...`);
         clientTimer = setTimeout(() => { tryConnectClient(1); }, 3 * 60 * 1000);
         return;
     }
 
+    console.log(`🔄 客户端尝试连接 ${REMOTE_WS_URL}... (第 ${retryCount}/3 次)`);
+
     try {
-        console.log(`🔌 正在尝试连接远程服务端: ${REMOTE_WS_URL} (尝试次数: ${retryCount})`);
         const ws = new WebSocket(REMOTE_WS_URL);
 
         await new Promise((resolve, reject) => {
-            ws.on('open', () => resolve());
-            ws.on('error', (err) => reject(err));
+            ws.on('open', () => { resolve(); });
+            ws.on('error', (err) => { reject(err); });
             setTimeout(() => reject(new Error('timeout')), 5000);
         });
 
+        connected = true;
         wsClient = ws;
-        console.log(`✅ 客户端模式激活：已连接到 ${REMOTE_WS_URL}`);
-
-        // 连上了远程服务端，关闭本地服务端
-        stopServer();
+        console.log(`✅ 客户端已连接: ${REMOTE_WS_URL}`);
 
         setupMessageHandler(ws);
+        stopServer();
 
     } catch (err) {
-        console.log(`连接失败: ${err.message}`);
+        console.log(`❌ 第 ${retryCount} 次连接失败: ${err.message}`);
         await new Promise(r => setTimeout(r, 2000));
         tryConnectClient(retryCount + 1);
     }
 }
 
-// ==================== 服务端模式：被动监听 ====================
+// ==================== 服务端模式：等待被连 ====================
 function startServer() {
-    if (wsServer) return;
-
-    wsServer = new WebSocketServer({ port: WS_SERVER_PORT });
-    console.log(`📡 服务端模式激活：正在监听端口 ${WS_SERVER_PORT}，等待连接...`);
+    wsServer = new WebSocketServer({ port: WS_PORT, host: WS_HOST });
+    console.log(`📡 服务端已启动，监听 ${WS_HOST}:${WS_PORT}...`);
+    console.log(`   等待 NapCat 或其他客户端连接...`);
 
     wsServer.on('connection', (ws) => {
-        console.log(`✅ 服务端收到连接：远程客户端已接入`);
-
-        // 被连上了，停止主动重连
-        stopClientRetry();
-
-        if (wsClient && wsClient !== ws) {
-            wsClient.terminate();
+        if (connected) {
+            console.log('⚠️  已有连接，拒绝新连接');
+            ws.close();
+            return;
         }
 
+        connected = true;
         wsClient = ws;
-        setupMessageHandler(ws);
-    });
+        console.log(`✅ 客户端已连接（服务端模式）`);
 
-    wsServer.on('error', (err) => {
-        console.error('服务端启动失败:', err.message);
+        setupMessageHandler(ws);
+        stopClientRetry();
     });
 }
 
