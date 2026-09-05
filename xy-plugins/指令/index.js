@@ -55,7 +55,10 @@ export default {
             const { spawn } = await import('child_process');
         
             // 1. 将当前 Node 进程的 PID 传给 Python，方便它等下“杀旧开新”
-            const pyProcess = spawn('python', ['script.py', process.pid.toString()], {
+            // 判断当前系统，如果是 win32 就用 'python'，否则（Linux/Mac）用 'python3'
+            const pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
+            // 下面这行里的 'python' 替换成变量 pythonCmd
+            const pyProcess = spawn(pythonCmd, ['script.py', process.pid.toString()], {
                 detached: true,
                 stdio: 'ignore'
             });
