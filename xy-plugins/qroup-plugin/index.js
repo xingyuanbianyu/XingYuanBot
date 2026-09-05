@@ -201,7 +201,7 @@ export default {
     const isMaster = role === 'master';
 
     // 点赞功能（无需任何权限，所有人都可以用）
-    if (cmd === '点赞' || cmd === '赞') {
+    if (cmd === '点赞' || cmd === '赞' || cmd === '赞我') {
       const isFriend = await checkIsFriend(senderQQ);
       const totalLikes = isFriend ? 10 : 50;
       const perRequest = 10;
