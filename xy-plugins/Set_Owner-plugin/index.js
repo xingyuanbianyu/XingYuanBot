@@ -91,6 +91,8 @@ export default {
         const code = generateCode();
         verificationCodes.set(senderQQ, { code, time: Date.now() });
 
+        const makedCode = '*'.repeat(code.length);
+
         console.log('\n╔══════════════════════════════════════╗');
         console.log('       📌 大主人权限设置验证码');
         console.log(`       QQ号  : ${senderQQ}`);
@@ -98,7 +100,7 @@ export default {
         console.log(`       指令  : 设置主人 ${senderQQ} ${code}`);
         console.log('╚══════════════════════════════════════╝\n');
 
-        return `✅ 验证码已生成，请在控制台查看，然后发送："设置主人 ${senderQQ} ${code}"（5分钟内有效）`;
+        return `✅ 验证码已生成，请在控制台查看，然后发送："设置主人 ${senderQQ} ${makedCode}"（5分钟内有效）`;
 
       } else if (args.length === 3) {
         // 验证阶段：设置主人 <QQ> <验证码>

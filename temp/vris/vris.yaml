@@ -1,0 +1,3 @@
+welcome: "[CQ:at,qq={qq}] 欢迎新人入群！🎉"
+decrease: "💀 哎呀，有人退群了（QQ: {qq}）"
+kick: "💀 哎呀，有人退群了（QQ: {qq}） (被 {operator} 请出去了)"

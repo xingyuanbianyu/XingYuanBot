@@ -1,9 +1,10 @@
 import { hasPermission } from '../../../xy-config/config/permissions.js';
+import axios from 'axios'; // 引入 axios
 
 class DailyTool {
     constructor(pluginConfig) {
         this.pluginConfig = pluginConfig;
-        // 你的 NapCatQQ / LLOneBot API 基础地址（请根据实际情况修改端口）
+        // 你的 NapCatQQ / LLOneBot API 基础地址
         this.apiBase = 'http://127.0.0.1:3000'; 
     }
 
@@ -20,8 +21,9 @@ class DailyTool {
 
         try {
             // 1. 获取机器人的所有群列表
-            const groupListResponse = await fetch(`${this.apiBase}/get_group_list`);
-            const groupData = await groupListResponse.json();
+            // 使用 axios.get 替代 fetch
+            const groupListResponse = await axios.get(`${this.apiBase}/get_group_list`);
+            const groupData = groupListResponse.data;
             
             if (groupData.status !== 'ok' || !groupData.data) {
                 return { type: 'reply', message: '❌ 获取群列表失败，请检查 NapCatQQ 是否正常运行' };
@@ -39,15 +41,12 @@ class DailyTool {
             for (const group of groups) {
                 const groupId = group.group_id;
                 try {
-                    // NapCatQQ 原生群打卡接口
-                    await fetch(`${this.apiBase}/set_group_sign`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ group_id: groupId })
-                    });
+                    // 使用 axios.post 替代 fetch
+                    await axios.post(`${this.apiBase}/set_group_sign`, { group_id: groupId });
                     successCount++;
                 } catch (e) {
                     failCount++;
+                    console.error(`[daily-tool] 群 ${groupId} 打卡失败:`, e.message);
                 }
             }
 

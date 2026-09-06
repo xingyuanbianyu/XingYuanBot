@@ -34,26 +34,22 @@ class PluginGroup {
         this.keywords = global.keywords || [];
     }
     
-    // ✅ 改为接收 data 对象，从原始消息取文本
     match(data) {
-        if (!data) return false;
-
-        // 从原始消息中取文本（不会被主框架剥离前缀）
-        const rawText = data.msg?.raw_message || data.msg?.message || '';
-        if (!rawText) return false;
-
-        // 1. 检测前缀（必须匹配至少一个）
-        const hasPrefix = this.prefixes.some(p => rawText.startsWith(p));
-        if (!hasPrefix) return false;
-
-        // 2. 检测关键词（如果配了，必须包含至少一个）
-        if (this.keywords && this.keywords.length > 0) {
-            const hasKeyword = this.keywords.some(k => rawText.includes(k));
-            if (!hasKeyword) return false;
+        // 子插件还没加载完，不拦截
+        if (!this._ready || this.loadedPlugins.length === 0) {
+            return false;
         }
 
-        return true;
+        // 只有当至少一个子插件匹配时，才返回 true
+        for (const plugin of this.loadedPlugins) {
+            if (plugin.match && plugin.match(data)) {
+                return true;
+            }
+        }
+
+        return false;
     }
+
 
     async _loadSubPlugins() {
         console.log(`🚀 [调试] 开始加载子插件...`);
@@ -82,7 +78,6 @@ class PluginGroup {
                 entry: item.entry || 'index.js',
                 type: item.type ?? global.type ?? 'command',
                 timeout: item.timeout ?? global.timeout ?? 1000,
-                // ✅ 子插件也拿到自己的前缀和关键词配置
                 prefixes: item.prefixes || this.prefixes,
                 keywords: item.keywords || this.keywords,
             };
@@ -101,14 +96,19 @@ class PluginGroup {
                 }
 
                 const mod = await import(`file://${fullPath}`);
-                const PluginClass = mod.default;
+                const PluginExport = mod.default;
 
-                if (typeof PluginClass !== 'function') {
-                    console.log(`❌ [失败] ${pluginConfig.name} 导出的不是类`);
+                let instance;
+
+                if (typeof PluginExport === 'function') {
+                    instance = new PluginExport(pluginConfig);
+                } else if (typeof PluginExport === 'object' && PluginExport !== null) {
+                    instance = PluginExport;
+                } else {
+                    console.log(`❌ [失败] ${pluginConfig.name} 导出的既不是类也不是对象`);
                     continue;
                 }
 
-                const instance = new PluginClass(pluginConfig);
                 instance.pluginConfig = pluginConfig;
                 this.loadedPlugins.push(instance);
 
@@ -122,51 +122,38 @@ class PluginGroup {
         console.log(`🎉 共加载 ${this.loadedPlugins.length} 个子插件`);
     }
 
-    async handle(data) {
-        const postType = data?.msg?.post_type || data?.post_type;
-        
-        // ✅ 获取原始消息
-        const rawText = data.msg?.raw_message || data.msg?.message || '';
-
-        console.log(`📥 [plugin-group] 收到事件 postType=${postType}, 原始消息: ${rawText}, 已加载插件数=${this.loadedPlugins.length}`);
-
-        if (!this._ready || this.loadedPlugins.length === 0) return null;
-
-        const targetType = postType === 'message' ? 'command' : 'event';
+    async handle(data, context) {
+        // 确保子插件已加载完成
+        if (!this._ready || this.loadedPlugins.length === 0) {
+            console.log('[PluginGroup] 子插件尚未加载完成，跳过处理');
+            return null;
+        }
 
         for (const plugin of this.loadedPlugins) {
-            const pluginType = plugin.pluginConfig?.type || 'command';
-
-            if (pluginType !== targetType) continue;
-
-            // ✅ 在 handle 里也用原始消息做匹配（双重保险，不依赖主框架调 match）
-            const config = plugin.pluginConfig || {};
-            const prefixes = config.prefixes || this.prefixes;
-            const keywords = config.keywords || this.keywords;
-
-            // 前缀匹配
-            const hasPrefix = prefixes.some(p => rawText.startsWith(p));
-            if (!hasPrefix) continue;
-
-            // 关键词匹配
-            if (keywords && keywords.length > 0) {
-                const hasKeyword = keywords.some(k => rawText.includes(k));
-                if (!hasKeyword) continue;
-            }
-
-            console.log(`🔄 [plugin-group] 调用子插件: ${plugin.pluginConfig?.name}`);
+            // 如果子插件有自己的 match 方法，先检查
+            if (plugin.match && !plugin.match(data)) continue;
 
             try {
-                if (typeof plugin.handle === 'function') {
-                    const result = await plugin.handle(data);
-                    if (result !== undefined && result !== null) return result;
+                const result = await plugin.handle(data, context);
+            
+                // 如果子插件返回的是 { type: 'reply', message: '...' }
+                if (result && typeof result === 'object') {
+                    if (result.message) {
+                        return result.message; // 只返回字符串
+                    }
+                }
+            
+                // 如果子插件直接返回字符串，就原样返回
+                if (typeof result === 'string') {
+                    return result;
                 }
             } catch (err) {
-                console.error(`[plugin-group] 子插件 ${plugin.pluginConfig?.name} 报错:`, err.message);
+                console.error(`[PluginGroup] 子插件 ${plugin.pluginConfig?.name} 执行出错:`, err.message);
             }
         }
-        return null;
+        
+    return null;
     }
+
 }
-   
 export default new PluginGroup();
