@@ -1,0 +1,69 @@
+name: Auto Label Issues
+
+on:
+  issues:
+    types:
+      - opened
+      - edited
+      - reopened
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Auto Label based on Title and Template
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const issue = context.payload.issue;
+            const title = issue.title.toLowerCase();
+            const body = issue.body ? issue.body.toLowerCase() : '';
+            
+            // 定义标签映射规则
+            const labelsToAdd = [];
+
+            // 1. 根据标题前缀判断
+            if (title.startsWith('[bug]') || title.includes('bug')) {
+              labelsToAdd.push('bug');
+            } else if (title.startsWith('[feature]') || title.includes('feature')) {
+              labelsToAdd.push('enhancement');
+            } else if (title.startsWith('[question]') || title.includes('question')) {
+              labelsToAdd.push('question');
+            }
+
+            // 2. 如果标题没明确标识，尝试从正文内容判断（针对旧版 Markdown 模板或手动创建的 Issue）
+            if (labelsToAdd.length === 0) {
+              if (body.includes('### 描述 bug') || body.includes('reproduction steps')) {
+                labelsToAdd.push('bug');
+              } else if (body.includes('### 描述你想要的解决方案') || body.includes('suggested solution')) {
+                labelsToAdd.push('enhancement');
+              } else if (body.includes('### 问题描述') || body.includes('how to configure')) {
+                labelsToAdd.push('question');
+              }
+            }
+
+            // 3. 检查是否包含重复信息
+            if (title.includes('duplicate') || body.includes('already exists')) {
+              labelsToAdd.push('duplicate');
+            }
+
+            // 4. 执行打标
+            if (labelsToAdd.length > 0) {
+              console.log(`Adding labels: ${labelsToAdd.join(', ')}`);
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                labels: labelsToAdd
+              });
+            } else {
+              console.log('No specific labels matched.');
+            }
+
+            // 此workflow需要 issues: write 权限才能修改标签，具体可以去仓库设置找权限

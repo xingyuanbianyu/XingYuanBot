@@ -1,0 +1,59 @@
+name: 📌 功能增强请求
+description: 提出对现有功能的改进建议
+title: "[Enhancement] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢您为项目提供改进建议！请详细描述当前的痛点以及您期望的改进方案。
+
+  - type: textarea
+    id: current-pain-point
+    attributes:
+      label: 当前问题 / 痛点
+      description: 描述现有功能的不足或使用中的不便之处。
+      placeholder: 例如：目前机器人在处理多轮对话时，上下文记忆容易丢失，导致用户体验中断。
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed-solution
+    attributes:
+      label: 建议方案
+      description: 提出你希望如何改进。
+      placeholder: 例如：建议在对话引擎中增加一个‘上下文缓存层’，保留最近5轮对话内容，提升连贯性。
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-benefits
+    attributes:
+      label: 预期收益
+      description: 说明这个增强能带来什么好处。
+      placeholder: 例如：提升用户满意度，减少重复提问，增强机器人智能感。
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional-info
+    attributes:
+      label: 附加信息（可选）
+      description: 相关截图/日志、类似功能参考等。
+      placeholder: |
+        - 相关截图/日志（如有）
+        - 类似功能参考（如其他机器人如何实现）
+    validations:
+      required: false
+
+  - type: dropdown
+    id: willingness-to-help
+    attributes:
+      label: 是否愿意协助开发或测试
+      description: 我们非常欢迎社区贡献！
+      options:
+        - 否
+        - 是，我可以协助测试
+        - 是，我愿意提交 PR 协助开发
+    validations:
+      required: true

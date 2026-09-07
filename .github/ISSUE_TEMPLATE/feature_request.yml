@@ -1,0 +1,45 @@
+name: ✨ 功能建议
+description: 为这个项目提出一个新功能的想法
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢您提出新功能建议！请尽可能详细地描述您的想法，以便我们更好地评估。
+
+  - type: textarea
+    id: problem-related
+    attributes:
+      label: 你的功能请求是否与某个问题有关？请描述。
+      description: 清晰简洁地描述问题所在。
+      placeholder: 例如：当 [...] 时，我总是感到困扰，因为...
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: 描述你想要的解决方案
+      description: 清晰简洁地描述你希望发生什么。
+      placeholder: 例如：我希望增加一个按钮，点击后可以...
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 描述你考虑过的替代方案
+      description: 清晰简洁地描述你考虑过的任何替代解决方案或功能。
+      placeholder: 例如：也可以通过修改现有配置来实现，但是...
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: 其他信息
+      description: 在此添加关于该功能请求的任何其他背景信息或截图。
+      placeholder: 例如：相关的参考链接、设计草图等...
+    validations:
+      required: false

@@ -1,0 +1,47 @@
+name: ❓ 问题咨询
+description: 询问关于项目使用、配置或实现的问题
+title: "[Question] "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        欢迎提问！请尽可能提供详细的背景信息，以便我们更准确地回答你的问题。
+
+  - type: textarea
+    id: question-summary
+    attributes:
+      label: 问题描述
+      description: 这里简要概括你想问什么。
+      placeholder: 例如：我想咨询一下关于机器人自动回复功能的配置方法。
+    validations:
+      required: true
+
+  - type: textarea
+    id: context-scenario
+    attributes:
+      label: 📖 背景 / 场景
+      description: 描述你是在什么情况下遇到这个问题的，或者你想实现什么效果。
+      placeholder: 例如：我正在尝试让机器人在群聊中只回复特定的关键词，但我不确定在哪里设置白名单。
+    validations:
+      required: true
+
+  - type: textarea
+    id: attempted-solutions
+    attributes:
+      label: 💡 我尝试过的方法（可选）
+      description: 如果你已经查过文档或试过某些操作，可以写在这里，避免别人重复建议。
+      placeholder: |
+        1. 我查看了 Wiki 文档的第3章。
+        2. 我尝试修改了 config.yaml 文件，但重启后没有生效。
+    validations:
+      required: false
+
+  - type: textarea
+    id: screenshots-logs
+    attributes:
+      label: 📷 截图或日志（可选）
+      description: 如果有相关的界面截图或报错日志，可以在这里粘贴图片。
+      placeholder: 拖拽图片到此处或粘贴截图链接...
+    validations:
+      required: false
