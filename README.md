@@ -212,7 +212,7 @@ true代表启动
 ```
 - 优化了客户端与服务端的配置
 ```yaml
-#打开xy-data文件夹找到bot_server.yaml或者bot_clint.yaml修改配置即可，下载即配置好了，以下配置
+#打开xy-data文件夹找到bot_server.yaml或者bot_client.yaml修改配置即可，下载即配置好了，以下配置
 #bot_server.yaml的
 server:
     host: 127.0.0.1
