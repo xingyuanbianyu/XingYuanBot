@@ -174,6 +174,8 @@ pnpm py或者pnpm run py → python script.py
 引用后使用#撤回，即可撤回
 ```
 - 优化了设置主人逻辑
+<details>
+<summary>👉 点击查看权限指令</summary>
 
 | 指令 | 谁能用 | 说明 |
 | :--- | :--- | :--- |
@@ -184,6 +186,8 @@ pnpm py或者pnpm run py → python script.py
 | 权限状态 开 QQ |	仅大主人 |	恢复指定小主人权限|
 | 权限状态 关 QQ |	仅大主人 |	将指定小主人权限设为0 |
 | 权限状态 查询 QQ |	任何人 | 	查询某人权限是否失效 |
+
+</details>
 
 - 添加了服务端，还有客户端的链接
 ```
