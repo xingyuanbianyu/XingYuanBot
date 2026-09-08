@@ -40,7 +40,7 @@
 - 🔐 多级权限管理（大主人 / 小主人 / 管理员 / 普通成员）
 - 🔌 插件化架构，轻松扩展功能，插件直接放xy-plugins下，先写rule.json，再写index.js或者script.py（随便选，只要能够作为启动或者入口文件即可），最好还是按照插件启动，文件里面的要求填写
 这是一个rule.json的配置示例：
-```
+```json
 {
   "name": "系统指令",
   "type": "command",
@@ -50,10 +50,10 @@
 }
 ```
 - command类型的插件，请使用如下方法
-```
-match和handle
-match进行匹配
-handle处理逻辑
+```js
+//match和handle
+//match进行匹配
+//handle处理逻辑
 ```
 - 💾 基于 Redis 的数据存储(暂不支持)
 
