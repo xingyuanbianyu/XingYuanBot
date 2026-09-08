@@ -74,34 +74,34 @@ handle处理逻辑
 
 克隆仓库
 国内用户使用这个
-```
+```bash
 git clone https://gitee.com/starry-language/XingYuanBot.git
 ```
 国外用户使用这个
-```
+```bash
 git clone https://github.com/xingyuanbianyu/XingYuanBot.git
 ```
 GitCode用户使用这个
-```
+```bash
 git clone https://gitcode.com/xingyuan3739/XingYuanBot.git
 ```
 统一使用下面这个指令进入项目目录
-```
+```bash
 cd XingYuanBot
 ```
 
 ### 安装依赖
 - 执行下面命令
-```
+```bash
 pnpm install
 ```
 - 如果没有pnpm，请先运行如下指令安装
-```
+```bash
 npm install -g pnpm
 ```
 - 如果某python脚本报错，请先执行
-```
-pip install -r requirenents.txt
+```bash
+pip install -r requirements.txt
 ```
 ### 配置与启动
 
