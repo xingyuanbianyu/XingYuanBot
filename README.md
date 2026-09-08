@@ -12,18 +12,26 @@
 - Issues中进行反馈
 <details>
   <summary>Gutee</summary>
+
         [报告Bug](https://gitee.com/starry-language/XingYuanBot/issues/IK9BZH)
         [功能建议](https://gitee.com/starry-language/XingYuanBot/issues/IK9BZM)
+
 </details>
+
 <details>
   <summary>GitHub</summary>
+
         [报告Bug](https://github.com/xingyuanbianyu/XingYuanBot/issues/1)
         [功能建议](https://github.com/xingyuanbianyu/XingYuanBot/issues/2)
+
 </details>
+
 <details>
    <summary>GitCode</summary>
+
         [报告Bug](https://gitcode.com/xingyuan3739/XingYuanBot/issues/1)
         [功能建议](https://gitcode.com/xingyuan3739/XingYuanBot/issues/2)
+
 </details>
 
 ## ✨ 功能特性
