@@ -219,7 +219,7 @@ server:
     port: 3001
     token: ''
 
-#bot_clinet的
+#bot_client的
 clinet:
     host: 127.0.0.1
     port: 3004
