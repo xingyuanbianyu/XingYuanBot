@@ -98,6 +98,7 @@ git clone https://github.com/xingyuanbianyu/XingYuanBot.git
 git clone https://gitcode.com/xingyuan3739/XingYuanBot.git
 ```
 </details>
+
 统一使用下面这个指令进入项目目录
 ```bash
 cd XingYuanBot
