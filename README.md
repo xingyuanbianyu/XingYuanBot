@@ -49,7 +49,7 @@
   "entry": "index.js"
 }
 ```
-- command类型的插件，请使用如下方法
+- command类型的插件，请使用如下方法进行创建插件
 ```js
 //match和handle
 //match进行匹配
