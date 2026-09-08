@@ -65,26 +65,39 @@
 - Node.js 18+
 - Redis 数据库（不需要，待开发中，仅作为后续选择）
 - NapCat / LLOneBot 协议端
-- 如果没有以上两个协议端，请先前往任意一个地址进行安装
-- [安装NapCat地址](https://github.com/NapNeko/NapCatQQ/releases)
-- [安装LLOneBot地址](https://github.com/LLOneBot/LuckyLilliaBot/releases)
+<details>
+<summary>👉 点击查看协议端下载地址</summary>
+
+如果没有以上两个协议端，请先前往任意一个地址进行安装：
+
+- **NapCat**: [下载 NapCat](https://github.com/NapNeko/NapCatQQ/releases)
+- **LLOneBot**: [下载 LLOneBot](https://github.com/LLOneBot/LuckyLilliaBot/releases)
+
+</details>
+
 - python 3X（仅运行环境要求）
 
 ### 安装步骤
+### 安装步骤
 
-克隆仓库
-国内用户使用这个
+<details>
+<summary>👉 点击查看：克隆仓库命令</summary>
+
+请根据你的网络环境，选择对应的命令进行克隆：
+
+- Gitee克隆仓库指令
 ```bash
 git clone https://gitee.com/starry-language/XingYuanBot.git
 ```
-国外用户使用这个
+- GitHub克隆仓库指令
 ```bash
 git clone https://github.com/xingyuanbianyu/XingYuanBot.git
 ```
-GitCode用户使用这个
+- GitCode克隆仓库指令
 ```bash
 git clone https://gitcode.com/xingyuan3739/XingYuanBot.git
 ```
+</details>
 统一使用下面这个指令进入项目目录
 ```bash
 cd XingYuanBot
