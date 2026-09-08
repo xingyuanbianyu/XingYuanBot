@@ -32,6 +32,12 @@
   "entry": "index.js"
 }
 ```
+- command类型的插件，请使用如下方法
+```
+match和handle
+match进行匹配
+handle处理逻辑
+```
 - 💾 基于 Redis 的数据存储(暂不支持)
 
 ## 🚀 快速开始
@@ -176,5 +182,9 @@ clinet:
     port: 3004
     token: ''
 只需要修改你对应的服务端或者客户端即可        
+```
+- 新增入群和退群提示
+```
+修改XingYuanBot/temp/vris/vris.yaml中的welcome、decrease、kick字段，即可修改
 ```
 - 待上传的优化

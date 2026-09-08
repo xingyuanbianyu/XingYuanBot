@@ -130,6 +130,8 @@ class PluginGroup {
         }
 
         for (const plugin of this.loadedPlugins) {
+            console.log(`[PluginGroup] 检查插件: ${plugin.pluginConfig?.name}`);
+            console.log(`  match结果:`, plugin.match ? plugin.match(data) : '无match方法');
             // 如果子插件有自己的 match 方法，先检查
             if (plugin.match && !plugin.match(data)) continue;
 

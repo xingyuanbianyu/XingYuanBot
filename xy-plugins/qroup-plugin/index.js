@@ -395,8 +395,6 @@ export default {
 
     // 头衔
     if (cmd.startsWith('头衔')) {
-      if (!hasPermission) return '❌ 权限不足：此命令仅限群主、管理员或配置文件中的主人使用。';
-
       const titleContent = cmd.replace('头衔', '').trim();
       if (!titleContent) return '⚠️ 用法：#头衔 头衔内容';
 

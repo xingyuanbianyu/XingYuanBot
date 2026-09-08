@@ -16,7 +16,7 @@ plugins:
     prefiex: '#'
 
   - name: plugin-welcome        # ← 新增
-    enabled: true
+    enabled: false
     path: ./plugin
     entry: inde.js
     type: event

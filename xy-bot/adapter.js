@@ -6,9 +6,15 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import YAML from 'yaml';
+import http from 'http';
+import axios from 'axios';
+import { spawn } from 'child_process';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const ADAPTER_PORT = 9521;
+const API_URL = 'http://127.0.0.1:3000';
+const BRIDGE_JS = path.join(__dirname, 'bridge.js');
 
 // ==================== 配置读取 ====================
 function loadConfig(relativePath) {
@@ -105,7 +111,7 @@ function setupMessageHandler(ws) {
                 if (isBlacklisted(noticeUserId, noticeGroupId)) return;
 
                 for (const { name, handler } of plugins) {
-                    if (!handler || typeof handler !== 'object') continue;
+                    //if (!handler || typeof handler !== 'object') continue;
                     if (handler.type !== 'event') continue;
                     if (typeof handler.handle !== 'function') continue;
 
@@ -193,6 +199,53 @@ function setupMessageHandler(ws) {
     });
 }
 
+// ========== 启动 bridge.js ==========
+function startBridgeJs() {
+    console.log('[adapter.js] 启动 bridge.js ...');
+    const proc = spawn('node', [BRIDGE_JS], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        detached: false
+    });
+    proc.stdout.on('data', d => process.stdout.write(`[bridge.js] ${d}`));
+    proc.stderr.on('data', d => process.stderr.write(`[bridge.js] ${d}`));
+    proc.on('close', code => {
+        console.log(`[adapter.js] bridge.js 退出, 代码: ${code}, 5秒后重启...`);
+        setTimeout(startBridgeJs, 5000);
+    });
+}
+
+// ========== 启动 HTTP 接收服务（收 bridge.js 的转发） ==========
+http.createServer(async (req, res) => {
+    if (req.method !== 'POST') { res.writeHead(405); res.end(); return; }
+
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', async () => {
+        try {
+            const { group_id, message } = JSON.parse(body);
+            console.log(`[adapter.js] 收到发送请求: 群${group_id} → ${message}`);
+
+            const result = await axios.post(`${API_URL}/send_group_msg`, {
+                group_id,
+                message
+            });
+
+            if (result.data?.status === 'ok') {
+                console.log(`[adapter.js] ✅ 发送成功`);
+                res.writeHead(200); res.end('{"status":"ok"}');
+            } else {
+                console.log(`[adapter.js] ❌ 发送失败: ${result.data?.msg}`);
+                res.writeHead(500); res.end('{"error":"send failed"}');
+            }
+        } catch (e) {
+            console.error(`[adapter.js] 异常: ${e.message}`);
+            res.writeHead(500); res.end('{"error":"internal"}');
+        }
+    });
+}).listen(ADAPTER_PORT, () => {
+    console.log(`[adapter.js] 🟢 监听端口: ${ADAPTER_PORT}`);
+    startBridgeJs();  // 端口就绪后拉起 bridge.js
+});
 // ==================== 发送消息 ====================
 export async function sendMsg(chatId, reply, isGroup) {
     if (!wsClient) return;
