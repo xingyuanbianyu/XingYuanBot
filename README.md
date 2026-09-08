@@ -10,12 +10,21 @@
 - 公开反馈
 - QQ群反馈：1026165109
 - Issues中进行反馈
-- Gutee[报告Bug](https://gitee.com/starry-language/XingYuanBot/issues/IK9BZH)
-- Gitee[功能建议](https://gitee.com/starry-language/XingYuanBot/issues/IK9BZM)
-- GitHub[报告Bug](https://github.com/xingyuanbianyu/XingYuanBot/issues/1)
-- GitHub[功能建议](https://github.com/xingyuanbianyu/XingYuanBot/issues/2)
-- GitCode[报告Bug](https://gitcode.com/xingyuan3739/XingYuanBot/issues/1)
-- GitCode[功能建议](https://gitcode.com/xingyuan3739/XingYuanBot/issues/2)
+<details>
+  <summary>Gutee</summary>
+	[报告Bug](https://gitee.com/starry-language/XingYuanBot/issues/IK9BZH)
+	[功能建议](https://gitee.com/starry-language/XingYuanBot/issues/IK9BZM)
+</details>
+<details>
+  <summary>GitHub</summary>
+	[报告Bug](https://github.com/xingyuanbianyu/XingYuanBot/issues/1)
+	[功能建议](https://github.com/xingyuanbianyu/XingYuanBot/issues/2)
+</details>
+<details>
+   <summary>GitCode</summary>
+	[报告Bug](https://gitcode.com/xingyuan3739/XingYuanBot/issues/1)
+	[功能建议](https://gitcode.com/xingyuan3739/XingYuanBot/issues/2)
+</details>
 
 ## ✨ 功能特性
 
@@ -74,10 +83,11 @@ cd XingYuanBot
 ```
 
 ### 安装依赖
+- 执行下面命令
 ```
 pnpm install
 ```
-如果没有pnpm，请先运行如下指令安装
+- 如果没有pnpm，请先运行如下指令安装
 ```
 npm install -g pnpm
 ```
