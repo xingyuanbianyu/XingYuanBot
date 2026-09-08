@@ -230,4 +230,9 @@ clinet:
 ```
 修改XingYuanBot/temp/vris/vris.yaml中的welcome、decrease、kick字段，即可修改
 ```
+- 新增黑名单机制
+```
+修改黑名单配置前往该目录
+xy-data/config.yaml
+```
 - 待上传的优化
