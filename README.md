@@ -81,6 +81,10 @@ pnpm install
 ```
 npm install -g pnpm
 ```
+- 如果某python脚本报错，请先执行
+```
+pip install -r requirenents.txt
+```
 ### 配置与启动
 
 - 已经实现自动创建配置，只需要启动项目，连接上协议端，具体如何设置主人，请看下面
