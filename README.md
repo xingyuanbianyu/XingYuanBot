@@ -211,14 +211,15 @@ true代表启动
 白名单功能，具体有什么功能尚未开发
 ```
 - 优化了客户端与服务端的配置
-```
-打开xy-data文件夹找到bot_server.yaml或者bot_clint.yaml修改配置即可，下载即配置好了，以下配置
-bot_server.yaml的
+```yaml
+#打开xy-data文件夹找到bot_server.yaml或者bot_clint.yaml修改配置即可，下载即配置好了，以下配置
+#bot_server.yaml的
 server:
     host: 127.0.0.1
     port: 3001
     token: ''
-bot_clinet的
+
+#bot_clinet的
 clinet:
     host: 127.0.0.1
     port: 3004
