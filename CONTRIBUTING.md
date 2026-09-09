@@ -25,9 +25,9 @@
 在 `xy-plugins/` 下新建文件夹，例如：
 xy-plugins/
 └── my-plugin/          # 你的插件名
-├── rule.json       # [必须] 插件描述文件
-├── index.js        # [必须] 插件入口文件
-└── README.md       # [推荐] 插件使用说明
+         ├── rule.json       # [必须] 插件描述文件
+         ├── index.js        # [必须] 插件入口文件
+         └── README.md       # [推荐] 插件使用说明
 
 
 ### rule.json
@@ -39,6 +39,7 @@ xy-plugins/
   "author": "你的名字",
   "entry": "index.js"
 }
+```
 
 - 示例
 ```
@@ -71,6 +72,7 @@ export default {
   }
 }
 ```
+
 - 分支命名
 ```bash
 git checkout -b feat/插件名-功能描述
