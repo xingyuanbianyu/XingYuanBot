@@ -137,6 +137,7 @@ pnpm py或者pnpm run py → python script.py
 - [功能建议](https://gitcode.com/xingyuan3739/XingYuanBot/issues/2)
 
 </details>
+
 ## 优化日志
 点击[CHANGELOG文档](https://gitee.com/starry-language/XingYuanBot/blob/master/%C2%A0CHANGELOG.md)查看更新日志
 
