@@ -3,7 +3,17 @@
 一个基于 Node.js 的轻量级 QQ 机器人框架，支持 NapCat / LLOneBot 协议端连接，内置灵活的权限管理系统和插件扩展机制。
 # 当前版本：2.9.0
 ## 项目目录结构
-点击👉 [项目目录](https://gitee.com/starry-language/XingYuanBot/blob/master/open-source%20project%20planning.md)
+
+<details>
+
+<summary>👉 点击查看项目目录</summary>
+
+- [项目目录](https://gitee.com/starry-language/XingYuanBot/blob/master/open-source%20project%20planning.md)
+- [GitHub项目目录](https://github.com/xingyuanbianyu/XingYuanBot/blob/master/%C2%A0CHANGELOG.md)
+- [GitCode项目目录](https://gitcode.com/xingyuan3739/XingYuanBot/blob/master/%C2%A0CHANGELOG.md)
+
+</details>
+
 ## ✨ 功能特性
 
 - 📡 支持 NapCat、LLOneBot 协议端连接
@@ -179,7 +189,14 @@ client:
 </details>
 
 ## 优化日志
-点击[CHANGELOG文档](https://gitee.com/starry-language/XingYuanBot/blob/master/%C2%A0CHANGELOG.md)查看更新日志
+
+<details>
+<summary>👉 点击展开查看更新日志</summary>
+- [Gitee-CHANGELOG文档](https://gitee.com/starry-language/XingYuanBot/blob/master/%C2%A0CHANGELOG.md)
+- [GitHub-CHANGELOG文档](https://github.com/xingyuanbianyu/XingYuanBot/blob/master/open-source%20project%20planning.md)
+- [GitCode-CHANGELOG文档](https://gitcode.com/xingyuan3739/XingYuanBot/blob/master/open-source%20project%20planning.md)
+
+</details>
 
 ### 📅 开发计划 (Roadmap)
 
