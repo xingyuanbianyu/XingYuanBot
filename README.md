@@ -1,7 +1,7 @@
 # 🌟 XingYuanBot（星缘机器人）
 
 一个基于 Node.js 的轻量级 QQ 机器人框架，支持 NapCat / LLOneBot 协议端连接，内置灵活的权限管理系统和插件扩展机制。
-
+# 当前版本：2.9.0
 ## ✨ 功能特性
 
 - 📡 支持 NapCat、LLOneBot 协议端连接
