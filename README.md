@@ -191,7 +191,9 @@ client:
 ## 优化日志
 
 <details>
+
 <summary>👉 点击展开查看更新日志</summary>
+
 - [Gitee-CHANGELOG文档](https://gitee.com/starry-language/XingYuanBot/blob/master/%C2%A0CHANGELOG.md)
 - [GitHub-CHANGELOG文档](https://github.com/xingyuanbianyu/XingYuanBot/blob/master/open-source%20project%20planning.md)
 - [GitCode-CHANGELOG文档](https://gitcode.com/xingyuan3739/XingYuanBot/blob/master/open-source%20project%20planning.md)
