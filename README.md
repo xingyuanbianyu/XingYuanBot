@@ -2,6 +2,8 @@
 
 一个基于 Node.js 的轻量级 QQ 机器人框架，支持 NapCat / LLOneBot 协议端连接，内置灵活的权限管理系统和插件扩展机制。
 # 当前版本：2.9.0
+## 项目目录结构
+点击👉 [项目目录](https://gitee.com/starry-language/XingYuanBot/blob/master/open-source%20project%20planning.md)
 ## ✨ 功能特性
 
 - 📡 支持 NapCat、LLOneBot 协议端连接
