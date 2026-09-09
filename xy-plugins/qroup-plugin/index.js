@@ -109,7 +109,8 @@ export default {
     const cmd = textStr.replace(/^#s#|#/g, '').trim();
     return cmd.startsWith('踢') || cmd.startsWith('禁言') || cmd.startsWith('解禁')
         || cmd.startsWith('头衔') || cmd.startsWith('设置管理')
-        || cmd.startsWith('取消管理') || cmd.startsWith('点赞');
+        || cmd.startsWith('取消管理') || cmd.startsWith('点赞')
+        || cmd.startsWith('赞我');
   },
 
   handle: async function({ text, chatId, isGroup, senderName, senderQQ, role }) {
