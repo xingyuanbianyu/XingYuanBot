@@ -19,7 +19,7 @@ XingYuanBot
    │       ├─bot_client.yaml Bot客户端配置
    │       └config.yaml 黑名单配置
    ├───xy-config 核心配置目录
-   │       ├─config 配置目录
+   │       ├─config 权限配置目录
    │       │    ├─permissions.js 权限检测器
    │       │    └─config.yaml.example 权限配置模板
    │       └─config.yaml 后台管理员配置
