@@ -157,7 +157,9 @@ client:
 - 3002 http服务端，群管必要端口（处理禁言、踢人等指令）
 
 ## 反馈方式
-- 私聊反馈
+<details>
+<summary>👉 点击私聊反馈</summary>
+
 - 电子邮箱：
 ```
 m1536_adjs318inp@aka.yeah.net
@@ -166,8 +168,10 @@ m1536_adjs318inp@aka.yeah.net
 ```
 3381673433
 ```
+</details>
+<details>
+<summary>👉 点击公开反馈</summary>
 
-- 公开反馈
 - QQ群反馈：
 ```
 1026165109
@@ -195,6 +199,7 @@ m1536_adjs318inp@aka.yeah.net
 - [报告 Bug](https://gitcode.com/xingyuan3739/XingYuanBot/issues/1)
 - [功能建议](https://gitcode.com/xingyuan3739/XingYuanBot/issues/2)
 
+</details>
 </details>
 
 ## 优化日志
