@@ -8,9 +8,9 @@
 
 <summary>👉 点击查看项目目录</summary>
 
-- [项目目录](https://gitee.com/starry-language/XingYuanBot/blob/master/open-source%20project%20planning.md)
-- [GitHub项目目录](https://github.com/xingyuanbianyu/XingYuanBot/blob/master/%C2%A0CHANGELOG.md)
-- [GitCode项目目录](https://gitcode.com/xingyuan3739/XingYuanBot/blob/master/%C2%A0CHANGELOG.md)
+- [Gitee-项目目录](https://gitee.com/starry-language/XingYuanBot/blob/master/open-source%20project%20planning.md)
+- [GitHub-项目目录](https://github.com/xingyuanbianyu/XingYuanBot/blob/master/%C2%A0CHANGELOG.md)
+- [GitCode-项目目录](https://gitcode.com/xingyuan3739/XingYuanBot/blob/master/%C2%A0CHANGELOG.md)
 
 </details>
 
