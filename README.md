@@ -34,6 +34,9 @@
 
 </details>
 
+## 优化日志
+点击[CHANGELOG文档](https://gitee.com/starry-language/XingYuanBot/blob/master/%C2%A0CHANGELOG.md)查看更新日志
+
 ## ✨ 功能特性
 
 - 📡 支持 NapCat、LLOneBot 协议端连接
