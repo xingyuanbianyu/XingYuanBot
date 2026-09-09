@@ -122,14 +122,17 @@ pnpm py或者pnpm run py → python script.py
 
 ## 优化了客户端与服务端的配置
 ```yaml
-#打开xy-data文件夹找到bot_server.yaml或者bot_client.yaml修改配置即可，下载即配置好了，以下配置
-#bot_server.yaml的
+# 配置说明：
+# 1. 打开 xy-data 文件夹，找到 bot_server.yaml 或 bot_client.yaml
+# 2. 根据实际部署情况修改对应配置文件
+# 3. 首次运行后会自动生成默认配置，通常只需微调即可使用
+#bot_server.yaml的配置
 server:
     host: 127.0.0.1
     port: 3001
     token: ''
 
-#bot_client的
+#bot_client.yaml的配置
 client:
     host: 127.0.0.1
     port: 3004
