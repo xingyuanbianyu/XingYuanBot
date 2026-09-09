@@ -120,7 +120,8 @@ pnpm py或者pnpm run py → python script.py
 
 <br>
 
-## 优化了客户端与服务端的配置
+## 客户端与服务端配置
+
 ```yaml
 # 配置说明：
 # 1. 打开 xy-data 文件夹，找到 bot_server.yaml 或 bot_client.yaml
