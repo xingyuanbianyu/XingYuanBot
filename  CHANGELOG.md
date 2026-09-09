@@ -41,22 +41,6 @@ true代表启动
 添加进黑名单的用户或者群聊，不会进行处理
 白名单功能，具体有什么功能尚未开发
 ```
-- 优化了客户端与服务端的配置
-```yaml
-#打开xy-data文件夹找到bot_server.yaml或者bot_client.yaml修改配置即可，下载即配置好了，以下配置
-#bot_server.yaml的
-server:
-    host: 127.0.0.1
-    port: 3001
-    token: ''
-
-#bot_client的
-client:
-    host: 127.0.0.1
-    port: 3004
-    token: ''
-#只需要修改你对应的服务端或者客户端即可        
-```
 - 新增入群和退群提示
 ```
 修改XingYuanBot/temp/vris/vris.yaml中的welcome、decrease、kick字段，即可修改
