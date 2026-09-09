@@ -158,11 +158,20 @@ client:
 
 ## 反馈方式
 - 私聊反馈
-- 电子邮箱：m1536_adjs318inp@aka.yeah.net
-- QQ反馈：3381673433
+- 电子邮箱：
+```
+m1536_adjs318inp@aka.yeah.net
+```
+- QQ反馈：
+```
+3381673433
+```
 
 - 公开反馈
-- QQ群反馈：1026165109
+- QQ群反馈：
+```
+1026165109
+```
 - Issues中进行反馈
 <details>
 <summary>👉 Gitee 反馈通道</summary>
