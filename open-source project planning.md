@@ -1,6 +1,8 @@
 # XingYuanBot项目目录结构
 ```
-XingYuanBot
+XingYuanBot 项目根目录
+   ├───fonts 字体文件夹
+   │      └─ NotoSansSC-Regular.otf 字体文件
    ├───xy-bot 核心目录
    │       ├─adapter.js 核心框架，事件分发，消息处理
    │       ├─bridge.js 入群提示和退群提示处理核心
