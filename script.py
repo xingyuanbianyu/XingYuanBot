@@ -8,7 +8,7 @@ import signal  # 【新增】用于在 Linux 无图形界面时安全自杀
 
 # 自动获取脚本所在目录
 BOT_DIR = os.path.dirname(os.path.abspath(__file__))
-NODE_CMD = ["node", "app.js"]
+NODE_CMD = ["node", "--no-warnings", "app.js"]
 
 def restart_sequence():
     print("*" * 40)

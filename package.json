@@ -4,7 +4,7 @@
   "description": "OneBot  QQ",
   "main": "app.js",
   "scripts": {
-    "app": "node app.js",
+    "app": "node --no-warnings app.js",
     "py": "python script.py"
   },
   "keywords": [

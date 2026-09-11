@@ -27,10 +27,17 @@ function startBridgePy() {
 }
 
 // ========== 读取配置 ==========
+let _configCache = null;
+
 function loadConfig() {
+    if (_configCache) return _configCache;
     try {
-        if (fs.existsSync(CONFIG_PATH)) {
-            return YAML.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+        const safePath = path.join(path.dirname(fileURLToPath(import.meta.url)), '../temp/vris/vris.yaml');
+        if (fs.existsSync(safePath)) {
+            let raw = fs.readFileSync(safePath, 'utf8');
+            raw = raw.replace(/^\uFEFF/, '');
+            _configCache = YAML.parse(raw);
+            return _configCache;
         }
     } catch (e) {
         console.error('[bridge.js] 读取配置失败:', e.message);

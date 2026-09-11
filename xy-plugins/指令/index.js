@@ -75,27 +75,20 @@ export default {
         }
     }
 
-    // —— [ #重载所有插件 ] 指令 ——
+    // ====== [ #重载所有插件 ] 指令 ======
     if (text.includes('重载') || text === '重载') {
         if (role !== 'master' && role !== 'owner') {
             return '❌ 权限不足：仅主人可执行重载操作。';
         }
 
         try {
-            // 1. 绕过缓存重新加载 plugin-loader
+            // 绕过缓存重新加载 plugin-loader
             const loaderURL = new URL('../../xy-bot/plugin-loader.js', import.meta.url).href + '?t=' + Date.now();
             const { loadPlugins } = await import(loaderURL);
 
-            // 2. 重新加载插件列表
-            const newPlugins = await loadPlugins();
-
-            // 3. 关键：如果 adapter.js 里消息分发用的是内部闭包的 plugins 变量，
-            //    那就必须从 adapter.js 内部覆盖它。
-            //    需要在 adapter.js 里加一行导出：
-            //    globalThis.__xyReloadPlugins = async () => { plugins = await loadPlugins(); return plugins; };
-        
-            if (typeof globalThis.__xyReloadPlugins === 'function') {
-                const reloaded = await globalThis.__xyReloadPlugins();
+            // 调用全局重载函数
+            if (typeof globalThis._xyReloadPlugins === 'function') {
+                const reloaded = await globalThis._xyReloadPlugins();
                 return `✅ 已重新加载 ${reloaded.length} 个插件！`;
             } else {
                 return '❌ 重载入口未配置，请先在 adapter.js 中注册全局重载函数。';

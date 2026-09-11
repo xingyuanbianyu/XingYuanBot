@@ -35,12 +35,10 @@ class PluginGroup {
     }
     
     match(data) {
-        // 子插件还没加载完，不拦截
         if (!this._ready || this.loadedPlugins.length === 0) {
             return false;
         }
 
-        // 只有当至少一个子插件匹配时，才返回 true
         for (const plugin of this.loadedPlugins) {
             if (plugin.match && plugin.match(data)) {
                 return true;
@@ -49,7 +47,6 @@ class PluginGroup {
 
         return false;
     }
-
 
     async _loadSubPlugins() {
         console.log(`🚀 [调试] 开始加载子插件...`);

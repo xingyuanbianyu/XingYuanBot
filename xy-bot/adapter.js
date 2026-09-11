@@ -1,5 +1,5 @@
 import { WebSocket, WebSocketServer } from 'ws';
-import { loadPlugins } from './plugin-loader.js';
+import { loadPlugins, clearPluginCache } from './plugin-loader.js';
 import { getRole } from '../xy-config/config/permissions.js';
 import config from './config.js';
 import fs from 'fs';
@@ -11,11 +11,6 @@ import axios from 'axios';
 import { spawn } from 'child_process';
 import { dirname, join } from 'path';
 
-globalThis.__xyReloadPlugins = async () => {
-    plugins = await loadPlugins();
-    return plugins;
-}
-
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const ADAPTER_PORT = 9521;
@@ -24,6 +19,7 @@ const BRIDGE_JS = join(__dirname, 'bridge.js');
 
 // ==================== 配置读取 ====================
 function loadConfig(relativePath) {
+    if (!relativePath) return {};
     try {
         const fullPath = path.join(__dirname, relativePath);
         if (fs.existsSync(fullPath)) {
@@ -49,6 +45,21 @@ const REMOTE_WS_URL = `ws://${clientHost}:${clientPort}`;
 
 console.log(`[配置] 服务端监听: ${WS_HOST}:${WS_PORT}`);
 console.log(`[配置] 客户端目标: ${REMOTE_WS_URL}`);
+
+// 注册全局重载函数（供 index.js 中的重载指令调用）
+globalThis._xyReloadPlugins = async () => {
+    clearPluginCache();          // 先清缓存
+    const plugins = await loadPlugins();  // 再重新加载
+    return plugins;
+};
+
+// 消息分发：每次取 plugins 的最新引用，而不是闭包写死
+async function dispatchMessage(msg) {
+    const plugins = await loadPlugins();  // 这样拿到的始终是最新的
+    for (const plugin of plugins) {
+        // 匹配规则并执行 handler
+    }
+}
 
 // ==================== 以下逻辑全部保持不变 ====================
 
