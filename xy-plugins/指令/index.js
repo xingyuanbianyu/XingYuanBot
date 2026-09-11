@@ -1,6 +1,7 @@
 import { generateHelpCard } from './card.js';
 import { pathToFileURL } from 'url';
 import fs from 'fs';
+import { manageBlacklist } from '../../xy-bot/blacklist.js'; // 引入黑名单管理功能
 
 export default {
   name: '指令',
@@ -9,10 +10,42 @@ export default {
     const hasPrefix = text.startsWith('#') || text.startsWith('/');
     if (!hasPrefix) return false;
     
-    return text.includes('帮助') || text.includes('状态') || text.includes('退出') || text.includes('权限') || text.includes('重启') || text.includes('重载');
+    return text.includes('帮助') || text.includes('状态') || text.includes('退出') || text.includes('权限') || text.includes('重启') || text.includes('重载') || text.includes('拉黑') || text.includes('取消');
   },
   
   handle: async ({ text, chatId, isGroup, senderName, role }) => {
+    // —— [ #拉黑 / #取消 ] 指令 ——
+    if (typeof text === 'string' && (text.includes('拉黑') || text.includes('取消'))) {
+
+        if (role !== 'master' && role !== 'owner') {
+            return '❌ 权限不足：仅主人可管理黑名单。';
+        }
+
+        const { manageBlacklist } = await import('../../xy-bot/blacklist.js');
+
+        // 正则拆解：
+        // (拉黑|取消)     → 动作（仅用于匹配触发，实际操作由末尾数字决定）
+        // \s*(\d{5,13})   → 号码
+        // \s+([01])$      → 末尾 0=用户 1=群
+        const match = text.match(/(?:拉黑|取消)\s*(\d{5,13})\s+([01])$/);
+
+        if (!match) {
+            const looseMatch = text.match(/(?:拉黑|取消)\s*(\d{5,13})\s+(.+)$/);
+            if (looseMatch && looseMatch[2] !== '0' && looseMatch[2] !== '1') {
+                return `❌ 末尾参数错误："${looseMatch[2]}"，只允许 0（用户）或 1（群）。`;
+            }
+            return '❌ 格式错误。例如：#拉黑 123456 0（拉黑用户）或 #拉黑 123456 1（拉黑群）';
+        }
+
+        const target = match[1];
+        const flag = match[2];
+
+        // 1 = 群，0 = 用户
+        const type = flag === '1' ? 'group' : 'qq';
+        const isAdd = text.includes('拉黑');
+
+        return manageBlacklist(type, target, isAdd);
+    }
 
     // ─── [ #权限 ] 指令 ──────────────────────────────────
     if (text.includes('权限')) {

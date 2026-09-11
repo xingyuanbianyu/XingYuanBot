@@ -8,6 +8,7 @@ node_modules/
 # 忽略配置文件中的敏感项，但保留 config 目录结构
 xy-config/config/config.yaml
 xy-config/config/redis.yaml
+xy-data/config.yaml
 
 # 只忽略特定的敏感插件（如果有），而不是全部
 xy-plugins/auto-reply
@@ -19,5 +20,6 @@ xy-plugins/GH-plugin
 temp/*.png
 temp/*.txt
 *.lnk
-xy-plugins\plugin-group\plugin/index.js
-xy-plugins\plugin-group\plugin/inde.js
+xy-plugins\plugin-group\plugin\index.js
+xy-plugins\plugin-group\plugin\inde.js
+xy-lib/fl/

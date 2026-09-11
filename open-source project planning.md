@@ -9,6 +9,8 @@ XingYuanBot 项目根目录
    │       ├─bridge.py 监听协议端的ws协议入群和退群事件
    │       ├─plugin-loader.js 插件核心加载器
    │       ├─command.js 后台管理核心
+   │       ├─bot.js 初始化命令行
+   │       ├─lib.cjs 注册全局变量和全局函数处理器
    │       └─config.js 读取黑名单返回数据
    ├───xy-plugins 插件目录
    │       ├─指令 基础指令
@@ -33,7 +35,7 @@ XingYuanBot 项目根目录
    ├───xy-data 核心数据目录
    │       ├─bot_server.yaml Bot服务端配置
    │       ├─bot_client.yaml Bot客户端配置
-   │       └config.yaml 黑名单配置
+   │       └─config.yaml 黑名单配置
    ├───xy-config 核心配置目录
    │       ├─config 权限配置目录
    │       │    ├─permissions.js 权限检测器
@@ -44,7 +46,7 @@ XingYuanBot 项目根目录
    │      └─vris 回复库
    │           └─vris.yaml 入群提示和退群提示配置
    ├───xy-lib 外部模块库与内置模块库
-   │       └─bot.js 初始化命令行
+   │           └─!.txt 仅为占位文件，无任何内容，也不需要管
    ├───script.py 重启脚本
    └───app.js 启动入口
 ```

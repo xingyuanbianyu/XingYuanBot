@@ -8,12 +8,6 @@ const __dirname = dirname(__filename);
 
 const CONFIG_PATH = join(__dirname, '../xy-data/config.yaml');
 
-console.log('=== 调试信息 ===');
-console.log('__dirname =', __dirname);
-console.log('CONFIG_PATH =', CONFIG_PATH);
-console.log('===============');
-
-
 let configData = null;
 
 function getDefaultConfig() {
@@ -28,10 +22,22 @@ function getDefaultConfig() {
 export function loadConfig() {
     try {
         if (!fs.existsSync(CONFIG_PATH)) {
-            console.warn(`⚠️ 配置文件不存在: ${CONFIG_PATH}`);
+            console.warn(`⚠️ 配置文件不存在，正在自动创建: ${CONFIG_PATH}`);
+            
+            // 1. 确保 xy-data 文件夹存在（没有就新建）
+            const dir = dirname(CONFIG_PATH);
+            if (!fs.existsSync(dir)) {
+                fs.mkdirSync(dir, { recursive: true });
+            }
+
+            // 2. 生成默认配置并写入到 config.yaml 中
             configData = getDefaultConfig();
+            fs.writeFileSync(CONFIG_PATH, YAML.stringify(configData), 'utf8');
+            
+            console.log(`✅ 成功创建并初始化 config.yaml`);
             return configData;
         }
+
         const fileContents = fs.readFileSync(CONFIG_PATH, 'utf8');
         const parsed = YAML.parse(fileContents) || {};
         

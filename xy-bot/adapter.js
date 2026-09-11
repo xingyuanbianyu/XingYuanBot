@@ -10,6 +10,7 @@ import http from 'http';
 import axios from 'axios';
 import { spawn } from 'child_process';
 import { dirname, join } from 'path';
+import './lib.cjs'
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -183,7 +184,11 @@ function setupMessageHandler(ws) {
             }
 
             const preview = text.length > 30 ? text.substring(0, 30) + '...' : text;
-            console.log(`[收] [${isGroup ? '群' : '私'}] ${senderName}: ${preview}`);
+            if (isGroup) {
+                console.log(`[收] 群聊 [群号: ${chatId}] ${senderName}: ${preview}`);
+            } else {
+                console.log(`[收] 私聊 [QQ: ${chatId}] ${senderName}: ${preview}`);
+            }
 
             for (const { name, handler } of plugins) {
                 if (!handler || typeof handler !== 'object') continue;
@@ -246,7 +251,6 @@ http.createServer(async (req, res) => {
             const user_id = parsed.user_id ? String(parsed.user_id) : '';
 
             // ====== 黑名单拦截 ======
-            const config = loadConfig();
             const blacklistQQ = config.blacklist_qq || [];
             const blacklistGroup = config.blacklist_group || [];
 
