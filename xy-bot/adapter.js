@@ -9,12 +9,18 @@ import YAML from 'yaml';
 import http from 'http';
 import axios from 'axios';
 import { spawn } from 'child_process';
+import { dirname, join } from 'path';
+
+globalThis.__xyReloadPlugins = async () => {
+    plugins = await loadPlugins();
+    return plugins;
+}
 
 const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const __dirname = dirname(__filename);
 const ADAPTER_PORT = 9521;
 const API_URL = 'http://127.0.0.1:3000';
-const BRIDGE_JS = path.join(__dirname, 'bridge.js');
+const BRIDGE_JS = join(__dirname, 'bridge.js');
 
 // ==================== 配置读取 ====================
 function loadConfig(relativePath) {
@@ -222,8 +228,32 @@ http.createServer(async (req, res) => {
     req.on('data', chunk => { body += chunk; });
     req.on('end', async () => {
         try {
-            const { group_id, message } = JSON.parse(body);
-            console.log(`[adapter.js] 收到发送请求: 群${group_id} → ${message}`);
+            const parsed = JSON.parse(body);
+            const group_id = parsed.group_id;
+            const message = parsed.message;
+            // user_id 如果 bridge 没传，就给个空字符串，避免报错
+            const user_id = parsed.user_id ? String(parsed.user_id) : '';
+
+            // ====== 黑名单拦截 ======
+            const config = loadConfig();
+            const blacklistQQ = config.blacklist_qq || [];
+            const blacklistGroup = config.blacklist_group || [];
+
+            if (user_id && blacklistQQ.includes(user_id)) {
+                console.log(`🚫 黑名单拦截: QQ ${user_id}`);
+                res.writeHead(403);
+                res.end(JSON.stringify({ status: 'blocked' }));
+                return;  // 终止，不发送
+            }
+
+            if (blacklistGroup.includes(String(group_id))) {
+                console.log(`🚫 黑名单拦截: 群 ${group_id}`);
+                res.writeHead(403);
+                res.end(JSON.stringify({ status: 'blocked' }));
+                return;  // 终止，不发送
+            }
+
+            // ====== 黑名单拦截结束 ======
 
             const result = await axios.post(`${API_URL}/send_group_msg`, {
                 group_id,

@@ -3,10 +3,34 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 import { getRole } from '../../xy-config/config/permissions.js';
+import { parse as parseYaml } from 'yaml';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MENU_PATH = path.resolve(__dirname, '../指令/menu.json');
 const API = 'http://127.0.0.1:3002';
+
+// 记录今天已点赞过的用户
+const likedToday = new Set();
+let lastRecordDate = new Date().getDate();
+
+// 读取 bot.yaml 配置
+let botConfig = {};
+try {
+    const yamlPath = path.join(__dirname, '../../xy-config/config/bot.yaml');
+    const yamlContent = fs.readFileSync(yamlPath, 'utf8');
+    botConfig = parseYaml(yamlContent) || {};
+} catch (e) {
+    console.log('[配置警告] 读取 bot.yaml 失败:', e.message);
+}
+
+// 每天自动清空点赞记录
+function checkAndResetDaily() {
+    const today = new Date().getDate();
+    if (today !== lastRecordDate) {
+        likedToday.clear();
+        lastRecordDate = today;
+  }
+}
 
 const myCommands = [
   { cmd: '#踢@成员', desc: '将指定成员踢出群聊' },
@@ -201,33 +225,53 @@ export default {
     // 大主人权限检查（设置管理、取消管理）
     const isMaster = role === 'master';
 
-    // 点赞功能（无需任何权限，所有人都可以用）
+    // 点赞功能（无需权限，所有人都可以用）
     if (cmd === '点赞' || cmd === '赞' || cmd === '赞我') {
-      const isFriend = await checkIsFriend(senderQQ);
-      const totalLikes = isFriend ? 10 : 50;
-      const perRequest = 10;
-      const requests = Math.ceil(totalLikes / perRequest);
 
-      try {
-        for (let i = 0; i < requests; i++) {
-          const times = i === requests - 1 ? (totalLikes % perRequest || perRequest) : perRequest;
-          const res = await fetch(`${API}/send_like`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              user_id: Number(senderQQ),
-              times: times
-            })
-          });
-          const result = await res.json();
-          if (result.status !== 'ok') {
-            return `❌ 点赞失败：${result.msg || result.message}`;
-          }
+        checkAndResetDaily();
+
+        // 1. 检查今天是否已经赞过了
+        if (likedToday.has(senderQQ)) {
+            return '今天已经点过赞啦，明天再来吧~';
         }
-        return `✅ 已为你点赞 ${totalLikes} 次！（${isFriend ? '检测到好友关系' : '非好友，额外多赞'}）`;
-      } catch (err) {
-        return `❌ 请求失败：${err.message}`;
-      }
+
+        // 2. 检查配置开关
+        if (botConfig.bot && botConfig.bot.likeEnabled === false) {
+            return '❌ 点赞功能已关闭';
+        }
+
+        // 3. 调用接口获取好友列表，判断是否为好友
+        let isFriend = false;
+        try {
+            const friendRes = await fetch(`${API}/get_friend_list`);
+            const friendData = await friendRes.json();
+            // 兼容不同框架的数据结构（data 可能是数组，也可能在 data.data 里）
+            const friends = friendData.data || friendData.data?.data || [];
+            if (friends.some(f => f.user_id == senderQQ)) {
+                isFriend = true;
+            }
+        } catch (e) {
+            console.log('获取好友列表失败:', e.message);
+        }
+
+        // 4. 根据身份决定点赞次数（好友10次，非好友50次）
+        const times = isFriend ? 10 : 50;
+        const identity = isFriend ? '好友' : '非好友';
+
+        // 5. 执行点赞（接口单次最多赞10次，所以用循环）
+        const loops = Math.ceil(times / 10);
+        for (let i = 0; i < loops; i++) {
+            try {
+                await fetch(`${API}/send_like?user_id=${senderQQ}&times=10`);
+            } catch (e) {
+                console.log('点赞请求异常:', e.message);
+            }
+        }
+
+        // 6. 记录今天已赞，防止重复点赞
+        likedToday.add(senderQQ);
+
+        return `✨ 点赞成功！[身份: ${identity}] 本次共为你点赞 ${times} 次~`;
     }
 
     // 设置管理（仅大主人）

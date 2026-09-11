@@ -6,6 +6,7 @@ blacklist_qq:
 # 黑名单Q群号 (命中即拒绝)
 blacklist_group:
   - 987654321
+  - 283885238
 
 # 白名单QQ号 (配置后仅允许名单内的用户)
 whitelist_qq: []

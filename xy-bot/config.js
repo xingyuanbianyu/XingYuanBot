@@ -1,17 +1,21 @@
 import fs from 'fs';
-import path from 'path';
 import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
 import YAML from 'yaml';
 
 const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const __dirname = dirname(__filename);
 
-// 修正后的正确路径：当前目录的上一级(xy-config/xy-bot -> xy-config)下的 xy-data/config.yaml
-const CONFIG_PATH = path.join(__dirname, '../xy-data/config.yaml');
+const CONFIG_PATH = join(__dirname, '../xy-data/config.yaml');
+
+console.log('=== 调试信息 ===');
+console.log('__dirname =', __dirname);
+console.log('CONFIG_PATH =', CONFIG_PATH);
+console.log('===============');
+
 
 let configData = null;
 
-// 获取默认空配置
 function getDefaultConfig() {
     return {
         blacklist_qq: [],
@@ -21,11 +25,10 @@ function getDefaultConfig() {
     };
 }
 
-// 核心读取逻辑
 export function loadConfig() {
     try {
         if (!fs.existsSync(CONFIG_PATH)) {
-            console.warn(`⚠️  配置文件不存在: ${CONFIG_PATH}`);
+            console.warn(`⚠️ 配置文件不存在: ${CONFIG_PATH}`);
             configData = getDefaultConfig();
             return configData;
         }
@@ -47,5 +50,4 @@ export function loadConfig() {
     }
 }
 
-// 默认导出一份配置数据，方便直接 require/import
 export default loadConfig();
