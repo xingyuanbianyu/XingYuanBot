@@ -1,10 +1,15 @@
 import { readdirSync, statSync, readFileSync, existsSync } from 'fs';
-import { join } from 'path';
+import { join } from 'node:path';
 import { pathToFileURL } from 'url';
 
 const PLUGINS_DIR = './xy-plugins';
 
+let _loaded = false;
+let _pluginsCache = null;
+
 export async function loadPlugins() {
+  if (_pluginsCache) return _pluginsCache;
+  if (_loaded) return plugins;
   const plugins = [];
   if (!existsSync(PLUGINS_DIR)) return plugins;
 
@@ -36,7 +41,8 @@ export async function loadPlugins() {
 
       // 转换为 file:// URL 避免 Windows 路径报错
       const moduleURL = pathToFileURL(entryPath).href;
-      const mod = await import(moduleURL);
+      const cacheBustURL = moduleURL + '?t=' + Date.now();
+      const mod = await import(cacheBustURL);
 
       plugins.push({
         name: dirName,
@@ -51,5 +57,7 @@ export async function loadPlugins() {
   }
 
   console.log(`🎉 成功加载 ${plugins.length} 个插件\n`);
+  _loaded = true;
+  _pluginsCache = plugins;
   return plugins;
 }
