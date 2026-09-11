@@ -37,6 +37,7 @@ XingYuanBot 项目根目录
    ├───xy-config 核心配置目录
    │       ├─config 权限配置目录
    │       │    ├─permissions.js 权限检测器
+   │       │    ├─bot.yaml 点赞功能配置文件
    │       │    └─config.yaml.example 权限配置模板
    │       └─config.yaml 后台管理员配置
    ├───temp 数据目录和临时数据
