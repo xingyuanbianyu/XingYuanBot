@@ -10,6 +10,7 @@ const BRIDGE_PORT = 9520;
 const ADAPTER_URL = 'http://127.0.0.1:9521';
 const CONFIG_PATH = path.join(__dirname, '../temp/vris/vris.yaml');
 const BRIDGE_SCRIPT = path.join(__dirname, 'bridge.py');
+const HTTP_API_URL = 'http://127.0.0.1:3002';
 
 // ========== 启动 bridge.py ==========
 function startBridgePy() {
@@ -45,20 +46,45 @@ function loadConfig() {
     return null;
 }
 
+// ========== 查QQ昵称（调用3002端口） ==========
+function getNickname(userId) {
+    return new Promise(resolve => {
+        const req = http.request(`${HTTP_API_URL}/get_stranger_info?user_id=${userId}`, { method: 'GET' }, res => {
+            let raw = '';
+            res.on('data', chunk => raw += chunk);
+            res.on('end', () => {
+                try {
+                    const result = JSON.parse(raw);
+                    // 3002端口返回格式: { status: "ok", data: { nickname: "xxx", ... } }
+                    const nick = result?.data?.nickname || result?.nickname || null;
+                    resolve(nick);
+                } catch {
+                    resolve(null);
+                }
+            });
+        });
+        req.on('error', () => resolve(null));
+        req.setTimeout(3000, () => resolve(null));
+        req.end();
+    });
+}
+
 // ========== 模板渲染 ==========
 function render(template, data) {
+    // 模板里有 CQ 码 → 用 QQ号数字；没有 → 用昵称文字
+    const qqValue = template.includes('[CQ:at') ? (data.user_id || '') : (data.nickname || data.user_id || '');
     return template
-        .replace(/\{qq\}/g, data.user_id || '')
+        .replace(/\{qq\}/g, qqValue)
         .replace(/\{operator\}/g, data.operator_id || '');
 }
 
-// ========== 启动 HTTP 接收服务（收 bridge.py 的转发） ==========
-http.createServer((req, res) => {
+// ========== 启动 HTTP 接收服务 ==========
+http.createServer(async (req, res) => {
     if (req.method !== 'POST') { res.writeHead(405); res.end(); return; }
 
     let body = '';
     req.on('data', chunk => { body += chunk; });
-    req.on('end', () => {
+    req.on('end', async () => {
         try {
             const data = JSON.parse(body);
             const noticeType = data.notice_type || '';
@@ -80,6 +106,10 @@ http.createServer((req, res) => {
             }
 
             if (template && groupId) {
+                // 查昵称
+                const nick = await getNickname(userId);
+                data.nickname = nick;  // 塞进 data 里
+
                 const msg = render(template, data);
                 const fwdReq = http.request(
                     `${ADAPTER_URL}/send`,
@@ -104,5 +134,5 @@ http.createServer((req, res) => {
     });
 }).listen(BRIDGE_PORT, () => {
     console.log(`[bridge.js] 🟢 监听端口: ${BRIDGE_PORT}`);
-    startBridgePy();  // 端口就绪后拉起 Python
+    startBridgePy();
 });
