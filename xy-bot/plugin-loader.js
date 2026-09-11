@@ -8,6 +8,7 @@ let _loaded = false;
 let _pluginsCache = null;
 
 export async function loadPlugins() {
+    console.log('🔵 loadPlugins 被调用, _loaded=' + _loaded); // ← 加这行
     if (_pluginsCache) return _pluginsCache;
     if (_loaded) return _plugins;
 
@@ -42,6 +43,7 @@ export async function loadPlugins() {
             const moduleURL = pathToFileURL(entryPath).href;
             const cacheBustURL = moduleURL + '?t=' + Date.now();
             const mod = await import(cacheBustURL);
+            console.log('🟡 正在 import:', cacheBustURL); // ← 加这行
 
             plugins.push({
                 name: dirName,
@@ -62,6 +64,7 @@ export async function loadPlugins() {
 }
 
 export function clearPluginCache() {
+    console.log('🔴 clearPluginCache 被调用了'); // ← 加这行
     _loaded = false;
     _pluginsCache = null;
 }

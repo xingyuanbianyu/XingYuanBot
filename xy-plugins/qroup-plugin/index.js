@@ -134,7 +134,7 @@ export default {
     return cmd.startsWith('踢') || cmd.startsWith('禁言') || cmd.startsWith('解禁')
         || cmd.startsWith('头衔') || cmd.startsWith('设置管理')
         || cmd.startsWith('取消管理') || cmd.startsWith('点赞')
-        || cmd.startsWith('赞我');
+        || cmd.startsWith('赞我') || cmd.startsWith('申请头衔');
   },
 
   handle: async function({ text, chatId, isGroup, senderName, senderQQ, role }) {
@@ -439,8 +439,8 @@ export default {
     }
 
     // 头衔
-    if (cmd.startsWith('头衔')) {
-      const titleContent = cmd.replace('头衔', '').trim();
+    if (cmd.startsWith('头衔') || cmd.startsWith('申请头衔')) {
+      const titleContent = cmd.replace(/^(申请头衔|头衔)\s*/, '').trim();
       if (!titleContent) return '⚠️ 用法：#头衔 头衔内容';
 
       let botQQ = null;
