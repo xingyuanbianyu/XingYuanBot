@@ -9,6 +9,7 @@ XingYuanBot 项目根目录
    │       ├─bridge.py 监听协议端的ws协议入群和退群事件
    │       ├─plugin-loader.js 插件核心加载器
    │       ├─command.js 后台管理核心
+   │       ├─blacklist.js 黑名单管理器
    │       ├─bot.js 初始化命令行
    │       ├─lib.cjs 注册全局变量和全局函数处理器
    │       └─config.js 读取黑名单返回数据
