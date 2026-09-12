@@ -1,22 +1,103 @@
 import { WebSocket, WebSocketServer } from 'ws';
-import { loadPlugins } from './plugin-loader.js';
+import { loadPlugins, clearPluginCache } from './plugin-loader.js';
 import { getRole } from '../xy-config/config/permissions.js';
+import config from './config.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import YAML from 'yaml';
+import http from 'http';
+import axios from 'axios';
+import { spawn } from 'child_process';
+import { dirname, join } from 'path';
+import './lib.cjs'
 
 const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const __dirname = dirname(__filename);
+const ADAPTER_PORT = 9521;
+const API_URL = 'http://127.0.0.1:3000';
+const BRIDGE_JS = join(__dirname, 'bridge.js');
 
-// ==================== 配置 ====================
-const WS_PORT = process.env.WS_PORT || 3001;
-const REMOTE_WS_URL = process.env.REMOTE_WS_URL || 'ws://127.0.0.1:3001';
+// ==================== 配置读取 ====================
+function loadConfig(relativePath) {
+    if (!relativePath) return {};
+    try {
+        const fullPath = path.join(__dirname, relativePath);
+        if (fs.existsSync(fullPath)) {
+            const fileContents = fs.readFileSync(fullPath, 'utf8');
+            return YAML.parse(fileContents) || {};
+        }
+    } catch (e) {
+        console.error(`❌ 读取配置 ${relativePath} 失败:`, e.message);
+    }
+    return {};
+}
+
+const serverCfg = loadConfig('../xy-data/bot_server.yaml');
+const clientCfg = loadConfig('../xy-data/bot_client.yaml');
+
+// 优先从 YAML 配置文件读取，没有则 fallback 到环境变量或默认值
+const WS_PORT  = serverCfg.server?.port ?? Number(process.env.WS_PORT) ?? 3001;
+const WS_HOST  = serverCfg.server?.host ?? process.env.WS_HOST ?? '127.0.0.1';
+
+const clientHost = clientCfg.client?.host ?? process.env.CLIENT_HOST ?? '127.0.0.1';
+const clientPort = clientCfg.client?.port ?? Number(process.env.CLIENT_PORT) ?? 3001;
+const REMOTE_WS_URL = `ws://${clientHost}:${clientPort}`;
+
+console.log(`[配置] 服务端监听: ${WS_HOST}:${WS_PORT}`);
+console.log(`[配置] 客户端目标: ${REMOTE_WS_URL}`);
+
+// 注册全局重载函数（供 index.js 中的重载指令调用）
+globalThis._xyReloadPlugins = async () => {
+    clearPluginCache();          // 先清缓存
+    const plugins = await loadPlugins();  // 再重新加载
+    return plugins;
+};
+
+// 消息分发：每次取 plugins 的最新引用，而不是闭包写死
+async function dispatchMessage(msg) {
+    const plugins = await loadPlugins();  // 这样拿到的始终是最新的
+    for (const plugin of plugins) {
+        // 匹配规则并执行 handler
+    }
+}
+
+// ==================== 以下逻辑全部保持不变 ====================
 
 let plugins = [];
 let wsClient = null;
 let wsServer = null;
 let connected = false;
 let clientTimer = null;
+let currentMode = null;
+
+// ===================== 全局状态：全进程唯一 =====================
+const State = { IDLE: 0, CONNECTING: 1, CONNECTED: 2 };
+const STATE_NAME = ['IDLE', 'CONNECTING', 'CONNECTED'];
+
+let state = State.IDLE;          // 全局连接状态
+let primaryChannel = null;       // 当前生效通道: 'client' | 'server'
+
+/** 只有状态真正变化时才打日志，重复调用一律静默 */
+function setState(next, reason = '') {
+  if (state === next) return;
+  const prev = state;
+  state = next;
+  const icon = next === State.CONNECTED ? '✅' : next === State.CONNECTING ? '🔄' : '⚪';
+  console.log(`${icon} 通道状态 -> ${STATE_NAME[next]}${reason ? ' (' + reason + ')' : ''}`);
+}
+
+/** 抢占主通道：已被别人占了就返回 false，调用方必须立刻闭嘴退出 */
+function claimPrimary(ch) {
+  if (primaryChannel && primaryChannel !== ch) return false;
+  primaryChannel = ch;
+  return true;
+}
+
+/** 释放主通道，备胎可以接管 */
+function releasePrimary(ch) {
+  if (primaryChannel === ch) primaryChannel = null;
+}
 
 // ==================== 停止客户端重试 ====================
 function stopClientRetry() {
@@ -35,6 +116,27 @@ function stopServer() {
     }
 }
 
+// ==================== 黑名单检查 ====================
+function isBlacklisted(userId, groupId) {
+    const qq = String(userId);
+    const blacklistQQ = config.blacklist_qq || [];
+    const blacklistGroup = config.blacklist_group || [];
+
+    // QQ 号命中黑名单
+    if (blacklistQQ.includes(qq)) {
+        console.log(`🚫 黑名单拦截: QQ ${qq}`);
+        return true;
+    }
+
+    // 群号命中黑名单
+    if (groupId && blacklistGroup.includes(String(groupId))) {
+        console.log(`🚫 黑名单拦截: 群 ${groupId}`);
+        return true;
+    }
+
+    return false;
+}
+
 // ==================== 消息处理（两种模式共用） ====================
 function setupMessageHandler(ws) {
     ws.on('message', async (data) => {
@@ -50,16 +152,19 @@ function setupMessageHandler(ws) {
             if (msg.post_type === 'notice') {
                 console.log(`📡 收到通知事件: notice_type=${msg.notice_type}, sub_type=${msg.sub_type || '无'}`);
 
+                // 黑名单检查
+                const noticeUserId = msg.user_id || msg.operator_id;
+                const noticeGroupId = msg.group_id;
+                if (isBlacklisted(noticeUserId, noticeGroupId)) return;
+
                 for (const { name, handler } of plugins) {
-                    // 🔴 先确认 handler 是个对象，且有 type 和 handle
-                    if (!handler || typeof handler !== 'object') continue;
+                    //if (!handler || typeof handler !== 'object') continue;
                     if (handler.type !== 'event') continue;
                     if (typeof handler.handle !== 'function') continue;
 
                     try {
                         const reply = await handler.handle({ text: '', msg });
                         if (reply && reply.text) {
-                            // notice 事件没有 chatId，需要从 msg 中取
                             const chatId = msg.group_id || msg.user_id;
                             const isGroup = !!msg.group_id;
                             await sendMsg(chatId, reply, isGroup);
@@ -69,7 +174,7 @@ function setupMessageHandler(ws) {
                         console.error(`❌ 插件 [${name}] 执行报错:`, e.message);
                     }
                 }
-                return; // notice 处理完就结束，不走下面的 message 逻辑
+                return;
             }
 
             // ─────────────────────────────────────
@@ -81,7 +186,9 @@ function setupMessageHandler(ws) {
             const senderQQ = String(msg.user_id);
             const role = getRole(senderQQ);
 
-            // 提取文本
+            // 🔴 黑名单拦截
+            if (isBlacklisted(senderQQ, isGroup ? msg.group_id : null)) return;
+
             let text = '';
             let replyMsgId = '';
             if (Array.isArray(msg.message)) {
@@ -106,9 +213,12 @@ function setupMessageHandler(ws) {
             }
 
             const preview = text.length > 30 ? text.substring(0, 30) + '...' : text;
-            console.log(`[收] [${isGroup ? '群' : '私'}] ${senderName}: ${preview}`);
+            if (isGroup) {
+                console.log(`[收] 群聊 [群号: ${chatId}] ${senderName}: ${preview}`);
+            } else {
+                console.log(`[收] 私聊 [QQ: ${chatId}] ${senderName}: ${preview}`);
+            }
 
-            // 遍历插件匹配
             for (const { name, handler } of plugins) {
                 if (!handler || typeof handler !== 'object') continue;
                 if (typeof handler.match !== 'function') continue;
@@ -139,7 +249,76 @@ function setupMessageHandler(ws) {
         }
     });
 }
+// ========== 启动 bridge.js ==========
+function startBridgeJs() {
+    console.log('[adapter.js] 启动 bridge.js ...');
+    const proc = spawn('node', [BRIDGE_JS], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        detached: false
+    });
+    proc.stdout.on('data', d => process.stdout.write(`[bridge.js] ${d}`));
+    proc.stderr.on('data', d => process.stderr.write(`[bridge.js] ${d}`));
+    proc.on('close', code => {
+        console.log(`[adapter.js] bridge.js 退出, 代码: ${code}, 5秒后重启...`);
+        setTimeout(startBridgeJs, 5000);
+    });
+}
 
+// ========== 启动 HTTP 接收服务（收 bridge.js 的转发） ==========
+http.createServer(async (req, res) => {
+    if (req.method !== 'POST') { res.writeHead(405); res.end(); return; }
+
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', async () => {
+        try {
+            const parsed = JSON.parse(body);
+            const group_id = parsed.group_id;
+            const message = parsed.message;
+            // user_id 如果 bridge 没传，就给个空字符串，避免报错
+            const user_id = parsed.user_id ? String(parsed.user_id) : '';
+
+            // ====== 黑名单拦截 ======
+            const blacklistQQ = config.blacklist_qq || [];
+            const blacklistGroup = config.blacklist_group || [];
+
+            if (user_id && blacklistQQ.includes(user_id)) {
+                console.log(`🚫 黑名单拦截: QQ ${user_id}`);
+                res.writeHead(403);
+                res.end(JSON.stringify({ status: 'blocked' }));
+                return;  // 终止，不发送
+            }
+
+            if (blacklistGroup.includes(String(group_id))) {
+                console.log(`🚫 黑名单拦截: 群 ${group_id}`);
+                res.writeHead(403);
+                res.end(JSON.stringify({ status: 'blocked' }));
+                return;  // 终止，不发送
+            }
+
+            // ====== 黑名单拦截结束 ======
+
+            const result = await axios.post(`${API_URL}/send_group_msg`, {
+                group_id,
+                message
+            });
+
+            if (result.data?.status === 'ok') {
+                console.log(`[adapter.js] ✅ 发送成功`);
+                res.writeHead(200); res.end('{"status":"ok"}');
+            } else {
+                console.log(`[adapter.js] ❌ 发送失败: ${result.data?.msg}`);
+                res.writeHead(500); res.end('{"error":"send failed"}');
+            }
+        } catch (e) {
+            console.error(`[adapter.js] 异常: ${e.message}`);
+            res.writeHead(500); res.end('{"error":"internal"}');
+        }
+    });
+}).listen(ADAPTER_PORT, () => {
+    console.log(`[adapter.js] 🟢 监听端口: ${ADAPTER_PORT}`);
+    startBridgeJs();  // 端口就绪后拉起 bridge.js
+});
 // ==================== 发送消息 ====================
 export async function sendMsg(chatId, reply, isGroup) {
     if (!wsClient) return;
@@ -178,60 +357,80 @@ export async function sendMsg(chatId, reply, isGroup) {
     wsClient.send(JSON.stringify(payload));
 }
 
-// ==================== 客户端模式：主动去连 ====================
-async function tryConnectClient(retryCount) {
-    if (connected) return;
-    if (retryCount > 3) {
-        console.log(`⚠️  客户端连接失败已达3次，静默等待3分钟后重试...`);
-        clientTimer = setTimeout(() => { tryConnectClient(1); }, 3 * 60 * 1000);
-        return;
+// ===================== 客户端：被占就静默退出 =====================
+async function tryConnectClient(attempt = 1) {
+  // ⬇️ 关键第一条：已经有人连上了，我直接闭嘴，不重试、不打日志
+  if (state === State.CONNECTED && primaryChannel !== 'client') return;
+
+  setState(State.CONNECTING, 'client');
+
+  try {
+    const ws = new WebSocket(REMOTE_WS_URL);
+    await new Promise((resolve, reject) => {
+      ws.on('open', () => resolve());
+      ws.on('error', (err) => reject(err));
+      setTimeout(() => reject(new Error('timeout')), 5000);
+    });
+
+    // ⬇️ 关键第二条：抢锁，抢不到说明服务端已经先连上了，我主动关掉自己
+    if (!claimPrimary('client')) {
+      console.log('⚪ 服务端通道已在运行，客户端自动让位并关闭');
+      ws.close();
+      return;
     }
 
-    console.log(`🔄 客户端尝试连接 ${REMOTE_WS_URL}... (第 ${retryCount}/3 次)`);
+    setState(State.CONNECTED, 'client');
+    wsClient = ws;
+    setupMessageHandler(ws);
 
-    try {
-        const ws = new WebSocket(REMOTE_WS_URL);
+    ws.on('close', () => {
+      console.log('⚠️ 客户端通道断开');
+      wsClient = null;
+      releasePrimary('client');
+      setState(State.IDLE, 'client lost');
+      stopClientRetry();
+      // 只有自己断了才重连，不会和服务端打架
+      tryConnectClient(1);
+    });
 
-        await new Promise((resolve, reject) => {
-            ws.on('open', () => { resolve(); });
-            ws.on('error', (err) => { reject(err); });
-            setTimeout(() => reject(new Error('timeout')), 5000);
-        });
-
-        connected = true;
-        wsClient = ws;
-        console.log(`✅ 客户端已连接: ${REMOTE_WS_URL}`);
-
-        setupMessageHandler(ws);
-        stopServer();
-
-    } catch (err) {
-        console.log(`❌ 第 ${retryCount} 次连接失败: ${err.message}`);
-        await new Promise(r => setTimeout(r, 2000));
-        tryConnectClient(retryCount + 1);
+  } catch (err) {
+    releasePrimary('client');
+    // ⬇️ 关键第三条：失败日志只在第一次和状态变化时打，之后指数退避 + 静默
+    if (attempt <= 2) {
+      console.log(`❌ 客户端连接失败 (${attempt}/3): ${err.message}`);
     }
+    const delay = Math.min(2000 * Math.pow(2, attempt - 1), 60000); // 2s / 4s / 8s ... 上限60s
+    clientTimer = setTimeout(() => tryConnectClient(attempt + 1), delay);
+  }
 }
 
-// ==================== 服务端模式：等待被连 ====================
+// ===================== 服务端：监听本身不产生日志 =====================
 function startServer() {
-    wsServer = new WebSocketServer({ port: WS_PORT });
-    console.log(`📡 服务端已启动，监听端口 ${WS_PORT}...`);
-    console.log(`   等待 NapCat 或其他客户端连接...`);
+  if (wsServer) return; // 防重复启动，避免 EADDRINUSE
 
-    wsServer.on('connection', (ws) => {
-        if (connected) {
-            console.log('⚠️  已有连接，拒绝新连接');
-            ws.close();
-            return;
-        }
+  wsServer = new WebSocketServer({ port: WS_PORT, host: WS_HOST });
+  console.log(`🌐 服务端开始监听 ${WS_HOST}:${WS_PORT}`);
 
-        connected = true;
-        wsClient = ws;
-        console.log(`✅ 客户端已连接（服务端模式）`);
+  wsServer.on('connection', (ws) => {
+    // ⬇️ 客户端已经连上了，新来的直接拒绝，不刷屏
+    if (primaryChannel === 'client') {
+      ws.close(1000, 'primary channel active');
+      return;
+    }
+    if (!claimPrimary('server')) { ws.close(); return; }
 
-        setupMessageHandler(ws);
-        stopClientRetry();
+    setState(State.CONNECTED, 'server');
+    wsClient = ws;
+    setupMessageHandler(ws);
+
+    ws.on('close', () => {
+      console.log('⚠️ 服务端通道断开，继续监听...');
+      wsClient = null;
+      releasePrimary('server');
+      setState(State.IDLE, 'server lost');
+      // 服务端不用重连，继续 listen 就行 —— 这一行不会产生任何循环日志
     });
+  });
 }
 
 // ==================== 启动入口 ====================

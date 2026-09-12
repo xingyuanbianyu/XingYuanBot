@@ -36,10 +36,11 @@ const myCommands = [
   { cmd: '#踢@成员', desc: '将指定成员踢出群聊' },
   { cmd: '#禁言@成员QQ号 秒', desc: '禁言指定成员，默认600秒' },
   { cmd: '#解禁@QQ号', desc: '解除指定成员的禁言' },
-  { cmd: '#头衔 内容', desc: '给自己设置专属头衔（需机器人是群主）' },
+  { cmd: '#头衔 内容/#申请头衔 内容', desc: '给自己设置专属头衔（需机器人是群主）' },
   { cmd: '#设置管理@成员', desc: '将指定成员设为管理员（需大主人权限）' },
   { cmd: '#取消管理@成员', desc: '将指定成员降为普通成员（需大主人权限）' },
-  { cmd: '#点赞', desc: '让机器人给你点赞（好友10次，非好友50次）' },
+  { cmd: '#点赞/#赞我', desc: '让机器人给你点赞（好友10次，非好友50次）' },
+  { cmd: '#改头衔', desc: '让群主机器人改其他人的头衔（需要配置里的主人权限或者群管理权限）'},
 ];
 
 function injectHelp() {
@@ -134,7 +135,8 @@ export default {
     return cmd.startsWith('踢') || cmd.startsWith('禁言') || cmd.startsWith('解禁')
         || cmd.startsWith('头衔') || cmd.startsWith('设置管理')
         || cmd.startsWith('取消管理') || cmd.startsWith('点赞')
-        || cmd.startsWith('赞我') || cmd.startsWith('申请头衔');
+        || cmd.startsWith('赞我') || cmd.startsWith('申请头衔')
+        || cmd.startsWith('改头衔');
   },
 
   handle: async function({ text, chatId, isGroup, senderName, senderQQ, role }) {
@@ -436,6 +438,105 @@ export default {
       } catch (err) {
         return `❌ 请求失败：${err.message}`;
       }
+    }
+
+    // ====== #改头衔 指令 ======
+    if (cmd.startsWith('改头衔')) {
+        if (!targetQQ) {
+            return '❌ 格式错误：#改头衔 @成员 新头衔（改自己直接：#改头衔 新头衔）';
+        }
+
+        // 提取头衔文本：从 text 数组取纯文本段（跳过 at 类型）
+        let newTitle = '';
+        if (Array.isArray(text)) {
+            newTitle = text
+                .filter(item => item?.type === 'text')
+                .map(item => item?.data?.text || '')
+                .join('')
+                .trim()
+                .replace(/^#改头衔\s*/, '')
+                .trim();
+        } else {
+            newTitle = textStr.replace(/^#改头衔/, '').trim();
+    
+            // 找到 @ 标签的结束符号 ']'
+            const bracketIndex = newTitle.indexOf(']');
+            if (bracketIndex !== -1) {
+                // 截取 ']' 之后的内容作为新头衔
+                newTitle = newTitle.substring(bracketIndex + 1).trim();
+            } else {
+                // 兼容旧格式：如果没有 ']'，去掉开头的 '@xxx'
+                newTitle = newTitle.replace(/^@\S+\s*/, '').trim();
+            }
+        }
+
+        // 在这行前面加 log 👇
+        console.log('newTitle当前值:', JSON.stringify(newTitle));
+        console.log('text数组结构:', JSON.stringify(text));
+
+        if (!newTitle) {
+            return '❌ 请输入要设置的头衔';
+        }
+        if (newTitle.length > 18) {
+            return '❌ 头衔过长：最多 18 个字符';
+        }
+
+        // ---------- 权限判断 ----------
+        const isSelf = targetQQ === String(senderQQ);
+        let isGroupOwner = false;
+        let isGroupAdmin = false;
+
+        try {
+            const res = await fetch(`${API}/get_group_member_info?group_id=${chatId}&user_id=${senderQQ}`);
+            const data = await res.json();
+            const rawRole = data?.data?.role;
+            if (rawRole === 'owner') isGroupOwner = true;
+            if (rawRole === 'owner' || rawRole === 'admin') isGroupAdmin = true;
+        } catch (e) {}
+
+        if (!isSelf) {
+            // 改别人：需要QQ群主/群管，或配置master/owner
+            const highAdmin = ['master', 'owner'].includes(role);
+            if (!isGroupOwner && !isGroupAdmin && !highAdmin) {
+                return '❌ 权限不足：改别人头衔需要群主/群管或主人权限';
+            }
+        }
+
+        // ---------- 调用API改头衔 ----------
+        try {
+            const res = await fetch(`${API}/set_group_special_title`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    group_id: Number(chatId),
+                    user_id: Number(targetQQ),
+                    special_title: newTitle,
+                    duration: -1  // -1 表示永久
+                })
+            });
+           const rawText = await res.text();
+           const startIdx = rawText.indexOf('{');
+           const endIdx = rawText.indexOf('}', startIdx);
+           const jsonStr = rawText.substring(startIdx, endIdx + 1);
+           let result;
+           try {
+               result = JSON.parse(jsonStr);
+           } catch (e) {
+               if (res.ok) {
+                   result = { status: 'ok', retcode: 0 };
+               } else {
+                   throw new Error(`HTTP ${res.status}: ${rawText}`);
+               }
+           }
+
+            if (result.status === 'ok') {
+                return `✅ 已将头衔修改为「${newTitle}」`;
+            } else {
+                return `❌ 修改失败：${result.msg || result.message}`;
+            }
+        } catch (err) {
+            return `❌ 请求失败：${err.message}`;
+        }
     }
 
     // 头衔

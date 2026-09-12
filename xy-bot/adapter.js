@@ -1,3 +1,4 @@
+import './lib.cjs'
 import { WebSocket, WebSocketServer } from 'ws';
 import { loadPlugins, clearPluginCache } from './plugin-loader.js';
 import { getRole } from '../xy-config/config/permissions.js';
@@ -10,7 +11,6 @@ import http from 'http';
 import axios from 'axios';
 import { spawn } from 'child_process';
 import { dirname, join } from 'path';
-import './lib.cjs'
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -69,6 +69,35 @@ let wsClient = null;
 let wsServer = null;
 let connected = false;
 let clientTimer = null;
+let currentMode = null;
+
+// ===================== 全局状态：全进程唯一 =====================
+const State = { IDLE: 0, CONNECTING: 1, CONNECTED: 2 };
+const STATE_NAME = ['IDLE', 'CONNECTING', 'CONNECTED'];
+
+let state = State.IDLE;          // 全局连接状态
+let primaryChannel = null;       // 当前生效通道: 'client' | 'server'
+
+/** 只有状态真正变化时才打日志，重复调用一律静默 */
+function setState(next, reason = '') {
+  if (state === next) return;
+  const prev = state;
+  state = next;
+  const icon = next === State.CONNECTED ? '✅' : next === State.CONNECTING ? '🔄' : '⚪';
+  console.log(`${icon} 通道状态 -> ${STATE_NAME[next]}${reason ? ' (' + reason + ')' : ''}`);
+}
+
+/** 抢占主通道：已被别人占了就返回 false，调用方必须立刻闭嘴退出 */
+function claimPrimary(ch) {
+  if (primaryChannel && primaryChannel !== ch) return false;
+  primaryChannel = ch;
+  return true;
+}
+
+/** 释放主通道，备胎可以接管 */
+function releasePrimary(ch) {
+  if (primaryChannel === ch) primaryChannel = null;
+}
 
 // ==================== 停止客户端重试 ====================
 function stopClientRetry() {
@@ -220,7 +249,6 @@ function setupMessageHandler(ws) {
         }
     });
 }
-
 // ========== 启动 bridge.js ==========
 function startBridgeJs() {
     console.log('[adapter.js] 启动 bridge.js ...');
@@ -329,60 +357,80 @@ export async function sendMsg(chatId, reply, isGroup) {
     wsClient.send(JSON.stringify(payload));
 }
 
-// ==================== 客户端模式：主动去连 ====================
-async function tryConnectClient(retryCount) {
-    if (connected) return;
-    if (retryCount > 3) {
-        console.log(`⚠️  客户端连接失败已达3次，静默等待3分钟后重试...`);
-        clientTimer = setTimeout(() => { tryConnectClient(1); }, 3 * 60 * 1000);
-        return;
+// ===================== 客户端：被占就静默退出 =====================
+async function tryConnectClient(attempt = 1) {
+  // ⬇️ 关键第一条：已经有人连上了，我直接闭嘴，不重试、不打日志
+  if (state === State.CONNECTED && primaryChannel !== 'client') return;
+
+  setState(State.CONNECTING, 'client');
+
+  try {
+    const ws = new WebSocket(REMOTE_WS_URL);
+    await new Promise((resolve, reject) => {
+      ws.on('open', () => resolve());
+      ws.on('error', (err) => reject(err));
+      setTimeout(() => reject(new Error('timeout')), 5000);
+    });
+
+    // ⬇️ 关键第二条：抢锁，抢不到说明服务端已经先连上了，我主动关掉自己
+    if (!claimPrimary('client')) {
+      console.log('⚪ 服务端通道已在运行，客户端自动让位并关闭');
+      ws.close();
+      return;
     }
 
-    console.log(`🔄 客户端尝试连接 ${REMOTE_WS_URL}... (第 ${retryCount}/3 次)`);
+    setState(State.CONNECTED, 'client');
+    wsClient = ws;
+    setupMessageHandler(ws);
 
-    try {
-        const ws = new WebSocket(REMOTE_WS_URL);
+    ws.on('close', () => {
+      console.log('⚠️ 客户端通道断开');
+      wsClient = null;
+      releasePrimary('client');
+      setState(State.IDLE, 'client lost');
+      stopClientRetry();
+      // 只有自己断了才重连，不会和服务端打架
+      tryConnectClient(1);
+    });
 
-        await new Promise((resolve, reject) => {
-            ws.on('open', () => { resolve(); });
-            ws.on('error', (err) => { reject(err); });
-            setTimeout(() => reject(new Error('timeout')), 5000);
-        });
-
-        connected = true;
-        wsClient = ws;
-        console.log(`✅ 客户端已连接: ${REMOTE_WS_URL}`);
-
-        setupMessageHandler(ws);
-        stopServer();
-
-    } catch (err) {
-        console.log(`❌ 第 ${retryCount} 次连接失败: ${err.message}`);
-        await new Promise(r => setTimeout(r, 2000));
-        tryConnectClient(retryCount + 1);
+  } catch (err) {
+    releasePrimary('client');
+    // ⬇️ 关键第三条：失败日志只在第一次和状态变化时打，之后指数退避 + 静默
+    if (attempt <= 2) {
+      console.log(`❌ 客户端连接失败 (${attempt}/3): ${err.message}`);
     }
+    const delay = Math.min(2000 * Math.pow(2, attempt - 1), 60000); // 2s / 4s / 8s ... 上限60s
+    clientTimer = setTimeout(() => tryConnectClient(attempt + 1), delay);
+  }
 }
 
-// ==================== 服务端模式：等待被连 ====================
+// ===================== 服务端：监听本身不产生日志 =====================
 function startServer() {
-    wsServer = new WebSocketServer({ port: WS_PORT, host: WS_HOST });
-    console.log(`📡 服务端已启动，监听 ${WS_HOST}:${WS_PORT}...`);
-    console.log(`   等待 NapCat 或其他客户端连接...`);
+  if (wsServer) return; // 防重复启动，避免 EADDRINUSE
 
-    wsServer.on('connection', (ws) => {
-        if (connected) {
-            console.log('⚠️  已有连接，拒绝新连接');
-            ws.close();
-            return;
-        }
+  wsServer = new WebSocketServer({ port: WS_PORT, host: WS_HOST });
+  console.log(`🌐 服务端开始监听 ${WS_HOST}:${WS_PORT}`);
 
-        connected = true;
-        wsClient = ws;
-        console.log(`✅ 客户端已连接（服务端模式）`);
+  wsServer.on('connection', (ws) => {
+    // ⬇️ 客户端已经连上了，新来的直接拒绝，不刷屏
+    if (primaryChannel === 'client') {
+      ws.close(1000, 'primary channel active');
+      return;
+    }
+    if (!claimPrimary('server')) { ws.close(); return; }
 
-        setupMessageHandler(ws);
-        stopClientRetry();
+    setState(State.CONNECTED, 'server');
+    wsClient = ws;
+    setupMessageHandler(ws);
+
+    ws.on('close', () => {
+      console.log('⚠️ 服务端通道断开，继续监听...');
+      wsClient = null;
+      releasePrimary('server');
+      setState(State.IDLE, 'server lost');
+      // 服务端不用重连，继续 listen 就行 —— 这一行不会产生任何循环日志
     });
+  });
 }
 
 // ==================== 启动入口 ====================
