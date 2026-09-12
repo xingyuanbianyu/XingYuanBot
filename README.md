@@ -40,7 +40,7 @@
 
 ### 环境要求
 
-- Node.js 18+
+- [Node.js](https://nodejs.org/zh-cn/download)
 - Redis 数据库（不需要，待开发中，仅作为后续选择）
 - NapCat / LLOneBot 协议端
 <details>
@@ -53,7 +53,12 @@
 
 </details>
 
-- python 3X（仅运行环境要求）
+- Windows[python3.14.7安装包](https://www.python.org/ftp/python/3.14.7/python-3.14.7-amd64.exe)
+- Linux系统
+```bash
+apt update
+apt install -y python3 python-is-python3
+```
 
 ### 安装步骤
 
@@ -153,8 +158,7 @@ client:
 
 ### 端口设计
 
-- 3000 http服务端，该端口为发送消息设计
-- 3002 http服务端，群管必要端口（处理禁言、踢人等指令）
+- 3000 http服务端，一系列API请求通过该端口进行请求
 
 ## 反馈方式
 <details>

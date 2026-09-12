@@ -10,12 +10,15 @@ const BRIDGE_PORT = 9520;
 const ADAPTER_URL = 'http://127.0.0.1:9521';
 const CONFIG_PATH = path.join(__dirname, '../temp/vris/vris.yaml');
 const BRIDGE_SCRIPT = path.join(__dirname, 'bridge.py');
-const HTTP_API_URL = 'http://127.0.0.1:3002';
+const HTTP_API_URL = 'http://127.0.0.1:3000';
 
 // ========== 启动 bridge.py ==========
 function startBridgePy() {
     console.log('[bridge.js] 启动 bridge.py ...');
-    const py = spawn('python', [BRIDGE_SCRIPT], {
+    // 判断当前系统，如果是 win32 就用 'python'，否则（Linux/Mac）用 'python3'
+    const pythonDesc = process.platform === 'win32' ? 'python' : 'python3';
+    // 下面这行里的 'python' 替换成变量 pythonDesc
+    const py = spawn(pythonDesc, [BRIDGE_SCRIPT], {
         stdio: ['ignore', 'pipe', 'pipe'],
         detached: false
     });

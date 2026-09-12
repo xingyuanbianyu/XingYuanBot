@@ -1,1 +1,2 @@
-likeEnabled: false
+bot:
+    likeEnabled: true

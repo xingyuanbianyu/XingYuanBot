@@ -9,7 +9,6 @@ let _pluginsCache = null;
 
 export async function loadPlugins() {
     console.log('🔵 loadPlugins 被调用, _loaded=' + _loaded); // ← 加这行
-    if (_pluginsCache) return _pluginsCache;
     if (_loaded) return _plugins;
 
     const plugins = [];

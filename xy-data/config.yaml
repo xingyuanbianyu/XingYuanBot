@@ -1,5 +1,7 @@
 blacklist_qq:
   - 3758575163
-blacklist_group: []
+  - 2706953653
+blacklist_group:
+  - 785383874
 whitelist_qq: []
 whitelist_group: []

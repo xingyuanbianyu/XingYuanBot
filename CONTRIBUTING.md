@@ -74,10 +74,37 @@ export default {
 }
 ```
 
+## 制作共享库教程
+- 1.了解加载规则
+- .mjs 强制import()加载
+- .cjs 强制require()加载
+- .js 根据package.json的type字段，"type": "module"使用import()加载，其他字段使用require()加载
+
+- 2.lib.json示范
+```json
+{
+    "enable": true,
+    "entries": ["index.js"]
+}
+```
+entries字段，根据实际入口文件填写
+
+- 3.如何编写共享库文件
+```js
+// ===== xy-lib/fl/index.js =====
+
+console.log("✅ [xy-lib] fl 模块已加载");
+
+// 1. 全局随机数
+globalThis.random = function(min, max) {
+    return Math.floor(Math.random() * (max - min + 1)) + min;
+};
+```
+这个仅为示例
+
 ---
 
 ## 提交 PR 流程
-
 1. **Fork** 本仓库到你的账户（GitHub / Gitee / GitCode 任意平台）
 2. **Clone** 到你的本地：
    ```bash
@@ -112,6 +139,8 @@ feat(plugin/recall): 添加批量撤回功能
 fix(plugin/group): 修复禁言权限判断问题
 docs: 补充插件开发文档
 ```
+
+## 允许自建仓库，也允许任何魔改
 
 ---
 

@@ -7,7 +7,7 @@ import { parse as parseYaml } from 'yaml';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MENU_PATH = path.resolve(__dirname, '../指令/menu.json');
-const API = 'http://127.0.0.1:3002';
+const API = 'http://127.0.0.1:3000';
 
 // 记录今天已点赞过的用户
 const likedToday = new Set();
@@ -378,40 +378,65 @@ export default {
       }
     }
 
-    // 禁言
     if (cmd.startsWith('禁言')) {
-      if (!targetQQ) return '⚠️ 用法：#禁言@成员 [秒数]';
-      if (!hasPermission) return '❌ 权限不足：此命令仅限群主、管理员或配置文件中的主人使用。';
+        if (!targetQQ) return '⚠️ 用法：#禁言@成员 [秒数/分钟/小时/天数]，例：#禁言@成员 5m 或 1天';
+        if (!hasPermission) return '❌ 权限不足：此命令仅限群主、管理员或配置文件中的主人使用。';
 
-      let duration = 600;
-      let cmdClean = cmd;
-      if (targetQQ) {
-        cmdClean = cmd.replace(targetQQ, '');
-      }
-      const durationMatch = cmdClean.match(/(\d+)/);
-      if (durationMatch) {
-        duration = parseInt(durationMatch[1]) * 600;
-      }
-
-      try {
-        const res = await fetch(`${API}/set_group_ban`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            group_id: Number(chatId),
-            user_id: Number(targetQQ),
-            duration: duration
-          })
-        });
-        const result = await res.json();
-        if (result.status === 'ok') {
-          return `✅ 已禁言 @${targetQQ} ${duration}秒`;
-        } else {
-          return `❌ 禁言失败：${result.msg || result.message}`;
+        let duration = 600; // 默认10分钟
+        let cmdClean = cmd;
+        if (targetQQ) {
+            cmdClean = cmd.replace(targetQQ, "");
         }
-      } catch (err) {
-        return `❌ 请求失败：${err.message}`;
-      }
+
+        // 匹配数字 + 单位（支持 s秒 m分钟 h小时 d天，也支持中文）
+        const durationMatch = cmdClean.match(/(\d+)\s*(s|秒|m|分钟|min|h|小时|d|天|日)?/i);
+        if (durationMatch) {
+            const value = parseInt(durationMatch[1]);
+            const unit = (durationMatch[2] || 'm').toLowerCase(); // 默认单位为分钟
+
+            switch (unit) {
+                case 's':
+                case '秒':
+                    duration = value;
+                    break;
+                case 'm':
+                case '分钟':
+                case 'min':
+                    duration = value * 60;
+                    break;
+                case 'h':
+                case '小时':
+                    duration = value * 60 * 60;
+                    break;
+                case 'd':
+                case '天':
+               case '日':
+                    duration = value * 60 * 60 * 24;
+                    break;
+                default:
+                    duration = value * 60; // 无单位默认分钟
+            }
+        }
+
+        try {
+            const res = await fetch(`${API}/set_group_ban`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    group_id: Number(chatId),
+                    user_id: Number(targetQQ),
+                    duration: duration
+                })
+            });
+            const result = await res.json();
+            if (result.status === 'ok') {
+                return `✅ 已禁言 @${targetQQ} ${duration}秒`;
+            } else {
+                return `❌ 禁言失败：${result.msg || result.message}`;
+            }
+        } catch (e) {
+            return `❌ 禁言失败：${e.message}`;
+        }
     }
 
     // 解禁

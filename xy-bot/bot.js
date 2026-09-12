@@ -1,4 +1,4 @@
-// xy-lib/bot.js
+// xy-bot/bot.js
 import readline from 'readline';
 
 export function startBot(client) {
