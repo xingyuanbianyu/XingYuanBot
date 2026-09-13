@@ -124,7 +124,7 @@ pip install -r requirements.txt
 
 - 已经实现自动创建配置，只需要启动项目，连接上协议端，具体如何设置主人，请看下面
 
-### 运行主程序：
+#### 运行主程序：
 ```
 # 方式一：标准启动（推荐）
 node --no-warnings app.js / node app.js
