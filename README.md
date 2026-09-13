@@ -246,4 +246,9 @@ m1536_adjs318inp@aka.yeah.net
 - Redis / SQLite 数据持久化支持
 - 更多实用插件(签到等)
 
+# XingYuanBot交流群：
+- Q群:
+```
+1103117017
+```
 
