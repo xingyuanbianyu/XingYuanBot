@@ -38,10 +38,14 @@
 
 ## 🚀 快速开始
 
-### 环境要求
+## 环境要求
 
-- [Node.js](https://nodejs.org/zh-cn/download)
-- Redis 数据库（不需要，待开发中，仅作为后续选择）
+- 下载安装 [Visual Studio Build Tools](https://aka.ms/vs/17/release/vs_buildtools.exe)，
+安装时勾选「使用 C++ 的桌面开发」工作负载
+
+---
+
+- [Node.js](https://nodejs.org/zh-cn/download)建议安装24.21.0版本
 - NapCat / LLOneBot 协议端
 <details>
 <summary>👉 点击查看协议端下载地址</summary>
@@ -53,11 +57,17 @@
 
 </details>
 
-- Windows[python3.14.7安装包](https://www.python.org/ftp/python/3.14.7/python-3.14.7-amd64.exe)
+- Windows [python3.14.7安装包](https://www.python.org/ftp/python/3.14.7/python-3.14.7-amd64.exe)
 - Linux系统
+- Debialn
 ```bash
 apt update
-apt install -y python3 python-is-python3
+apt install -y python3 build-essential
+```
+- RHEL
+```bash
+yum groupinstall -y "Development Tools"
+yum install -y python3
 ```
 
 ### 安装步骤
