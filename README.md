@@ -138,7 +138,7 @@ pnpm app或者pnpm run app → node --no-warnings app
 
 pnpm py或者pnpm run py → python script.py
 ```
-- 权限管理插件
+### 权限管理插件
 <details>
 <summary>👉 点击查看权限指令</summary>
 
