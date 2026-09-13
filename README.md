@@ -59,7 +59,7 @@
 
 - Windows [python3.14.7安装包](https://www.python.org/ftp/python/3.14.7/python-3.14.7-amd64.exe)
 - Linux系统
-- Debialn
+- Debian
 ```bash
 apt update
 apt install -y python3 build-essential
