@@ -103,14 +103,21 @@ cd XingYuanBot
 pnpm -v
 ```
 没有输出版本号或者提示不是内部或外部指令，则执行3
+<dr>
+如果输出了版本号，直接执行2和4，跳过3
+
 - 2.执行下面命令
 ```bash
 pnpm install
 ```
+
 - 3.如果没有pnpm，请先运行如下指令安装
 ```bash
 npm install -g pnpm
 ```
+
+安装pnpm后执行2
+
 - 4.执行如下命令安装python库
 ```bash
 pip install -r requirements.txt
