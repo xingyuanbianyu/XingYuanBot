@@ -62,12 +62,13 @@
 - Debian
 ```bash
 apt update
-apt install -y python3 build-essential
+apt install -y python3 build-essential python-is-python3
 ```
 - RHEL
 ```bash
 yum groupinstall -y "Development Tools"
 yum install -y python3
+ln -s /usr/bin/python3 /usr/bin/python
 ```
 
 ### 安装步骤
