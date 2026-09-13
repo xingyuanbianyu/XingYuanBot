@@ -375,7 +375,7 @@ export default {
         if (!noticeText) return '⚠️ 用法：#群公告 公告内容（可附带一张图片）';
 
         let imageUrl = '';
-        const imgMatch = msg.match(/\[CQ:image.*?url=(https?:\/\/[^\]]+)/);
+        const imgMatch = text.match(/\[CQ:image.*?url=(https?:\/\/[^\]]+)/);
         if (imgMatch) {
             imageUrl = imgMatch[1];
         }

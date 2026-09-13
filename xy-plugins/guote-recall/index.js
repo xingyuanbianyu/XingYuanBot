@@ -1,8 +1,33 @@
+// ✅ 修改点：使用 import 替代 require
+import Database from 'better-sqlite3';
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
+import fs from 'fs';
+
+// 获取当前文件所在目录（用于确保数据库文件路径正确）
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const dbPath = `${__dirname}/todo.db`;
+
+// 初始化数据库
+const db = new Database(dbPath); 
+db.pragma('journal_mode = WAL'); // 开启高性能模式
+
+// 建表逻辑
+db.exec(`
+  CREATE TABLE IF NOT EXISTS group_todos (
+    group_id TEXT PRIMARY KEY,
+    message_id TEXT NOT NULL,
+    created_at INTEGER DEFAULT (strftime('%s', 'now'))
+  )
+`);
+
+console.log('✅ 数据库初始化完成 (ESM模式)');
+
 export default {
     name: "群管工具箱",
     description: "支持 #撤回、#群待办、#取消待办",
 
-    // 统一匹配三个命令
     match: function (text, msg) {
         let txt = "";
         if (typeof text === "string") txt = text;
@@ -11,20 +36,18 @@ export default {
                 if (s && s.type === "text") txt += (s.data && s.data.text ? s.data.text : "");
             }
         }
-        // 匹配 #撤回、#群待办、#取消待办
         return /#撤回|#群待办|#取消待办/i.test(txt);
     },
 
     handle: async function (msg, matchResult) {
         let text = msg.text || "";
         const chatId = msg.chatId || msg.group_id;
-        const commandMsgId = msg.msg?.message_id; // 指令消息本身的ID
+        const commandMsgId = msg.msg?.message_id;
 
         // 提取引用ID
         let m = text.match(/\[引用ID:(-?\d+)\]/);
         let refId = m ? parseInt(m[1]) : null;
 
-        // 判断具体命令
         const isRecall = text.includes('#撤回');
         const isTodo = text.includes('#群待办');
         const isCancel = text.includes('#取消待办');
@@ -32,66 +55,49 @@ export default {
         // ================= 1. 撤回逻辑 =================
         if (isRecall) {
             console.log('[撤回] 开始执行');
-            if (!m) {
-                console.log('[撤回] 未找到引用ID');
-                return;
-            }
+            if (!m) return '⚠️ 未找到引用ID，请回复消息后使用';
 
-            // 1.1 撤回被引用的消息
             try {
-                const res1 = await fetch('http://127.0.0.1:3000/delete_msg', {
+                await fetch('http://127.0.0.1:3000/delete_msg', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ message_id: refId })
                 });
-                const result1 = await res1.json();
-                if (result1.status === 'ok') console.log('[撤回] ✅ 目标消息已撤回');
-                else console.log('[撤回] ❌ 目标消息撤回失败:', result1);
-            } catch (err) {
-                console.log('[撤回] ❌ 目标消息撤回异常:', err.message);
-            }
-
-            // 1.2 撤回指令消息本身
-            if (commandMsgId) {
-                try {
-                    await new Promise(r => setTimeout(r, 300)); // 延迟防太快
-                    const res2 = await fetch('http://127.0.0.1:3000/delete_msg', {
+                if (commandMsgId) {
+                    await new Promise(r => setTimeout(r, 300));
+                    await fetch('http://127.0.0.1:3000/delete_msg', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ message_id: commandMsgId })
                     });
-                    const result2 = await res2.json();
-                    if (result2.status === 'ok') console.log('[撤回] ✅ 指令消息已撤回');
-                } catch (err) {
-                    console.log('[撤回] ❌ 指令消息撤回异常:', err.message);
                 }
+                return '✅ 撤回成功';
+            } catch (err) {
+                return `❌ 撤回失败: ${err.message}`;
             }
-            return; // 执行完撤回直接结束，不往下走
         }
 
-        // ================= 权限检查函数 (待办功能共用) =================
+        // ================= 权限检查 =================
         async function checkBotPermission() {
             try {
-                // 获取 Bot QQ 号
                 const botRes = await fetch('http://127.0.0.1:3000/get_login_info');
                 const botData = await botRes.json();
                 const botQQ = botData?.data?.user_id;
                 if (!botQQ) return '❌ 无法获取 Bot 账号信息';
 
-                // 获取群成员信息
                 const infoRes = await fetch(`http://127.0.0.1:3000/get_group_member_info?group_id=${chatId}&user_id=${botQQ}&no_cache=true`);
                 const info = await infoRes.json();
                 const role = info?.data?.role;
                 if (role !== 'owner' && role !== 'admin') {
                     return '❌ Bot权限不足：请先将 Bot 设为群管理员或群主';
                 }
-                return true; // 权限通过
+                return true;
             } catch (e) {
                 return `❌ 权限校验异常：${e.message}`;
             }
         }
 
-        // ================= 2. 群待办逻辑 =================
+        // ================= 2. 群待办逻辑 (写入数据库) =================
         if (isTodo) {
             console.log('[群待办] 开始执行');
             if (!m) return '⚠️ 用法：请回复一条消息，再发送 #群待办';
@@ -109,8 +115,12 @@ export default {
                     })
                 });
                 const result = await res.json();
+                
                 if (result.status === 'ok') {
-                    return `✅ 已成功将引用的消息设为群待办 (ID: ${refId})`;
+                    // ✅ 关键：设置成功后，存入本地数据库
+                    const stmt = db.prepare('INSERT OR REPLACE INTO group_todos (group_id, message_id) VALUES (?, ?)');
+                    stmt.run(String(chatId), String(refId));
+                    return `✅ 已成功设为群待办 (ID已记录)`;
                 } else {
                     return `❌ 设置失败：${result.message || result.msg}`;
                 }
@@ -119,51 +129,44 @@ export default {
             }
         }
 
-        // ================= 3. 取消待办逻辑 =================
+        // ================= 3. 取消待办逻辑 (读取数据库) =================
         if (isCancel) {
-            console.log('[取消待办] 开始执行');
-            
+            console.log('[取消待办] 开始执行...');
             const checkResult = await checkBotPermission();
             if (checkResult !== true) return checkResult;
 
             try {
-                // 获取待办列表
-                const listRes = await fetch(`http://127.0.0.1:3000/get_group_todo_list?group_id=${chatId}`);
-                const listData = await listRes.json();
+                // ✅ 关键：直接从本地数据库查 ID，不依赖 NapCat 接口
+                const stmt = db.prepare('SELECT message_id FROM group_todos WHERE group_id = ?');
+                const row = stmt.get(String(chatId));
 
-                if (listData.status !== 'ok' || !listData.data || listData.data.length === 0) {
-                    return '✅ 当前群内没有需要取消的待办。';
+                if (!row) {
+                    return '✅ 当前群内没有本地记录的待办。';
                 }
 
-                let successCount = 0;
-                let failCount = 0;
+                const messageId = row.message_id;
+                
+                // 调用 NapCat 接口取消
+                const cancelRes = await fetch('http://127.0.0.1:3000/cancel_group_todo', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        group_id: Number(chatId),
+                        message_id: Number(messageId)
+                    })
+                });
+                const cancelData = await cancelRes.json();
 
-                // 遍历取消
-                for (const todo of listData.data) {
-                    const messageId = todo.message_id;
-                    if (!messageId) continue;
-
-                    try {
-                        const cancelRes = await fetch('http://127.0.0.1:3000/cancel_group_todo', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                group_id: Number(chatId),
-                                message_id: Number(messageId)
-                            })
-                        });
-                        const cancelData = await cancelRes.json();
-                        if (cancelData.status === 'ok') successCount++;
-                        else failCount++;
-                    } catch (e) {
-                        failCount++;
-                    }
+                if (cancelData.status === 'ok') {
+                    // 取消成功后，删除本地记录
+                    const delStmt = db.prepare('DELETE FROM group_todos WHERE group_id = ?');
+                    delStmt.run(String(chatId));
+                    return `✅ 取消待办成功`;
+                } else {
+                    return `❌ 取消失败：${cancelData.message || cancelData.msg}`;
                 }
-
-                return `✅ 取消待办完成。成功：${successCount}个，失败/已过期：${failCount}个。`;
-
             } catch (e) {
-                return `❌ 取消操作异常：${e.message}`;
+                return `❌ 取消待办时异常: ${e.message}`;
             }
         }
     }

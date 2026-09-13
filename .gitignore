@@ -23,3 +23,6 @@ temp/*.txt
 xy-plugins\plugin-group\plugin\index.js
 xy-plugins\plugin-group\plugin\inde.js
 xy-lib/fl/
+xy-plugins\guote-recall\todo.db
+xy-plugins\guote-recall\todo.db-shm
+xy-plugins\guote-recall\todo.db-wal
