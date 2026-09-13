@@ -41,6 +41,7 @@ const myCommands = [
   { cmd: '#取消管理@成员', desc: '将指定成员降为普通成员（需大主人权限）' },
   { cmd: '#点赞/#赞我', desc: '让机器人给你点赞（好友10次，非好友50次）' },
   { cmd: '#改头衔', desc: '让群主机器人改其他人的头衔（需要配置里的主人权限或者群管理权限）'},
+  { cmd: '#群公告', desc: '让机器人发群公告（需要机器人是群管理或者群主）'}
 ];
 
 function injectHelp() {
@@ -136,7 +137,7 @@ export default {
         || cmd.startsWith('头衔') || cmd.startsWith('设置管理')
         || cmd.startsWith('取消管理') || cmd.startsWith('点赞')
         || cmd.startsWith('赞我') || cmd.startsWith('申请头衔')
-        || cmd.startsWith('改头衔');
+        || cmd.startsWith('改头衔') || cmd.startsWith('群公告');
   },
 
   handle: async function({ text, chatId, isGroup, senderName, senderQQ, role }) {
@@ -350,6 +351,56 @@ export default {
       } catch (err) {
         return `❌ 请求失败：${err.message}`;
       }
+    }
+
+    // 发送群公告
+    if (cmd.startsWith('群公告')) {
+        if (!hasPermission) return '❌ 权限不足：此命令仅限管理员使用';
+
+        const botRes = await fetch(`${API}/get_login_info`);
+        const botData = await botRes.json();
+        const botQQ = botData?.data?.user_id;
+
+        if (botQQ) {
+          const botInfoRes = await fetch(`${API}/get_group_member_info?group_id=${chatId}&user_id=${botQQ}`);
+          const botInfoData = await botInfoRes.json();
+          if (botInfoData?.data?.role !== 'owner' && botlnfData?.data?.role !== 'admin') {
+            return '❌ Bot权限不足：需要先给Bot设置群管理员或者群主。';
+          }
+        }
+
+        const noticeText = text.replace(/^#?群公告\s*/, '').trim();
+        if (!noticeText) return '⚠️ 用法：#群公告 公告内容（可附带一张图片）';
+
+        let imageUrl = '';
+        const imgMatch = text.match(/\[CQ:image.*?url=(https?:\/\/[^\]]+)/);
+        if (imgMatch) {
+            imageUrl = imgMatch[1];
+        }
+
+        const bodyData = {
+            group_id: Number(chatId),
+            content: noticeText
+        };
+        if (imageUrl) {
+            bodyData.image = imageUrl;
+        }
+
+        try {
+            const res = await fetch(`${API}/_send_group_notice`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(bodyData)
+            });
+            const result = await res.json();
+            if (result.status === 'ok') {
+                return '✅ 群公告发布成功！';
+            } else {
+                return `❌ 发布公告失败：${result.msg || result.message}`;
+            }
+        } catch (e) {
+            return `❌ 发布公告失败：${e.message}`;
+        }
     }
 
     // 踢人
