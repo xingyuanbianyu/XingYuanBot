@@ -1,0 +1,9 @@
+# xy-config/config.yaml
+
+# ... 其他配置 ...
+
+# 后台管理账户
+admin:
+  username: XYBY
+  password: xingyuan
+  # password_hash: "这里未来会是一串哈希值"

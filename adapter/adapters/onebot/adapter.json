@@ -1,0 +1,7 @@
+{
+  "name": "onebot",
+  "platform": "qq",
+  "enable": true,
+  "description": "NapCatQQ / OneBot V11 适配器",
+  "entry": "index.js"
+}

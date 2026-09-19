@@ -1,0 +1,4 @@
+{
+  "enable": true,
+  "entries": ["index.js", "db.cjs", "log.js", "http.cjs", "msg.js", "ws_server.js", "message.mjs", "ws_clinet.js"]
+}

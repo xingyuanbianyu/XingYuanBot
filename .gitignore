@@ -1,0 +1,27 @@
+node_modules/
+*.pem
+*.key
+*.env
+.DS_Store
+*_log.txt
+
+# 忽略配置文件中的敏感项，但保留 config 目录结构
+xy-config/config/config.yaml
+xy-config/config/redis.yaml
+xy-data/config.yaml
+
+# 只忽略特定的敏感插件（如果有），而不是全部
+xy-plugins/auto-reply
+xy-plugins/group-admin
+xy-plugins/ID-plugin
+xy-plugins/weather-plugin
+xy-plugins/GH-plugin
+# 如果所有插件都是你自己写的，想备份到 Git，就不要忽略它们
+temp/*.png
+temp/*.txt
+*.lnk
+xy-plugins/plugin-group/plugin/index.js
+xy-plugins/plugin-group/plugin/inde.js
+xy-plugins/QQ/guote-recall/todo.db
+xy-plugins/QQ/guote-recall/todo.db-shm
+xy-plugins/QQ/guote-recall/todo.db-wal

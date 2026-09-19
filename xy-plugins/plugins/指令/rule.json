@@ -1,0 +1,5 @@
+{
+  "name": "系统指令",
+  "type": "command",
+  "entry": "index.js"
+}
