@@ -170,7 +170,7 @@ export default {
     } 
     // 2. 字符串格式处理（兼容你终端里打印出来的 @[at:3758575163] 格式）
     else if (typeof text === 'string') {
-        const atMatch = text.match(/@\[at:(\d+)\]/);
+        const atMatch = text.match(/@\{at:(\d+)}/);
         if (atMatch) {
             targetQQ = atMatch[1];
         }
@@ -178,7 +178,7 @@ export default {
 
     // 3. 如果上面没拿到 QQ，尝试从文本里匹配昵称/备注（兼容手动输入名字踢人）
     if (!targetQQ) {
-        const match = textStr.match(/@([^\s]+)/);
+        const match = textStr.match(/@\[([^\s]+)\]/);
         if (match) {
             const keyword = match[1];
             try {
@@ -630,7 +630,6 @@ export default {
       if (!titleContent) return '⚠️ 用法：#头衔 头衔内容';
 
       let botQQ = null;
-      a = null;
       let botRole = null;
       try {
         const loginRes = await fetch(`${API}/get_login_info`);

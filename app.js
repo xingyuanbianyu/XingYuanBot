@@ -31,10 +31,7 @@ function dispatch(std, plugins, adapter, ws) {
     senderName: std.senderName,
     senderQQ: std.senderQQ,
     role: std.role ?? 'member',
-
-    msg: std.raw,
-    messageId: std.messageId,
-
+    
     // 指令/index.js 暴力提取 QQ 号需要的别名字段
     user_id: std.senderQQ,
     userId: std.senderQQ,
