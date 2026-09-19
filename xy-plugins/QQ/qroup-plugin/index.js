@@ -12,6 +12,7 @@ const API = 'http://127.0.0.1:3000';
 // 记录今天已点赞过的用户
 const likedToday = new Set();
 let lastRecordDate = new Date().getDate();
+let botInfoData;
 
 // 读取 bot.yaml 配置
 let botConfig = {};
@@ -288,10 +289,11 @@ export default {
         const botRes = await fetch(`${API}/get_login_info`);
         const botData = await botRes.json();
         const botQQ = botData?.data?.user_id;
+        a = null;
 
         if (botQQ) {
           const botInfoRes = await fetch(`${API}/get_group_member_info?group_id=${chatId}&user_id=${botQQ}`);
-          const botInfoData = await botInfoRes.json();
+          botInfoData = await botInfoRes.json();
           if (botInfoData?.data?.role !== 'owner') {
             return '❌ Bot权限不足：机器人需要是群主才能设置管理员。';
           }
@@ -329,10 +331,11 @@ export default {
         const botRes = await fetch(`${API}/get_login_info`);
         const botData = await botRes.json();
         const botQQ = botData?.data?.user_id;
+        a = null;
 
         if (botQQ) {
           const botInfoRes = await fetch(`${API}/get_group_member_info?group_id=${chatId}&user_id=${botQQ}`);
-          const botInfoData = await botInfoRes.json();
+          botInfoData = await botInfoRes.json();
           if (botInfoData?.data?.role !== 'owner') {
             return '❌ Bot权限不足：机器人需要是群主才能取消管理员。';
           }
@@ -366,10 +369,11 @@ export default {
         const botData = await botRes.json();
         const botQQ = botData?.data?.user_id;
 
+
         if (botQQ) {
           const botInfoRes = await fetch(`${API}/get_group_member_info?group_id=${chatId}&user_id=${botQQ}`);
-          const botInfoData = await botInfoRes.json();
-          if (botInfoData?.data?.role !== 'owner' && botlnfData?.data?.role !== 'admin') {
+          botInfoData = await botInfoRes.json();
+          if (botInfoData?.data?.role !== 'owner' && botInfoData?.data?.role !== 'admin') {
             return '❌ Bot权限不足：需要先给Bot设置群管理员或者群主。';
           }
         }
@@ -626,6 +630,8 @@ export default {
       if (!titleContent) return '⚠️ 用法：#头衔 头衔内容';
 
       let botQQ = null;
+      a = null;
+      let botRole = null;
       try {
         const loginRes = await fetch(`${API}/get_login_info`);
         const loginData = await loginRes.json();
@@ -638,7 +644,7 @@ export default {
 
       try {
         const botInfoRes = await fetch(`${API}/get_group_member_info?group_id=${chatId}&user_id=${botQQ}`);
-        const botInfoData = await botInfoRes.json();
+        botInfoData = await botInfoRes.json();
         const botRole = botInfoData?.data?.role;
         if (botRole !== 'owner') {
           return '❌ 操作失败：机器人当前不是群主，无法设置头衔。';
