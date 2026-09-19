@@ -104,7 +104,7 @@ pnpm -v
 ```
 没有输出版本号或者提示不是内部或外部指令，则执行2
 <br>
-如果输出了版本号，直接执行3和4，跳过2
+如果输出了版本号，直接执行3，跳过2
 
 - 2.如果没有pnpm，请先运行如下指令安装
 ```bash
@@ -116,10 +116,6 @@ npm install -g pnpm
 pnpm install
 ```
 
-- 4.执行如下命令安装python库
-```bash
-pip install -r requirements.txt
-```
 ### 配置与启动
 
 - 已经实现自动创建配置，只需要启动项目，连接上协议端，具体如何设置主人，请看权限管理插件
@@ -129,7 +125,7 @@ pip install -r requirements.txt
 # 方式一：标准启动（推荐）
 node --no-warnings app.js / node app.js
 
-# 方式二：带自动重启守护（需 Python 环境）
+# 方式二：重启加启动（需 Python 环境）
 python script.py
 
 这是使用pnpm进行启动
