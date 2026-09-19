@@ -36,9 +36,9 @@ XingYuanBot 项目根目录
    │            ├─Set_Owner-plugin 权限管理插件
    │            │    ├─rule.json 规则文件
    │            │    └─index.js 权限管理文件
-   │            ├─guote-recall 撤回插件
-   │            │      ├─rule.json 规则文件
-   │            │       └─index.js 撤回处理文件
+   │            └─guote-recall 撤回插件
+   │                    ├─rule.json 规则文件
+   │                    └─index.js 撤回处理文件
    │            
    ├───xy-data 核心数据目录
    │       ├─bot_server.yaml Bot服务端配置
