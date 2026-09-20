@@ -10,6 +10,8 @@ node_modules/
 xy-config/config/config.yaml
 xy-config/config/redis.yaml
 xy-data/config.yaml
+LOG/*.txt
+LOG/*.log
 
 # 只忽略特定的敏感插件（如果有），而不是全部
 xy-plugins/auto-reply
