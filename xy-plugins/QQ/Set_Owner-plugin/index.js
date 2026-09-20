@@ -54,7 +54,7 @@ export default {
   async handle(std) {
     // 从 std 对象中安全提取字段
     const text = (std.content ?? std.text ?? '').trim();
-    const senderQQ = std.senderId;
+    const senderQQ = std.senderId ?? std.senderQQ;
     const role = std.role;
 
     if (!text) return null;

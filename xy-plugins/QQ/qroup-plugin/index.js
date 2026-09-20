@@ -140,7 +140,8 @@ export default {
         || cmd.startsWith('头衔') || cmd.startsWith('设置管理')
         || cmd.startsWith('取消管理') || cmd.startsWith('点赞')
         || cmd.startsWith('赞我') || cmd.startsWith('申请头衔')
-        || cmd.startsWith('改头衔') || cmd.startsWith('群公告');
+        || cmd.startsWith('改头衔') || cmd.startsWith('群公告')
+        || cmd.startsWith('批量移出');
   },
 
   handle: async function({ text, chatId, isGroup, senderName, senderQQ, role }) {
@@ -437,8 +438,111 @@ export default {
         return `❌ 请求失败：${err.message}`;
       }
     }
+      // ===== #批量移出 =====
+      if (cmd.startsWith('批量移出')) {
+          // 1. 解析是否拒绝再次加群
+          const isReject = /(-r|--拒|--拒绝)/i.test(textStr);
 
-    if (cmd.startsWith('禁言')) {
+          // 2. 清理后缀，拿干净文本
+          const cleanText = textStr.replace(/(-r|--拒|--拒绝)/ig, '').trim();
+
+          // 3. 提取所有要踢的 QQ 号
+          const targets = [];
+
+          // 3-A: 消息段格式
+          if (Array.isArray(text)) {
+              for (const seg of text) {
+                  if (seg?.type === 'at' && seg.data) {
+                      const qq = seg.data.qq || seg.data.target;
+                      if (qq) targets.push(String(qq).replace(/[^0-9]/g, ''));
+                  }
+              }
+          }
+          // 3-B: 字符串格式
+          else if (typeof text === 'string') {
+              for (const m of cleanText.matchAll(/\[CQ:at,qq=(\d+)\]/g)) {
+                  targets.push(m[1]);
+              }
+              // 纯数字 QQ 号
+              for (const m of cleanText.matchAll(/(?<![0-9])([1-9][0-9]{4,11})(?![0-9])/g)) {
+                  targets.push(m[1]);
+              }
+          }
+
+          // 4. 去重
+          const uniqueTargets = [...new Set(targets.filter(q => q.length >= 5))];
+
+          if (uniqueTargets.length === 0) {
+              // TODO: 替换成你项目里的回复方法
+              return this.reply?.(text, '未找到要移出的人，请 @ 对方或输入 QQ 号');
+          }
+
+          // 5. 执行批量踢人
+          let successCount = 0;
+
+          // 5-A: 优先尝试 NapCat 批量接口
+          try {
+              const r = await fetch(`${API}/set_group_kick_members`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                      group_id: String(chatId),
+                      user_id: uniqueTargets
+                  })
+              });
+              const d = await r.json();
+              if (d.status === 'ok' || d.retcode === 0) {
+                  successCount = uniqueTargets.length;
+              }
+          } catch (_) {}
+
+          // 5-B: 其次尝试 LLOneBot 批量接口
+          if (successCount === 0) {
+              try {
+                  const r = await fetch(`${API}/batch_delete_group_member`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                          group_id: Number(chatId),
+                          user_ids: uniqueTargets
+                      })
+                  });
+                  const d = await r.json();
+                  if (d.status === 'ok' || d.retcode === 0) {
+                      successCount = uniqueTargets.length;
+                  }
+              } catch (_) {}
+          }
+
+          // 5-C: 退化方案——循环单踢
+          if (successCount === 0) {
+              for (const uid of uniqueTargets) {
+                  await new Promise(resolve => setTimeout(resolve, Math.random() * 600 + 400));
+                  try {
+                      const r = await fetch(`${API}/set_group_kick`, {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({
+                              group_id: Number(chatId),
+                              user_id: Number(uid),
+                              reject_add_request: isReject
+                          })
+                      });
+                      const d = await r.json();
+                      if (d.status === 'ok' || d.retcode === 0) {
+                          successCount++;
+                      }
+                  } catch (_) {}
+              }
+          }
+
+          // 6. 回复结果
+          // TODO: 替换成你项目里的回复方法
+          const msg = `批量移出完成：成功 ${successCount}/${uniqueTargets.length} 人 | 拒绝再次加群：${isReject ? '是' : '否'}`;
+          return this.reply?.(text, msg);
+      }
+
+      if (cmd.startsWith('禁言')) {
         if (!targetQQ) return '⚠️ 用法：#禁言@成员 [秒数/分钟/小时/天数]，例：#禁言@成员 5m 或 1天';
         if (!hasPermission) return '❌ 权限不足：此命令仅限群主、管理员或配置文件中的主人使用。';
 

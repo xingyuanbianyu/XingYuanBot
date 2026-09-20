@@ -97,48 +97,51 @@ export default {
             }
         }
 
-        if (std.msg === '#群待办') {
-            const checkResult = await checkSetPermission();
-            if (!checkResult.is) return checkResult.content;
+        if (isTodo) {
+            const checkResult = await checkBotPermission();
+            if (!checkResult === true) {
+                return checkResult;
+            }
 
-            const refId = msg.msg?.message_id;
-            try {
-                // 优先尝试 NapCat 的 set_group_todo
-                const res = await fetch('http://127.0.0.1:3000/set_group_todo', {
+            const refId = msg.message_id;
+
+            // 定义一个通用的请求函数，方便重试
+            async function tryTodo(actionName) {
+                const res = await fetch(`http://127.0.0.1:3000/${actionName}`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         group_id: Number(chatId),
-                        message_id: refId
+                        message_id: Number(refId)
                     })
                 });
-                const result = await res.json();
-                if (result.status === 'ok') {
-                    await reply('✅ 设置群待办成功 (Todo)');
-                } else {
-                    await reply(`❌ 设置失败: ${result.message}`);
+                return res.json();
+            }
+
+            try {
+                // 1. 优先尝试标准接口 (NapCat / 新版 LLOneBot)
+                console.log('[INFO] 尝试调用标准 set_group_todo...');
+                let result = await tryTodo('set_group_todo');
+
+                if (result.status === 'ok' || result.retcode === 0) {
+                    return '✅ 设置群待办成功 (标准接口)' ;
                 }
+
+                // 2. 如果标准接口失败，尝试带下划线的接口 (部分 LLOneBot 版本)
+                console.log('[INFO] 标准接口失败，尝试调用 _set_group_todo...');
+                result = await tryTodo('_set_group_todo');
+
+                if (result.status === 'ok' || result.retcode === 0) {
+                    return '✅ 设置群待办成功 (兼容接口)' ;
+                }
+
+                // 3. 如果都失败，抛出错误进入 catch
+                throw new Error(result.message || '未知错误');
+
             } catch (e) {
-                // 如果报错（比如接口不存在），自动降级使用精华消息
-                console.log('[INFO] set_group_todo 不存在，自动切换为精华消息');
-                try {
-                    const res2 = await fetch('http://127.0.0.1:3000/set_essence_msg', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            group_id: Number(chatId),
-                            message_id: refId
-                        })
-                    });
-                    const result2 = await res2.json();
-                    if (result2.status === 'ok') {
-                        await reply('✅ 设置群待办成功 (已降级为精华消息)');
-                    } else {
-                        await reply(`❌ 精华消息也失败了: ${result2.message}`);
-                    }
-                } catch (e2) {
-                    await reply('❌ 协议端不支持待办或精华消息接口');
-                }
+                // 最终失败处理
+                console.error('[ERROR] 设置群待办失败:', e);
+                return `❌ 设置群待办失败: ${e.message}\n可能原因：协议端版本过低或不支持此操作` ;
             }
             return false;
         }
@@ -159,26 +162,45 @@ export default {
                 }
 
                 const messageId = row.message_id;
-                
-                // 调用 NapCat 接口取消
-                const cancelRes = await fetch('http://127.0.0.1:3000/cancel_group_todo', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        group_id: Number(chatId),
-                        message_id: Number(messageId)
-                    })
-                });
-                const cancelData = await cancelRes.json();
 
-                if (cancelData.status === 'ok') {
+                // 定义一个通用的请求函数，方便重试
+                async function tryCancel(actionName) {
+                    const res = await fetch(`http://127.0.0.1:3000/${actionName}`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            group_id: Number(chatId),
+                            message_id: Number(messageId)
+                        })
+                    });
+                    return res.json();
+                }
+
+                // 1. 优先尝试标准接口 (NapCat / 新版 LLOneBot)
+                console.log('[INFO] 尝试调用标准 cancel_group_todo...');
+                let result = await tryCancel('cancel_group_todo');
+
+                if (result.status === 'ok' || result.retcode === 0) {
                     // 取消成功后，删除本地记录
                     const delStmt = db.prepare('DELETE FROM group_todos WHERE group_id = ?');
                     delStmt.run(String(chatId));
-                    return `✅ 取消待办成功`;
-                } else {
-                    return `❌ 取消失败：${cancelData.message || cancelData.msg}`;
+                    return '✅ 取消待办成功 (标准接口)';
                 }
+
+                // 2. 如果标准接口失败，尝试带下划线的接口 (部分 LLOneBot 版本)
+                console.log('[INFO] 标准接口失败，尝试调用 _cancel_group_todo...');
+                result = await tryCancel('_cancel_group_todo');
+
+                if (result.status === 'ok' || result.retcode === 0) {
+                    // 取消成功后，删除本地记录
+                    const delStmt = db.prepare('DELETE FROM group_todos WHERE group_id = ?');
+                    delStmt.run(String(chatId));
+                    return '✅ 取消待办成功 (兼容接口)';
+                }
+
+                // 如果都失败，抛出错误进入 catch
+                throw new Error(result.message || result.msg || '未知错误');
+
             } catch (e) {
                 return `❌ 取消待办时异常: ${e.message}`;
             }

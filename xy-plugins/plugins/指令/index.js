@@ -25,8 +25,8 @@ export default {
         pureText === '权限' ||
         pureText === '重启' ||
         pureText === '重载' ||
-        pureText === '拉黑' ||
-        pureText === '取消';
+        pureText.startsWith('拉黑') ||
+        pureText.startsWith('取消');
   },
 
   handle: async (msgObj) => {
@@ -44,30 +44,38 @@ export default {
             return null;
         }
 
-    // ==========================================
-    // [ #拉黑 / #取消 ] 指令
-    // ==========================================
-    if (typeof text === 'string' && (pureText === '拉黑' || pureText == '取消')) {
-      // 仅大主人、小主人可用
-      if (!hasPermission(senderId, 'master') && !hasPermission(senderId, 'owner')) {
-        return '❌ 权限不足：仅主人可管理黑名单。';
-      }
+        // ==========================================
+        // [ #拉黑 / #取消 ] 指令
+        // ==========================================
+        // 1. 外层判断：支持带不带 #，只要以“拉黑”或“取消”开头即可进入
+        if (typeof text === 'string' && /#?(拉黑|取消)/.test(text)) {
 
-      const { manageBlacklist } = await import('../../../xy-bot/blacklist.js');
-      const match = text.match(/(?:拉黑|取消)\s*(\d{5,13})\s+([01])$/);
+          // 仅大主人、小主人可用
+          if (!hasPermission(senderId, 'master') && !hasPermission(senderId, 'owner')) {
+            return '❌ 权限不足：仅主人可管理黑名单。';
+          }
 
-      if (!match) {
-        const looseMatch = text.match(/(?:拉黑|取消)\s*(\d{5,13})\s+(.+)$/);
-        if (looseMatch && looseMatch[2] !== '0' && looseMatch[2] !== '1') {
-          return `❌ 末尾参数错误：'${looseMatch[2]}'，只允许 0（用户）或 1（群）。`;
-        }
-        return '❌ 格式错误，例如：#拉黑 123456 0（拉黑用户）或 #拉黑 123456 1（拉黑群）';
-      }
+          const { manageBlacklist } = await import('../../../xy-bot/blacklist.js');
 
-      const target = match[1];
-      const flag = match[2];
+          // 2. 主匹配正则：兼容 #，提取 指令 / QQ号 / 参数
+          const match = text.match(/#?(拉黑|取消)\s*(\d{5,13})\s+([01])/);
+
+          if (!match) {
+            // 3. 错误分支：判断是不是参数填错了
+            const looseMatch = text.match(/#?(?:拉黑|取消)\s*(\d{5,13})\s+(.+)/);
+            if (looseMatch && looseMatch[2] !== '0' && looseMatch[2] !== '1') {
+              return `❌ 末尾参数错误：'${looseMatch[2]}'，只允许 0（用户）或 1（群）。`;
+            }
+            return '❌ 格式错误，例如：#拉黑 123456 0（拉黑用户）或 #拉黑 123456 1（拉黑群）';
+          }
+
+      // 4. 提取数据
+      const target = match[2];  // 捕获组2：QQ号
+      const flag = match[3];    // 捕获组3：0 或 1
       const type = flag === '1' ? 'group' : 'qq';
-      const isAdd = pureText('拉黑');
+
+      // 5. 判断是拉黑还是取消（如果匹配到的指令词是“拉黑”，则为 true）
+      const isAdd = match[1] === '拉黑';
 
       return manageBlacklist(type, target, isAdd);
     }
