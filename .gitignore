@@ -4,7 +4,7 @@ node_modules/
 *.env
 .DS_Store
 *_log.txt
-.idea
+.idea/
 
 # 忽略配置文件中的敏感项，但保留 config 目录结构
 xy-config/config/config.yaml

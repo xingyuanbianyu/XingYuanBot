@@ -9,8 +9,8 @@
 <summary>👉 点击查看项目目录</summary>
 
 - [Gitee-项目目录](https://gitee.com/starry-language/XingYuanBot/blob/master/open-source%20project%20planning.md)
-- [GitHub-项目目录](https://github.com/xingyuanbianyu/XingYuanBot/blob/master/%C2%A0CHANGELOG.md)
-- [GitCode-项目目录](https://gitcode.com/xingyuan3739/XingYuanBot/blob/master/%C2%A0CHANGELOG.md)
+- [GitHub-项目目录](https://github.com/xingyuanbianyu/XingYuanBot/blob/master/open-source%20project%20planning.md)
+- [GitCode-项目目录](https://gitcode.com/xingyuan3739/XingYuanBot/blob/master/open-source%20project%20planning.md)
 
 </details>
 
@@ -229,9 +229,9 @@ m1536_adjs318inp@aka.yeah.net
 
 <summary>👉 点击展开查看更新日志</summary>
 
-- [Gitee-CHANGELOG文档](https://gitee.com/starry-language/XingYuanBot/blob/master/%C2%A0CHANGELOG.md)
-- [GitHub-CHANGELOG文档](https://github.com/xingyuanbianyu/XingYuanBot/blob/master/open-source%20project%20planning.md)
-- [GitCode-CHANGELOG文档](https://gitcode.com/xingyuan3739/XingYuanBot/blob/master/open-source%20project%20planning.md)
+- [Gitee-CHANGELOG文档](https://gitee.com/starry-language/XingYuanBot/blob/master/CHANGELOG.md)
+- [GitHub-CHANGELOG文档](https://github.com/xingyuanbianyu/XingYuanBot/blob/master/CHANGELOG.md)
+- [GitCode-CHANGELOG文档](https://gitcode.com/xingyuan3739/XingYuanBot/blob/master/CHANGELOG.md)
 
 </details>
 
