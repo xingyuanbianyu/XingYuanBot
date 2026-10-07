@@ -1,0 +1,5 @@
+{
+  "name": "group-events",
+  "entry": "index.js",
+  "description": "群事件监听：入群欢迎、退群提醒、踢人提醒"
+}

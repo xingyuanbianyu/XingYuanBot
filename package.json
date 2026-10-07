@@ -1,0 +1,35 @@
+{
+  "name": "XingYuanBot",
+  "version": "2.9.5",
+  "description": "OneBot  QQ",
+  "main": "app.js",
+  "scripts": {
+    "app": "node --no-warnings app.js",
+    "py": "python script.py"
+  },
+  "keywords": [
+    "QQBot",
+    "OneBot",
+    "plugin"
+  ],
+  "author": "XingYuan",
+  "license": "MIT",
+  "type": "module",
+  "dependencies": {
+    "axios": "^1.19.0",
+    "better-sqlite3": "^13.0.3",
+    "canvas": "^3.2.3",
+    "chalk": "^5.3.0",
+    "jose": "^6.2.8",
+    "js-yaml": "^5.4.2",
+    "net": "^1.0.2",
+    "node-fetch": "^2.7.0",
+    "ws": "^8.21.3",
+    "yaml": "^2.8.0"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "pnpm": ">=8.0.0",
+    "python": ">=3.0.0"
+  }
+}
