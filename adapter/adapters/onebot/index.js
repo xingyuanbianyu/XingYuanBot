@@ -1,153 +1,22 @@
 // adapter/adapters/onebot/index.js
-
-// ========================
-// 常量定义（避免魔法字符串）
-// ========================
-const NOTICE_TYPE = {
-  GROUP_INCREASE: 'group_increase',
-  GROUP_DECREASE: 'group_decrease',
-};
-
-const EVENT_NAME = {
-  GROUP_INCREASE: 'group.increase',
-  GROUP_KICK: 'group.kick',
-  GROUP_DECREASE: 'group.decrease',
-};
-
-// ========================
-// 消息段解析器（可扩展）
-// 每个解析器负责：把原始段 → 通用字符串
-// ========================
-const SEGMENT_PARSERS = {
-  text: (seg) => seg.data?.text ?? '',
-
-  reply: (seg) => {
-    const refId = seg.data?.id ?? seg.data?.message_id ?? '';
-    return `[引用ID:${refId}]`;
-  },
-
-  at: (seg) => {
-    const qq = seg.data?.qq ?? seg.data?.user_id ?? '';
-    return `@{at:${qq}}`;
-  },
-
-  image: (seg) => `[image]`,
-  face: (seg) => `[face]`,
-  record: (seg) => `[record]`,
-  video: (seg) => `[video]`,
-  forward: (seg) => `[forward]`,
-  json: (seg) => `[json]`,
-  mface: (seg) => `[mface]`,
-};
-
-// ========================
-// 出站消息构造器（可扩展）
-// 每个构造器负责：把插件返回的格式 → OneBot 消息段数组
-// ========================
-const OUTBOUND_BUILDERS = [
-  // 1. 纯文本
-  {
-    match: (reply) => typeof reply === 'string',
-    build: (reply) => [{ type: 'text', data: { text: reply } }],
-  },
-  // 2. { type: 'image', file: Buffer }
-  {
-    match: (reply) => reply?.type === 'image' && Buffer.isBuffer(reply.file),
-    build: (reply) => [
-      { type: 'image', data: { file: `base64://${reply.file.toString('base64')}` } },
-    ],
-  },
-  // 3. { type: 'video', url: string }
-  {
-    match: (reply) => reply?.type === 'video' && typeof reply.url === 'string',
-    build: (reply) => [{ type: 'video', data: { file: reply.url } }],
-  },
-  // 4. 混合多段：[{ type: 'text', text }, { type: 'image', file }]
-  {
-    match: (reply) => Array.isArray(reply),
-    build: (reply) =>
-      reply.map((seg) => {
-        if (seg.type === 'image') {
-          if (Buffer.isBuffer(seg.file)) {
-            return { type: 'image', data: { file: `base64://${seg.file.toString('base64')}` } };
-          }
-          return { type: 'image', data: { file: seg.url ?? seg.file ?? '' } };
-        }
-        if (seg.type === 'video') {
-          return { type: 'video', data: { file: seg.url ?? '' } };
-        }
-        return { type: 'text', data: { text: String(seg.text ?? '') } };
-      }),
-  },
-  // 5. 旧格式 { file: Buffer } 或 { file: { file: Buffer } }
-  {
-    match: (reply) =>
-      reply?.file && (Buffer.isBuffer(reply.file) || Buffer.isBuffer(reply.file?.file)),
-    build: (reply) => {
-      const buf = Buffer.isBuffer(reply.file) ? reply.file : reply.file.file;
-      return [{ type: 'image', data: { file: `base64://${buf.toString('base64')}` } }];
-    },
-  },
-];
-
-// ========================
-// 事件处理器（可扩展）
-// 每个处理器负责：把 notice 原始包 → 标准事件对象
-// ========================
-const NOTICE_HANDLERS = {
-  [NOTICE_TYPE.GROUP_INCREASE]: (raw) => ({
-    event: EVENT_NAME.GROUP_INCREASE,
-    payload: {
-      groupId: raw.group_id,
-      userId: raw.user_id,
-      operatorId: raw.operator_id,
-      subType: raw.sub_type,
-      selfId: raw.self_id,
-    },
-  }),
-
-  [NOTICE_TYPE.GROUP_DECREASE]: (raw) => {
-    const isKick = raw.sub_type === 'kick';
-    return {
-      event: isKick ? EVENT_NAME.GROUP_KICK : EVENT_NAME.GROUP_DECREASE,
-      payload: {
-        groupId: raw.group_id,
-        userId: raw.user_id,
-        operatorId: raw.operator_id,
-        selfId: raw.self_id,
-      },
-    };
-  },
-};
-
-// ========================
-// 适配器主体
-// ========================
 export default class OneBotAdapter {
-  constructor(meta = {}) {
+  constructor(meta) {
     this.name = meta.name || 'onebot';
     this.platform = meta.platform || 'qq';
     this.eventHandlers = new Map();
   }
 
-  // --------------------------------------------------
-  // 挂载连接
-  // --------------------------------------------------
   mount(conn) {
     this.ws = conn.ws;
     this.role = conn.role;
   }
 
-  // --------------------------------------------------
-  // 认不认这个包（给框架路由用）
-  // --------------------------------------------------
+  /** 认不认这个包（给框架路由用） */
   match(raw) {
-    return raw?.post_type !== undefined;
+    return raw.post_type !== undefined;
   }
 
-  // ==================================================
-  // 平台 → 通用（入站）
-  // ==================================================
+  /** 平台 → 通用（OneBot 原始包转标准消息） */
   toStandard(raw) {
     // 事件通知 → 走事件链路，不进消息链路
     if (raw.post_type === 'notice') {
@@ -155,12 +24,32 @@ export default class OneBotAdapter {
       return null;
     }
 
-    // 只处理消息类事件
-    if (raw.post_type !== 'message' && raw.post_type !== 'message_sent') {
-      return null;
-    }
+    if (raw.post_type !== 'message' && raw.post_type !== 'message_sent') return null;
 
-    const messageSegments = Array.isArray(raw.message) ? raw.message : [];
+    // 保留原始消息段数组，旧插件（如 #踢）要靠它提取 @ 的 QQ
+    const messageSegments = raw.message || [];
+
+    // 🌟 核心修复 1：构建完全干净的纯文本，用于 match 匹配
+    // 剔除引用、@、表情等干扰，只保留文字，并消除多余空格
+    const pureText = messageSegments
+      .filter(m => m.type === 'text')
+      .map(m => m.data?.text || '')
+      .join(' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    // 🌟 核心修复 2：构建带标记的展示文本，用于日志和部分需要上下文的插件
+    const displayContent = messageSegments.map(m => {
+      if (m.type === 'reply') {
+        const refId = m.data?.id ?? m.data?.message_id ?? '';
+        return `[引用ID:${refId}]`;
+      }
+      if (m.type === 'at') {
+        const qq = m.data?.qq ?? m.data?.user_id ?? '';
+        return `@{at:${qq}}`;
+      }
+      return m.data?.text ?? `[${m.type}]`;
+    }).join('') ?? '';
 
     return {
       type: raw.post_type === 'message_sent' ? 'send' : 'receive',
@@ -168,95 +57,114 @@ export default class OneBotAdapter {
       chatId: raw.group_id ?? raw.user_id,
       chatName: raw.group_name ?? String(raw.group_id ?? raw.user_id),
       senderId: raw.user_id,
-      senderName:
-        raw.sender?.nickname ?? raw.sender?.card ?? String(raw.user_id),
-      senderQQ: raw.user_id,
-      role: raw.sender?.role ?? 'member',
+      senderName: raw.sender?.nickname ?? raw.sender?.card ?? String(raw.user_id),
       messageId: raw.message_id ?? raw.id ?? raw.seq ?? raw.msg_id ?? null,
 
-      // 保留原始消息段（旧插件靠它提取 @ 的 QQ）
-      messageSegments,
-
-      // 统一拼接后的可读文本
-      content: this.parseSegmentsToString(messageSegments),
+      // 补全旧插件必须的核心字段
+      senderQQ: raw.user_id,
+      role: raw.sender?.role ?? 'member',
+      
+      // 🌟 将核心数据全部抛出去，任君挑选！
+      messageSegments,  // 原始消息段数组
+      pureText,         // 纯文字，专供 match
+      content: displayContent, // 带标记的文本，专供 log 或 handle 兜底
     };
   }
 
-  // --------------------------------------------------
-  // 消息段数组 → 通用字符串
-  // --------------------------------------------------
-  parseSegmentsToString(segments) {
-    if (!Array.isArray(segments)) return '';
-    return segments
-      .map((seg) => {
-        const parser = SEGMENT_PARSERS[seg.type];
-        return parser ? parser(seg) : `[${seg.type}]`;
-      })
-      .join('');
-  }
-
-  // ==================================================
-  // 通用 → 平台（出站）
-  // ==================================================
+  /** 通用 → 平台（标准消息转 OneBot 原始包） */
   fromStandard(reply, std) {
-    if (!reply) return null;
-
-    const target =
-      std.chatType === 'group'
+    const target = std.chatType === 'group'
         ? { message_type: 'group', group_id: std.chatId }
         : { message_type: 'private', user_id: std.chatId };
 
-    // 依次尝试所有出站构造器
-    for (const builder of OUTBOUND_BUILDERS) {
-      if (builder.match(reply)) {
+    // 1. 纯文本
+    if (typeof reply === 'string') {
+      return {
+        action: 'send_msg',
+        params: { ...target, message: [{ type: 'text', data: { text: reply } }] }
+      };
+    }
+
+    // 2. 规范图片格式
+    if (reply?.type === 'image' && reply.file) {
+      return {
+        action: 'send_msg',
+        params: {
+          ...target,
+          message: [{ type: 'image', data: { file: `base64://${reply.file.toString('base64')}` } }]
+        }
+      };
+    }
+
+    // 3. 混合多段
+    if (Array.isArray(reply)) {
+      return {
+        action: 'send_msg',
+        params: {
+          ...target,
+          message: reply.map(s =>
+              s.type === 'image'
+                  ? { type: 'image', data: { file: `base64://${s.file.toString('base64')}` } }
+                  : { type: 'text', data: { text: String(s.text ?? '') } }
+          )
+        }
+      };
+    }
+
+    // 4. 兼容旧格式
+    if (reply?.file) {
+      let buf = null;
+      if (Buffer.isBuffer(reply.file)) buf = reply.file;
+      else if (Buffer.isBuffer(reply.file.file)) buf = reply.file.file;
+
+      if (buf) {
         return {
           action: 'send_msg',
-          params: { ...target, message: builder.build(reply) },
+          params: {
+            ...target,
+            message: [{ type: 'image', data: { file: `base64://${buf.toString('base64')}` } }]
+          }
         };
       }
     }
 
-    // 不认识的格式，交给框架兜底
     return null;
   }
 
-  // ==================================================
-  // 事件订阅 / 触发
-  // ==================================================
+  /** 订阅事件 */
   onEvent(event, handler) {
-    if (!this.eventHandlers.has(event)) {
-      this.eventHandlers.set(event, new Set());
-    }
+    if (!this.eventHandlers.has(event)) this.eventHandlers.set(event, new Set());
     this.eventHandlers.get(event).add(handler);
   }
 
-  offEvent(event, handler) {
-    const set = this.eventHandlers.get(event);
-    if (!set) return;
-    set.delete(handler);
-    if (set.size === 0) this.eventHandlers.delete(event);
-  }
-
+  /** 触发事件 */
   emitEvent(event, payload) {
     const handlers = this.eventHandlers.get(event);
-    if (!handlers || handlers.size === 0) return;
+    if (!handlers) return;
     for (const h of handlers) {
-      Promise.resolve()
-        .then(() => h(payload))
-        .catch((e) => console.error(`[事件] ${event}:`, e));
+      Promise.resolve(h(payload)).catch(e => console.error(`[事件] ${event}:`, e));
     }
   }
 
-  // ==================================================
-  // 处理 notice 事件（基于注册表分发）
-  // ==================================================
+  /** 处理 notice 事件 */
   handleNotice(raw) {
     if (raw.post_type !== 'notice') return;
 
-    const handler = NOTICE_HANDLERS[raw.notice_type];
-    if (!handler) return; // 未注册的 notice 类型，忽略
+    // 🌟 核心修复：把原始包 raw 打包进去，供插件直接挖掘昵称等数据
+    const basePayload = {
+      groupId: raw.group_id,
+      userId: raw.user_id,
+      operatorId: raw.operator_id,
+      subType: raw.sub_type,
+      selfId: raw.self_id,
+      raw: raw // 🌟 原始数据透传，插件里的 e.raw 现在有值了！
+    };
 
-    const { event, payload } = handler(raw);
-    this.emitEvent(event, payload);
+    if (raw.notice_type === 'group_increase') {
+      this.emitEvent('group.increase', basePayload);
+    } else if (raw.notice_type === 'group_decrease') {
+      const ev = raw.sub_type === 'kick' ? 'group.kick' : 'group.decrease';
+      this.emitEvent(ev, basePayload);
+    }
   }
 }

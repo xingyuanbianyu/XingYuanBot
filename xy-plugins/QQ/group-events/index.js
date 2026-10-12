@@ -34,8 +34,9 @@ function render(key, vars) {
   const tpl = getConfig()[key];
   if (!tpl) return null;
   let s = tpl;
-  s = s.replace(/\{qq\}/g, String(vars.qq ?? '未知用户'));
-  s = s.replace(/\{operator\}/g, String(vars.operator ?? '未知用户'));
+  // 渲染时容错，无论如何都不会再出现“未知用户”，因为兜底是 QQ 号
+  s = s.replace(/\{qq\}/g, String(vars.qq ?? '未知'));
+  s = s.replace(/\{operator\}/g, String(vars.operator ?? '未知'));
   return s;
 }
 
@@ -98,14 +99,21 @@ export default {
     let qqValue;
     let opValue;
 
+    // 🌟 核心修复：优先从适配器传来的原始事件里挖数据
+    const raw = e.raw || {};
+
     if (key === 'welcome') {
-      qqValue = String(e.userId);
+      // 入群的人：事件里有昵称就用事件里的，没有就查接口，最后用QQ号
+      qqValue = raw.nickname || raw.card || await getGroupName(e.groupId, e.userId) || String(e.userId);
     } else {
-      qqValue = await getGroupName(e.groupId, e.userId);
+      // 退群/被踢的人：人已经不在群里了，接口大概率查不到。
+      // 优先尝试从事件对象里拿，拿不到就直接用QQ号兜底！
+      qqValue = raw.nickname || raw.card || await getGroupName(e.groupId, e.userId) || String(e.userId);
     }
 
     if (e.operatorId) {
-      opValue = await getGroupName(e.groupId, e.operatorId);
+      // 操作者：同理，优先事件对象，其次接口，最后QQ号兜底
+      opValue = raw.operator_nickname || raw.operator_card || await getGroupName(e.groupId, e.operatorId) || String(e.operatorId);
     }
 
     const msg = render(key, { qq: qqValue, operator: opValue });

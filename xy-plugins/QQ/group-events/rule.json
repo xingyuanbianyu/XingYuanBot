@@ -1,5 +1,6 @@
 {
-  "name": "group-events",
+  "name": "群事件通知",
+  "enabled": true,
   "entry": "index.js",
-  "description": "群事件监听：入群欢迎、退群提醒、踢人提醒"
+  "type": "event"
 }
