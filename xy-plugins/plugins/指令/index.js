@@ -69,7 +69,7 @@ export default {
           }
 
           // 动态导入，避免循环依赖
-          const { manageBlacklist } = await import('../../xy-bot/blacklist.js');
+          const { manageBlacklist } = await import('../../../xy-bot/blacklist.js');
 
           // 严格匹配指令格式：拉黑/取消 + 空格 + 5-13位数字 + 空格 + 0或1
           const match = pureText.match(/^(拉黑|取消)\s*(\d{5,13})\s+([01])$/);

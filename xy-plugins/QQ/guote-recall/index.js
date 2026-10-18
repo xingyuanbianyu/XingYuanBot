@@ -1,19 +1,15 @@
-// ✅ 修改点：使用 import 替代 require
 import Database from 'better-sqlite3';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import fs from 'fs';
 
-// 获取当前文件所在目录（用于确保数据库文件路径正确）
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const dbPath = `${__dirname}/todo.db`;
 
-// 初始化数据库
 const db = new Database(dbPath); 
-db.pragma('journal_mode = WAL'); // 开启高性能模式
+db.pragma('journal_mode = WAL'); 
 
-// 建表逻辑
 db.exec(`
   CREATE TABLE IF NOT EXISTS group_todos (
     group_id TEXT PRIMARY KEY,
@@ -28,24 +24,20 @@ export default {
     name: "群管工具箱",
     description: "支持 #撤回、#群待办、#取消待办",
 
-    match: function (text, msg) {
-        let txt = "";
-        if (typeof text === "string") txt = text;
-        else if (Array.isArray(text)) {
-            for (let s of text) {
-                if (s && s.type === "text") txt += (s.data && s.data.text ? s.data.text : "");
-            }
-        }
-        return /#撤回|#群待办|#取消待办/i.test(txt);
+    // app.js 现在只传入纯文本，这里直接判断字符串
+    match: function (text) {
+        if (typeof text !== 'string') return false;
+        return /#撤回|#群待办|#取消待办/i.test(text);
     },
 
     handle: async function (msg, matchResult) {
-        let text = msg.text || "";
+        // 🌟 核心修复 1：msg.text 是数组，必须用 msg.pureText 拿纯文本
+        let text = msg.pureText || msg.content || "";
         const chatId = msg.chatId || msg.group_id;
-        const commandMsgId = msg.messageId;
+        const commandMsgId = msg.message_id || msg.messageId;
 
-        // 提取引用ID
-        let m = text.match(/\[引用ID:(-?\d+)\]/);
+        // 提取引用ID（用 msg.content 匹配，因为它包含 [引用ID:xxx]）
+        let m = (msg.content || "").match(/\[引用ID:(-?\d+)\]/);
         let refId = m ? parseInt(m[1]) : null;
 
         const isRecall = text.includes('#撤回');
@@ -54,15 +46,16 @@ export default {
 
         // ================= 1. 撤回逻辑 =================
         if (isRecall) {
-            console.log('[撤回] 开始执行');
-            if (!m) return '⚠️ 未找到引用ID，请回复消息后使用';
+            if (!refId) return '⚠️ 未找到引用ID，请回复需要撤回的消息后使用';
 
             try {
+                // 撤回引用的消息
                 await fetch('http://127.0.0.1:3000/delete_msg', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ message_id: refId })
                 });
+                // 延迟一下，把指令本身也撤回了（保持群聊干净）
                 if (commandMsgId) {
                     await new Promise(r => setTimeout(r, 300));
                     await fetch('http://127.0.0.1:3000/delete_msg', {
@@ -71,7 +64,7 @@ export default {
                         body: JSON.stringify({ message_id: commandMsgId })
                     });
                 }
-                return null;
+                return null; 
             } catch (err) {
                 return `❌ 撤回失败: ${err.message}`;
             }
@@ -97,63 +90,62 @@ export default {
             }
         }
 
+        // ================= 2. 设置群待办 =================
         if (isTodo) {
             const checkResult = await checkBotPermission();
-            if (!checkResult === true) {
-                return checkResult;
-            }
+            if (checkResult !== true) return checkResult;
 
-            const refId = msg.message_id;
+            // 🌟 修复 2：待办通常是置顶引用的消息，如果没引用就把指令消息置顶
+            const targetMsgId = refId || commandMsgId;
+            if (!targetMsgId) return '⚠️ 无法获取消息ID，请引用一条消息或直接发送本指令';
 
-            // 定义一个通用的请求函数，方便重试
             async function tryTodo(actionName) {
                 const res = await fetch(`http://127.0.0.1:3000/${actionName}`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         group_id: Number(chatId),
-                        message_id: Number(refId)
+                        message_id: Number(targetMsgId)
                     })
                 });
                 return res.json();
             }
 
             try {
-                // 1. 优先尝试标准接口 (NapCat / 新版 LLOneBot)
                 console.log('[INFO] 尝试调用标准 set_group_todo...');
                 let result = await tryTodo('set_group_todo');
 
                 if (result.status === 'ok' || result.retcode === 0) {
+                    // 🌟 修复 3：成功设置后，必须把 message_id 存进数据库！
+                    db.prepare('INSERT OR REPLACE INTO group_todos (group_id, message_id) VALUES (?, ?)')
+                      .run(String(chatId), String(targetMsgId));
                     return '✅ 设置群待办成功 (标准接口)' ;
                 }
 
-                // 2. 如果标准接口失败，尝试带下划线的接口 (部分 LLOneBot 版本)
                 console.log('[INFO] 标准接口失败，尝试调用 _set_group_todo...');
                 result = await tryTodo('_set_group_todo');
 
                 if (result.status === 'ok' || result.retcode === 0) {
+                    // 存库
+                    db.prepare('INSERT OR REPLACE INTO group_todos (group_id, message_id) VALUES (?, ?)')
+                      .run(String(chatId), String(targetMsgId));
                     return '✅ 设置群待办成功 (兼容接口)' ;
                 }
 
-                // 3. 如果都失败，抛出错误进入 catch
                 throw new Error(result.message || '未知错误');
 
             } catch (e) {
-                // 最终失败处理
                 console.error('[ERROR] 设置群待办失败:', e);
                 return `❌ 设置群待办失败: ${e.message}\n可能原因：协议端版本过低或不支持此操作` ;
             }
-            return false;
         }
 
-        // ================= 3. 取消待办逻辑 (读取数据库) =================
+        // ================= 3. 取消待办 =================
         if (isCancel) {
-            console.log('[取消待办] 开始执行...');
             const checkResult = await checkBotPermission();
             if (checkResult !== true) return checkResult;
 
             try {
-                // ✅ 关键：直接从本地数据库查 ID，不依赖 NapCat 接口
                 const stmt = db.prepare('SELECT message_id FROM group_todos WHERE group_id = ?');
                 const row = stmt.get(String(chatId));
 
@@ -163,7 +155,6 @@ export default {
 
                 const messageId = row.message_id;
 
-                // 定义一个通用的请求函数，方便重试
                 async function tryCancel(actionName) {
                     const res = await fetch(`http://127.0.0.1:3000/${actionName}`, {
                         method: 'POST',
@@ -176,29 +167,23 @@ export default {
                     return res.json();
                 }
 
-                // 1. 优先尝试标准接口 (NapCat / 新版 LLOneBot)
                 console.log('[INFO] 尝试调用标准 cancel_group_todo...');
                 let result = await tryCancel('cancel_group_todo');
 
                 if (result.status === 'ok' || result.retcode === 0) {
-                    // 取消成功后，删除本地记录
-                    const delStmt = db.prepare('DELETE FROM group_todos WHERE group_id = ?');
-                    delStmt.run(String(chatId));
+                    // 删库
+                    db.prepare('DELETE FROM group_todos WHERE group_id = ?').run(String(chatId));
                     return '✅ 取消待办成功 (标准接口)';
                 }
 
-                // 2. 如果标准接口失败，尝试带下划线的接口 (部分 LLOneBot 版本)
                 console.log('[INFO] 标准接口失败，尝试调用 _cancel_group_todo...');
                 result = await tryCancel('_cancel_group_todo');
 
                 if (result.status === 'ok' || result.retcode === 0) {
-                    // 取消成功后，删除本地记录
-                    const delStmt = db.prepare('DELETE FROM group_todos WHERE group_id = ?');
-                    delStmt.run(String(chatId));
+                    db.prepare('DELETE FROM group_todos WHERE group_id = ?').run(String(chatId));
                     return '✅ 取消待办成功 (兼容接口)';
                 }
 
-                // 如果都失败，抛出错误进入 catch
                 throw new Error(result.message || result.msg || '未知错误');
 
             } catch (e) {

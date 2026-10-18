@@ -41,11 +41,14 @@ const myCommands = [
   { cmd: '#设置管理@成员', desc: '将指定成员设为管理员（需大主人权限）' },
   { cmd: '#取消管理@成员', desc: '将指定成员降为普通成员（需大主人权限）' },
   { cmd: '#点赞/#赞我', desc: '让机器人给你点赞（好友10次，非好友50次）' },
+  // 🌟 新增帮助菜单
+  { cmd: '#赞他@成员 / @成员#赞他', desc: '让机器人给指定成员点赞' },
   { cmd: '#改头衔', desc: '让群主机器人改其他人的头衔（需要配置里的主人权限或者群管理权限）'},
   { cmd: '#群公告', desc: '让机器人发群公告（需要机器人是群管理或者群主）'},
   { cmd: '#群待办', desc: '让机器人置顶引用的消息'},
   { cmd: '#取消待办', desc: '让机器人取消所有待办'},
-  { cmd: '#批量移出', desc: '批量移出群成员'}
+  { cmd: '#批量移出', desc: '批量移出群成员'},
+  { cmd: '#赞他 @成员 或者 @成员 #赞他' desc: '机器人赞别人'}
 ];
 
 function injectHelp() {
@@ -109,38 +112,26 @@ function parseText(text) {
   return textStr;
 }
 
-// 判断目标QQ是否为机器人好友
-async function checkIsFriend(targetQQ) {
-  try {
-    const res = await fetch(`${API}/get_friends`);
-    const data = await res.json();
-    if (data.status === 'ok' && data.data) {
-      const friends = data.data;
-      return friends.some(f => f.user_id === Number(targetQQ));
-    }
-  } catch (e) {
-    console.error('[群管] 获取好友列表失败:', e.message);
-  }
-  return false;
-}
-
 export default {
   name: '群管',
   description: '匹配规则：消息包含 #踢/#禁言/#解禁/#头衔/#设置管理/#取消管理/#点赞 触发',
   match: (text) => {
     if (!text) return false;
-    let textStr = parseText(text);
-    textStr = textStr.trim();
+    let textStr = parseText(text).trim();
     if (!textStr) return false;
 
-    const hasPrefix = textStr.startsWith('#');
+    // 包含 # 即可
+    const hasPrefix = textStr.startsWith('#') || textStr.includes('#');
     if (!hasPrefix) return false;
 
+    // 统一清洗前缀用于判断
     const cmd = textStr.replace(/^#s#|#/g, '').trim();
     return cmd.startsWith('踢') || cmd.startsWith('禁言') || cmd.startsWith('解禁')
         || cmd.startsWith('头衔') || cmd.startsWith('设置管理')
         || cmd.startsWith('取消管理') || cmd.startsWith('点赞')
         || cmd.startsWith('赞我') || cmd.startsWith('申请头衔')
+        // 🌟 新增匹配：兼容 @成员 #赞他 和 #赞他 @成员
+        || textStr.includes('赞他') || textStr.includes('赞她') 
         || cmd.startsWith('改头衔') || cmd.startsWith('群公告')
         || cmd.startsWith('批量移出');
   },
@@ -148,16 +139,15 @@ export default {
   handle: async function({ text, chatId, isGroup, senderName, senderQQ, role }) {
     if (!text) return false;
 
-    let textStr = parseText(text);
-    textStr = textStr.trim();
+    let textStr = parseText(text).trim();
     if (!textStr) return false;
 
-    const hasPrefix = textStr.startsWith('#');
-    if (!hasPrefix) return false;
-
+    // 统一清洗前缀
     const cmd = textStr.replace(/^#s#|#/g, '').trim();
 
-     // 获取目标QQ号
+    // ==========================================
+    // 提取目标QQ号（无论是 @成员 #赞他，还是 #踢@成员 都能精准提取）
+    // ==========================================
     let targetQQ = null;
 
     // 1. 数组格式处理（标准消息段）
@@ -167,7 +157,7 @@ export default {
             targetQQ = String(atItem.data.qq || atItem.data.target);
         }
     } 
-    // 2. 字符串格式处理（兼容你终端里打印出来的 @[at:3758575163] 格式）
+    // 2. 字符串格式处理（兼容 @{at:3758575163} 格式）
     else if (typeof text === 'string') {
         const atMatch = text.match(/@\{at:(\d+)}/);
         if (atMatch) {
@@ -175,7 +165,7 @@ export default {
         }
     }
 
-    // 3. 如果上面没拿到 QQ，尝试从文本里匹配昵称/备注（兼容手动输入名字踢人）
+    // 3. 如果上面没拿到 QQ，尝试从文本里匹配纯数字或者昵称
     if (!targetQQ) {
         const match = textStr.match(/@\[([^\s]+)\]/);
         if (match) {
@@ -230,53 +220,72 @@ export default {
     // 大主人权限检查（设置管理、取消管理）
     const isMaster =(role === 'master' || getRole(senderQQ) === 'master');
 
-    // 点赞功能（无需权限，所有人都可以用）
-    if (cmd === '点赞' || cmd === '赞' || cmd === '赞我') {
+    // ==========================================
+    // 🌟 点赞功能（已升级：支持赞自己和赞别人）
+    // ==========================================
+    if (cmd === '点赞' || cmd === '赞' || cmd === '赞我' || cmd.startsWith('赞他') || cmd.startsWith('赞她')) {
+
+        // 1. 确定目标是谁
+        let likeTargetQQ = senderQQ; // 默认赞自己
+        let isLikeOther = false;
+
+        if (cmd.startsWith('赞他') || cmd.startsWith('赞她')) {
+            isLikeOther = true;
+            if (!targetQQ) {
+                return '⚠️ 用法：#赞他 @成员（请@你想要点赞的人）';
+            }
+            if (targetQQ === senderQQ) {
+                return '✨ 请不要用 #赞他 来赞自己，直接发 #赞我 即可~';
+            }
+            likeTargetQQ = targetQQ;
+        }
 
         checkAndResetDaily();
 
-        // 1. 检查今天是否已经赞过了
-        if (likedToday.has(senderQQ)) {
-            return '今天已经点过赞啦，明天再来吧~';
+        // 2. 检查今天是否已经赞过自己（给别人点赞暂不限制，但限制自己）
+        if (!isLikeOther && likedToday.has(senderQQ)) {
+            return '今天已经给自己点过赞啦，明天再来吧~';
         }
 
-        // 2. 检查配置开关
+        // 3. 检查配置开关
         if (botConfig.bot && botConfig.bot.likeEnabled === false) {
             return '❌ 点赞功能已关闭';
         }
 
-        // 3. 调用接口获取好友列表，判断是否为好友
+        // 4. 判断目标是否为好友
         let isFriend = false;
         try {
             const friendRes = await fetch(`${API}/get_friend_list`);
             const friendData = await friendRes.json();
-            // 兼容不同框架的数据结构（data 可能是数组，也可能在 data.data 里）
             const friends = friendData.data || friendData.data?.data || [];
-            if (friends.some(f => f.user_id == senderQQ)) {
+            if (friends.some(f => f.user_id == likeTargetQQ)) {
                 isFriend = true;
             }
         } catch (e) {
             console.log('获取好友列表失败:', e.message);
         }
 
-        // 4. 根据身份决定点赞次数（好友10次，非好友50次）
+        // 5. 决定点赞次数
         const times = isFriend ? 10 : 50;
         const identity = isFriend ? '好友' : '非好友';
 
-        // 5. 执行点赞（接口单次最多赞10次，所以用循环）
+        // 6. 执行点赞
         const loops = Math.ceil(times / 10);
         for (let i = 0; i < loops; i++) {
             try {
-                await fetch(`${API}/send_like?user_id=${senderQQ}&times=10`);
+                await fetch(`${API}/send_like?user_id=${likeTargetQQ}&times=10`);
             } catch (e) {
                 console.log('点赞请求异常:', e.message);
             }
         }
 
-        // 6. 记录今天已赞，防止重复点赞
-        likedToday.add(senderQQ);
+        // 7. 记录状态（如果是赞自己，记录下来防刷）
+        if (!isLikeOther) {
+            likedToday.add(senderQQ);
+        }
 
-        return `✨ 点赞成功！[身份: ${identity}] 本次共为你点赞 ${times} 次~`;
+        const targetName = isLikeOther ? `@${likeTargetQQ}` : '你';
+        return `✨ 点赞成功！[目标: ${targetName}] [关系: ${identity}] 本次共为你点赞 ${times} 次~`;
     }
 
     // 设置管理（仅大主人）
@@ -363,7 +372,6 @@ export default {
         const botData = await botRes.json();
         const botQQ = botData?.data?.user_id;
 
-
         if (botQQ) {
           const botInfoRes = await fetch(`${API}/get_group_member_info?group_id=${chatId}&user_id=${botQQ}`);
           botInfoData = await botInfoRes.json();
@@ -431,18 +439,13 @@ export default {
         return `❌ 请求失败：${err.message}`;
       }
     }
-      // ===== #批量移出 =====
-      if (cmd.startsWith('批量移出')) {
-          // 1. 解析是否拒绝再次加群
+
+    // ===== #批量移出 =====
+    if (cmd.startsWith('批量移出')) {
           const isReject = /(-r|--拒|--拒绝)/i.test(textStr);
-
-          // 2. 清理后缀，拿干净文本
           const cleanText = textStr.replace(/(-r|--拒|--拒绝)/ig, '').trim();
-
-          // 3. 提取所有要踢的 QQ 号
           const targets = [];
 
-          // 3-A: 消息段格式
           if (Array.isArray(text)) {
               for (const seg of text) {
                   if (seg?.type === 'at' && seg.data) {
@@ -450,29 +453,23 @@ export default {
                       if (qq) targets.push(String(qq).replace(/[^0-9]/g, ''));
                   }
               }
-          }
-          // 3-B: 字符串格式
-          else if (typeof text === 'string') {
+          } else if (typeof text === 'string') {
               for (const m of cleanText.matchAll(/\[CQ:at,qq=(\d+)\]/g)) {
                   targets.push(m[1]);
               }
-              // 纯数字 QQ 号
               for (const m of cleanText.matchAll(/(?<![0-9])([1-9][0-9]{4,11})(?![0-9])/g)) {
                   targets.push(m[1]);
               }
           }
 
-          // 4. 去重
           const uniqueTargets = [...new Set(targets.filter(q => q.length >= 5))];
 
           if (uniqueTargets.length === 0) {
-              return this.reply?.(text, '未找到要移出的人，请 @ 对方或输入 QQ 号');
+              return '未找到要移出的人，请 @ 对方或输入 QQ 号';
           }
 
-          // 5. 执行批量踢人
           let successCount = 0;
 
-          // 5-A: 优先尝试 NapCat 批量接口
           try {
               const r = await fetch(`${API}/set_group_kick_members`, {
                   method: 'POST',
@@ -488,7 +485,6 @@ export default {
               }
           } catch (_) {}
 
-          // 5-B: 其次尝试 LLOneBot 批量接口
           if (successCount === 0) {
               try {
                   const r = await fetch(`${API}/batch_delete_group_member`, {
@@ -506,7 +502,6 @@ export default {
               } catch (_) {}
           }
 
-          // 5-C: 退化方案——循环单踢
           if (successCount === 0) {
               for (const uid of uniqueTargets) {
                   await new Promise(resolve => setTimeout(resolve, Math.random() * 600 + 400));
@@ -528,9 +523,8 @@ export default {
               }
           }
 
-          // 6. 回复结果
           const msg = `批量移出完成：成功 ${successCount}/${uniqueTargets.length} 人 | 拒绝再次加群：${isReject ? '是' : '否'}`;
-          return this.reply?.(text, msg);
+          return msg;
       }
 
       if (cmd.startsWith('禁言')) {
@@ -543,11 +537,10 @@ export default {
             cmdClean = cmd.replace(targetQQ, "");
         }
 
-        // 匹配数字 + 单位（支持 s秒 m分钟 h小时 d天，也支持中文）
         const durationMatch = cmdClean.match(/(\d+)\s*(s|秒|m|分钟|min|h|小时|d|天|日)?/i);
         if (durationMatch) {
             const value = parseInt(durationMatch[1]);
-            const unit = (durationMatch[2] || 'm').toLowerCase(); // 默认单位为分钟
+            const unit = (durationMatch[2] || 'm').toLowerCase();
 
             switch (unit) {
                 case 's':
@@ -569,7 +562,7 @@ export default {
                     duration = value * 60 * 60 * 24;
                     break;
                 default:
-                    duration = value * 60; // 无单位默认分钟
+                    duration = value * 60; 
             }
         }
 
@@ -626,7 +619,6 @@ export default {
             return '❌ 格式错误：#改头衔 @成员 新头衔（改自己直接：#改头衔 新头衔）';
         }
 
-        // 提取头衔文本：从 text 数组取纯文本段（跳过 at 类型）
         let newTitle = '';
         if (Array.isArray(text)) {
             newTitle = text
@@ -638,14 +630,10 @@ export default {
                 .trim();
         } else {
             newTitle = textStr.replace(/^#改头衔/, '').trim();
-    
-            // 找到 @ 标签的结束符号 ']'
             const bracketIndex = newTitle.indexOf(']');
             if (bracketIndex !== -1) {
-                // 截取 ']' 之后的内容作为新头衔
                 newTitle = newTitle.substring(bracketIndex + 1).trim();
             } else {
-                // 兼容旧格式：如果没有 ']'，去掉开头的 '@xxx'
                 newTitle = newTitle.replace(/^@\S+\s*/, '').trim();
             }
         }
@@ -657,7 +645,6 @@ export default {
             return '❌ 头衔过长：最多 18 个字符';
         }
 
-        // ---------- 权限判断 ----------
         const isSelf = targetQQ === String(senderQQ);
         let isGroupOwner = false;
         let isGroupAdmin = false;
@@ -671,16 +658,12 @@ export default {
         } catch (e) {}
 
         if (!isSelf) {
-            // 🌟 核心修复：主动调用 getRole 去查真实身份！
-            const userRole = typeof getRole === 'function' ? getRole(senderQQ) : 'member';
-            const highAdmin = ['master', 'owner'].includes(userRole);
-            
+            const highAdmin = ['master', 'owner'].includes(role);
             if (!isGroupOwner && !isGroupAdmin && !highAdmin) {
                 return '❌ 权限不足：改别人头衔需要群主/群管或主人权限';
             }
         }
 
-        // ---------- 调用API改头衔 ----------
         try {
             const res = await fetch(`${API}/set_group_special_title`, {
                 method: 'POST',
@@ -689,7 +672,7 @@ export default {
                     group_id: Number(chatId),
                     user_id: Number(targetQQ),
                     special_title: newTitle,
-                    duration: -1  // -1 表示永久
+                    duration: -1 
                 })
             });
            const rawText = await res.text();
@@ -765,6 +748,6 @@ export default {
       }
     }
 
-    return '';
+    return '⚠️ 用法：\n#踢@成员\n#禁言@成员 时长\n#解禁@成员\n#头衔 内容\n#设置管理@成员（仅大主人）\n#取消管理@成员（仅大主人）\n#点赞';
   }
 };
