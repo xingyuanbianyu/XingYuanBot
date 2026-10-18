@@ -1,9 +1,19 @@
-# xy-config/config.yaml
+command_prefix:
+  enable: true          # 是否启用前缀
+  prefixes: ["#", "/"]  # 支持的前缀列表
 
-# ... 其他配置 ...
-
-# 后台管理账户
-admin:
-  username: XYBY
-  password: xingyuan
-  # password_hash: "这里未来会是一串哈希值"
+# 🌟 新增：白名单特权配置
+whitelist:
+  enable: true          # 是否启用白名单
+  list: 
+    - "帮助"
+    - "状态"
+    - "群打卡"
+    - "撤回"
+    - "赞他"
+    - "赞她"
+    
+group_events:
+  enabled: false     # 总开关：如果为 false，所有入群退群提示全部静默
+  welcome: true      # 单独控制：入群欢迎
+  decrease: true     # 单独控制：退群/被踢提示

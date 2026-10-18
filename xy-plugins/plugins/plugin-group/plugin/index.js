@@ -16,16 +16,19 @@ class DailyTool {
         return await res.json();
     }
 
-    match(data) {
-        const text = typeof data === 'string' ? data.trim() : (data.text?.trim() || '');
-        return text === '#群打卡';
+    // 🌟 核心修复 1：底层已经剥离了前缀（如 # 或 /），这里直接匹配纯文本
+    match(text) {
+        if (typeof text !== 'string') return false;
+        return text.trim() === '群打卡';
     }
 
-    async handle(data) {
-        // 权限校验
-        const senderQQ = String(data.senderId ?? data.senderQQ ?? data.user_id ?? '');
-        if (!hasPermission(senderQQ, 'master')) {
-            return { type: 'reply', message: '❌ 权限不足：该指令仅限大主人使用。' };
+    // 🌟 核心修复 2：接收完整的 msg 对象，以便提取发送者 QQ
+    async handle(msg) {
+        const senderQQ = String(msg.senderQQ || msg.user_id || msg.senderId || '');
+        
+        // 🌟 核心修复 3：修正权限校验，如果当前用户不是大主人或小主人，就拦截
+        if (!hasPermission(senderQQ, 'owner')) {
+            return { type: 'reply', message: '❌ 权限不足：该指令仅限主人使用。' };
         }
 
         try {
@@ -39,7 +42,7 @@ class DailyTool {
                 return { type: 'reply', message: '✖ 机器人当前没有加入任何群！' };
             }
 
-            // 🌟 核心改动 1：创建一个内存数组，用来暂存这一轮打卡的所有日志
+            // 🌟 核心修复 4：恢复内存日志缓冲，防止频繁 IO
             const logBuffer = [];
             logBuffer.push(`========================================`);
             logBuffer.push(`开始执行群打卡，共 ${groups.length} 个群`);
@@ -48,15 +51,12 @@ class DailyTool {
             let failCount = 0;
 
             for (const group of groups) {
-                // 🌟 核心改动：在循环开始就提取群名
-                const groupName = group.group_name || '未知群名';
-                
                 try {
                     // 随机延迟防风控
                     await sleep(random(400, 1000));
                     let isSignSuccess = false;
 
-                    // 尝试 1：NapCat 风格
+                    // 尝试 1：NapCat 风格 (GET /set_group_sign)
                     try {
                         const signRes = await this.napcatGet('set_group_sign', {
                             group_id: String(group.group_id)
@@ -64,9 +64,11 @@ class DailyTool {
                         if (signRes.status === 'ok' || signRes.retcode === 0) {
                             isSignSuccess = true;
                         }
-                    } catch (e) {}
+                    } catch (e) {
+                        // 失败自动进入下一步
+                    }
 
-                    // 尝试 2：LLOneBot 风格
+                    // 尝试 2：LLOneBot 风格 (POST /send_group_sign)
                     if (!isSignSuccess) {
                         try {
                             const llobotRes = await fetch(`${this.apiBase}/send_group_sign`, {
@@ -78,10 +80,13 @@ class DailyTool {
                             if (llobotData.status === 'ok' || llobotData.retcode === 0) {
                                 isSignSuccess = true;
                             }
-                        } catch (e) {}
+                        } catch (e) {
+                            // 失败自动跳过
+                        }
                     }
 
-                    // 🌟 核心改动 2：日志里带上群名和群号
+                    // 统计结果并推入内存缓冲
+                    const groupName = group.group_name || '未知群名';
                     if (isSignSuccess) {
                         successCount++;
                         logBuffer.push(`✅ ${groupName} (${group.group_id}) 打卡成功`);
@@ -92,6 +97,7 @@ class DailyTool {
 
                 } catch (error) {
                     failCount++;
+                    const groupName = group.group_name || '未知群名';
                     logBuffer.push(`❌ ${groupName} (${group.group_id}) 打卡异常: ${error.message}`);
                 }
             }
@@ -99,9 +105,13 @@ class DailyTool {
             logBuffer.push(`🏁 群打卡结束！成功 ${successCount} 个，失败 ${failCount} 个`);
             logBuffer.push(`========================================\n`);
 
-            // 🌟 核心改动 3：循环全部结束后，把数组拼接成完整字符串，只调用一次 writeLog！
+            // 🌟 核心修复 5：循环结束后，一次性调用全局 writeLog 写入文件
             const finalLogContent = logBuffer.join('\n');
-            writeLog('daily-tool', finalLogContent);
+            if (typeof globalThis.writeLog === 'function') {
+                globalThis.writeLog('daily-tool', finalLogContent);
+            } else {
+                console.log(finalLogContent); // 兜底
+            }
 
             return {
                 type: 'reply',
@@ -109,8 +119,10 @@ class DailyTool {
             };
         } catch (err) {
             console.error('[daily-tool] 异常:', err.message || err);
-            // 这里作为兜底，也走一次日志
-            writeLog('daily-tool', `❌ 执行异常: ${err.message}`);
+            // 异常时也写一条日志
+            if (typeof globalThis.writeLog === 'function') {
+                globalThis.writeLog('daily-tool', `❌ 执行异常: ${err.message}`);
+            }
             return { type: 'reply', message: '✖ 批量打卡异常' };
         }
     }

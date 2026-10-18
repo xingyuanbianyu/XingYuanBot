@@ -24,9 +24,14 @@ function getBotConfig() {
     const parsed = yaml.parse(raw) || {};
     return {
       blacklist_group: (parsed.blacklist_group || []).map(String),
+      // 🌟 新增：读取事件插件全局开关（默认开启）
+      eventEnabled: parsed.group_events?.enabled !== false,
+      // 🌟 新增：单独控制入群和退群提示（默认开启）
+      welcomeEnabled: parsed.group_events?.welcome !== false,
+      decreaseEnabled: parsed.group_events?.decrease !== false
     };
   } catch (e) {
-    return { blacklist_group: [] };
+    return { blacklist_group: [], eventEnabled: true, welcomeEnabled: true, decreaseEnabled: true };
   }
 }
 
@@ -34,7 +39,6 @@ function render(key, vars) {
   const tpl = getConfig()[key];
   if (!tpl) return null;
   let s = tpl;
-  // 渲染时容错，无论如何都不会再出现“未知用户”，因为兜底是 QQ 号
   s = s.replace(/\{qq\}/g, String(vars.qq ?? '未知'));
   s = s.replace(/\{operator\}/g, String(vars.operator ?? '未知'));
   return s;
@@ -89,6 +93,13 @@ export default {
   async onEvent(e, conn) {
     const botConfig = getBotConfig();
 
+    // 🌟 核心开关：如果总开关关了，直接死掉，不往下走
+    if (!botConfig.eventEnabled) return;
+
+    // 🌟 独立开关控制
+    if (e.event === 'group.increase' && !botConfig.welcomeEnabled) return;
+    if (e.event !== 'group.increase' && !botConfig.decreaseEnabled) return;
+
     // 只检查群黑名单
     if (botConfig.blacklist_group.includes(String(e.groupId))) return;
 
@@ -99,20 +110,15 @@ export default {
     let qqValue;
     let opValue;
 
-    // 🌟 核心修复：优先从适配器传来的原始事件里挖数据
     const raw = e.raw || {};
 
     if (key === 'welcome') {
-      // 入群的人：事件里有昵称就用事件里的，没有就查接口，最后用QQ号
       qqValue = raw.nickname || raw.card || await getGroupName(e.groupId, e.userId) || String(e.userId);
     } else {
-      // 退群/被踢的人：人已经不在群里了，接口大概率查不到。
-      // 优先尝试从事件对象里拿，拿不到就直接用QQ号兜底！
       qqValue = raw.nickname || raw.card || await getGroupName(e.groupId, e.userId) || String(e.userId);
     }
 
     if (e.operatorId) {
-      // 操作者：同理，优先事件对象，其次接口，最后QQ号兜底
       opValue = raw.operator_nickname || raw.operator_card || await getGroupName(e.groupId, e.operatorId) || String(e.operatorId);
     }
 

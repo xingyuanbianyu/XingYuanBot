@@ -1,29 +1,33 @@
 import { generateHelpCard } from './card.js';
-import { pathToFileURL } from 'url';
 import fs from 'fs';
-// 🌟 修复路径：../../../ 改为 ../../
+import path from 'path';
+import yaml from 'yaml';
+import { fileURLToPath } from 'url';
 import { manageBlacklist } from '../../../xy-bot/blacklist.js';
 import { hasPermission, getRole } from '../../../xy-config/config/permissions.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const CONFIG_PATH = path.join(__dirname, '../../../xy-config/config.yaml');
 
 export default {
   name: '指令',
 
-  // ✅ match 直接接收字符串 text
   match: (text) => {
     if (typeof text !== 'string') return false;
-
-    // 1. 🌟 严格前置检查：必须有前缀，绝对不能省略！
-    const hasPrefix = text.startsWith('#') || text.startsWith('/');
-    if (!hasPrefix) return false;
-
-    // 2. 剥离前缀
-    const pureText = text.replace(/^#|^\//, '').trim();
+    const pureText = text.trim();
     if (!pureText) return false;
 
-    // 3. 🌟 类型匹配（取代原来的正则匹配）
-    // 只要剥离前缀后，是以“拉黑”或“取消”开头，就放行给 handle 处理
-    // 这样既保证了“必须有前缀才触发”，也不会因为长文本中的“取消”误触
     const isBlacklistCmd = pureText.startsWith('拉黑') || pureText.startsWith('取消');
+    
+    // 🌟 前缀管理指令
+    const isPrefixCmd = pureText === '启用前缀' || pureText === '禁用前缀' ||
+                        pureText === '查询前缀' || pureText.startsWith('添加前缀') ||
+                        pureText.startsWith('删除前缀');
+
+    // 🌟 白名单管理指令
+    const isWhitelistCmd = pureText === '启用指令白名单' || pureText === '禁用指令白名单' ||
+                           pureText === '查询指令白名单' || pureText.startsWith('添加指令白名单') ||
+                           pureText.startsWith('删除指令白名单');
 
     return pureText === '帮助' ||
         pureText === '状态' ||
@@ -31,71 +35,163 @@ export default {
         pureText === '权限' ||
         pureText === '重启' ||
         pureText === '重载' ||
-        isBlacklistCmd;
+        isBlacklistCmd ||
+        isPrefixCmd ||
+        isWhitelistCmd;
   },
 
   handle: async (msgObj) => {
-        // 1. 安全解析 msgObj
-        let text = '', chatId = '', isGroup = false, senderName = '未知';
-        if (typeof parseMsg === 'function') {
-            ({ text, chatId, isGroup, senderName } = parseMsg(msgObj));
-        } else {
-            text = msgObj.content || msgObj.text || msgObj.raw_message || '';
-            chatId = msgObj.group_id || msgObj.user_id || '';
-            isGroup = msgObj.message_type === 'group';
-            senderName = msgObj.sender?.nickname || '未知';
-        }
+        const pureText = (msgObj.pureText || "").trim();
+        const senderId = String(msgObj.senderQQ || msgObj.user_id || msgObj.senderId || '');
+        const senderName = msgObj.senderName || '未知';
+        // 🌟 核心修复：补上 chatId 的提取
+        const chatId = msgObj.chatId || msgObj.group_id || msgObj.user_id; 
+        
+        if (!senderId || senderId === 'undefined') return null;
 
-        const pureText = text.replace(/^#|^\//, '').trim();
+        const isMaster = hasPermission(senderId, 'master');
 
-        // 2. 暴力提取 QQ 号
-        const rawQQ = msgObj.user_id || msgObj.userId || msgObj.qq || (msgObj.sender && (msgObj.sender.user_id || msgObj.sender.userId)) || msgObj.senderId;
-        const senderId = rawQQ ? String(rawQQ) : '';
+        // ==========================================
+        // 🌟 功能块 1：[ 前缀管理指令 ] 仅限大主人使用
+        // ==========================================
+        if (pureText === '启用前缀' || pureText === '禁用前缀' || pureText === '查询前缀' || pureText.startsWith('添加前缀') || pureText.startsWith('删除前缀')) {
+            if (!isMaster) return '❌ 权限不足：仅大主人可管理前缀。';
 
-        if (!senderId) {
-            console.error('⚠️ 无法从 msgObj 中提取发送者 QQ 号！');
-            return null;
+            try {
+                const config = yaml.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) || {};
+                if (!config.command_prefix) {
+                    config.command_prefix = { enable: true, prefixes: ['#', '/'] };
+                }
+                const cp = config.command_prefix;
+
+                if (pureText === '查询前缀') {
+                    return `⚙️ 当前前缀配置：\n状态：${cp.enable ? '✅ 启用' : '❌ 禁用'}\n前缀列表：${cp.prefixes && cp.prefixes.length > 0 ? cp.prefixes.join(' , ') : '空（无前缀直接触发）'}`;
+                }
+
+                if (pureText === '启用前缀') {
+                    cp.enable = true;
+                    fs.writeFileSync(CONFIG_PATH, yaml.stringify(config), 'utf8');
+                    return '✅ 已启用指令前缀，热更新生效中。';
+                }
+
+                if (pureText === '禁用前缀') {
+                    cp.enable = false;
+                    fs.writeFileSync(CONFIG_PATH, yaml.stringify(config), 'utf8');
+                    return '✅ 已禁用指令前缀，现在发送指令无需带任何符号。';
+                }
+
+                if (pureText.startsWith('添加前缀')) {
+                    const newPrefix = pureText.replace('添加前缀', '').trim();
+                    if (!newPrefix) return '⚠️ 用法：添加前缀 ! （请附带你要添加的符号）';
+                    if (newPrefix.length > 3) return '❌ 前缀过长：最多 3 个字符。';
+                    
+                    if (!cp.prefixes) cp.prefixes = [];
+                    if (cp.prefixes.includes(newPrefix)) return '⚠️ 该前缀已经存在了。';
+                    
+                    cp.prefixes.push(newPrefix);
+                    fs.writeFileSync(CONFIG_PATH, yaml.stringify(config), 'utf8');
+                    return `✅ 已成功添加前缀 [${newPrefix}]，当前前缀列表：${cp.prefixes.join(' , ')}`;
+                }
+
+                if (pureText.startsWith('删除前缀')) {
+                    const delPrefix = pureText.replace('删除前缀', '').trim();
+                    if (!delPrefix) return '⚠️ 用法：删除前缀 ! （请附带你要删除的符号）';
+                    
+                    if (!cp.prefixes || !cp.prefixes.includes(delPrefix)) return '⚠️ 该前缀不存在。';
+                    
+                    cp.prefixes = cp.prefixes.filter(p => p !== delPrefix);
+                    fs.writeFileSync(CONFIG_PATH, yaml.stringify(config), 'utf8');
+                    return `✅ 已成功删除前缀 [${delPrefix}]，当前前缀列表：${cp.prefixes.length > 0 ? cp.prefixes.join(' , ') : '空'}`;
+                }
+            } catch (e) {
+                return `❌ 操作配置文件失败：${e.message}`;
+            }
         }
 
         // ==========================================
-        // [ #拉黑 / #取消 ] 指令
+        // 🌟 功能块 2：[ 白名单管理指令 ] 仅限大主人使用
         // ==========================================
-        // 🌟 核心修复：用 pureText 进行类型判断，而不是用 text 去做模糊正则匹配
+        if (pureText === '启用指令白名单' || pureText === '禁用指令白名单' || pureText === '查询指令白名单' || pureText.startsWith('添加指令白名单') || pureText.startsWith('删除指令白名单')) {
+            if (!isMaster) return '❌ 权限不足：仅大主人可管理白名单。';
+
+            try {
+                const config = yaml.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) || {};
+                if (!config.whitelist) {
+                    config.whitelist = { enable: false, list: [] };
+                }
+                const wl = config.whitelist;
+
+                if (pureText === '查询指令白名单') {
+                    return `🛡️ 当前指令白名单配置：\n状态：${wl.enable ? '✅ 启用' : '❌ 禁用'}\n特权指令：${wl.list && wl.list.length > 0 ? wl.list.join(' , ') : '空'}`;
+                }
+
+                if (pureText === '启用指令白名单') {
+                    wl.enable = true;
+                    fs.writeFileSync(CONFIG_PATH, yaml.stringify(config), 'utf8');
+                    return '✅ 已启用指令白名单（白名单内的指令无需前缀即可触发）。';
+                }
+
+                if (pureText === '禁用指令白名单') {
+                    wl.enable = false;
+                    fs.writeFileSync(CONFIG_PATH, yaml.stringify(config), 'utf8');
+                    return '✅ 已禁用指令白名单。';
+                }
+
+                if (pureText.startsWith('添加指令白名单')) {
+                    const newCmd = pureText.replace('添加指令白名单', '').trim();
+                    if (!newCmd) return '⚠️ 用法：添加指令白名单 帮助';
+                    
+                    if (!wl.list) wl.list = [];
+                    if (wl.list.includes(newCmd)) return '⚠️ 该指令已经在白名单中了。';
+                    
+                    wl.list.push(newCmd);
+                    fs.writeFileSync(CONFIG_PATH, yaml.stringify(config), 'utf8');
+                    return `✅ 已成功将 [${newCmd}] 加入白名单，当前包含：${wl.list.join(' , ')}`;
+                }
+
+                if (pureText.startsWith('删除指令白名单')) {
+                    const delCmd = pureText.replace('删除指令白名单', '').trim();
+                    if (!delCmd) return '⚠️ 用法：删除指令白名单 帮助';
+                    
+                    if (!wl.list || !wl.list.includes(delCmd)) return '⚠️ 该指令不在白名单中。';
+                    
+                    wl.list = wl.list.filter(c => c !== delCmd);
+                    fs.writeFileSync(CONFIG_PATH, yaml.stringify(config), 'utf8');
+                    return `✅ 已成功将 [${delCmd}] 从白名单移除，当前包含：${wl.list.length > 0 ? wl.list.join(' , ') : '空'}`;
+                }
+            } catch (e) {
+                return `❌ 操作配置文件失败：${e.message}`;
+            }
+        }
+
+        // ==========================================
+        // [ 拉黑 / 取消 ] 指令
+        // ==========================================
         if (pureText.startsWith('拉黑') || pureText.startsWith('取消')) {
-          
-          // 仅大主人、小主人可用
           if (!hasPermission(senderId, 'master') && !hasPermission(senderId, 'owner')) {
             return '❌ 权限不足：仅主人可管理黑名单。';
           }
 
-          // 动态导入，避免循环依赖
-          const { manageBlacklist } = await import('../../../xy-bot/blacklist.js');
-
-          // 严格匹配指令格式：拉黑/取消 + 空格 + 5-13位数字 + 空格 + 0或1
           const match = pureText.match(/^(拉黑|取消)\s*(\d{5,13})\s+([01])$/);
 
           if (!match) {
-            // 错误分支：判断是不是参数填错了
             const looseMatch = pureText.match(/^(?:拉黑|取消)\s*(\d{5,13})\s+(.+)$/);
             if (looseMatch && looseMatch[2] !== '0' && looseMatch[2] !== '1') {
               return `❌ 末尾参数错误：'${looseMatch[2]}'，只允许 0（用户）或 1（群）。`;
             }
-            return '❌ 格式错误，例如：#拉黑 123456 0（拉黑用户）或 #拉黑 123456 1（拉黑群）';
+            return '❌ 格式错误，例如：拉黑 123456 0（拉黑用户）或 拉黑 123456 1（拉黑群）';
           }
 
-          // 4. 提取数据
-          const target = match[2];  // 捕获组2：QQ号
-          const flag = match[3];    // 捕获组3：0 或 1
+          const target = match[2];
+          const flag = match[3];
           const type = flag === '1' ? 'group' : 'qq';
-
-          // 5. 判断是拉黑还是取消
           const isAdd = match[1] === '拉黑';
 
           return manageBlacklist(type, target, isAdd);
         }
 
         // ==========================================
-        // [ #权限 ] 指令
+        // [ 权限 ] 指令
         // ==========================================
         if (pureText === '权限') {
           const roleMap = {
@@ -109,11 +205,12 @@ export default {
         }
 
         // ==========================================
-        // [ #帮助 ] 指令
+        // [ 帮助 ] 指令
         // ==========================================
         if (pureText === '帮助') {
           try {
-            const imagePath = await generateHelpCard();
+            // 🌟 核心修复：把 chatId 传进去，生成针对该群的动态图片！
+            const imagePath = await generateHelpCard(chatId);
             const buffer = fs.readFileSync(imagePath);
             return { file: buffer };
           } catch (e) {
@@ -123,7 +220,7 @@ export default {
         }
 
         // ==========================================
-        // [ #状态 ] 指令
+        // [ 状态 ] 指令
         // ==========================================
         if (pureText === '状态') {
           if (!hasPermission(senderId, 'admin') && !hasPermission(senderId, 'master') && !hasPermission(senderId, 'owner')) {
@@ -135,16 +232,15 @@ export default {
         }
 
         // ==========================================
-        // [ #重启 ] 指令
+        // [ 重启 ] 指令
         // ==========================================
         if (pureText === '重启') {
-          if (!hasPermission(senderId, 'master') && !hasPermission(senderId, 'owner')) {
+          if (!isMaster && !hasPermission(senderId, 'owner')) {
             return '❌ 权限不足：仅主人可执行重启操作。';
           }
           setTimeout(async () => {
             const { spawn } = await import('child_process');
             const pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
-            // 注意：如果是 PM2 环境，Python 脚本会自动检测并交还控制权给 PM2
             const pyProcess = spawn(pythonCmd, ['script.py', process.pid.toString()], {
               detached: true,
               stdio: 'ignore'
@@ -156,10 +252,10 @@ export default {
         }
 
         // ==========================================
-        // [ #重载 ] 指令
+        // [ 重载 ] 指令
         // ==========================================
         if (pureText === '重载') {
-          if (!hasPermission(senderId, 'master') && !hasPermission(senderId, 'owner')) {
+          if (!isMaster && !hasPermission(senderId, 'owner')) {
             return '❌ 权限不足：仅主人可执行重载操作。';
           }
           try {
@@ -177,10 +273,10 @@ export default {
         }
 
         // ==========================================
-        // [ #退出 ] 指令
+        // [ 退出 ] 指令
         // ==========================================
         if (pureText === '退出') {
-          if (!hasPermission(senderId, 'master') && !hasPermission(senderId, 'owner')) {
+          if (!isMaster && !hasPermission(senderId, 'owner')) {
             return '❌ 权限不足：仅主人可执行关闭操作。';
           }
           setTimeout(() => { process.exit(0); }, 1500);

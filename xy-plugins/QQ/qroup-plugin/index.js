@@ -30,25 +30,26 @@ function checkAndResetDaily() {
     if (today !== lastRecordDate) {
         likedToday.clear();
         lastRecordDate = today;
-  }
+    }
 }
 
 const myCommands = [
-  { cmd: '#踢@成员', desc: '将指定成员踢出群聊' },
-  { cmd: '#禁言@成员QQ号 秒', desc: '禁言指定成员，默认600秒' },
-  { cmd: '#解禁@QQ号', desc: '解除指定成员的禁言' },
-  { cmd: '#头衔 内容/#申请头衔 内容', desc: '给自己设置专属头衔（需机器人是群主）' },
-  { cmd: '#设置管理@成员', desc: '将指定成员设为管理员（需大主人权限）' },
-  { cmd: '#取消管理@成员', desc: '将指定成员降为普通成员（需大主人权限）' },
-  { cmd: '#点赞/#赞我', desc: '让机器人给你点赞（好友10次，非好友50次）' },
-  // 🌟 新增帮助菜单
-  { cmd: '#赞他@成员 / @成员#赞他', desc: '让机器人给指定成员点赞' },
-  { cmd: '#改头衔', desc: '让群主机器人改其他人的头衔（需要配置里的主人权限或者群管理权限）'},
-  { cmd: '#群公告', desc: '让机器人发群公告（需要机器人是群管理或者群主）'},
-  { cmd: '#群待办', desc: '让机器人置顶引用的消息'},
-  { cmd: '#取消待办', desc: '让机器人取消所有待办'},
-  { cmd: '#批量移出', desc: '批量移出群成员'},
-  { cmd: '#赞他 @成员 或者 @成员 #赞他' desc: '机器人赞别人'}
+  { cmd: '踢@成员', desc: '将指定成员踢出群聊' },
+  { cmd: '禁言@成员QQ号 秒', desc: '禁言指定成员，默认600秒' },
+  { cmd: '解禁@QQ号', desc: '解除指定成员的禁言' },
+  { cmd: '头衔 内容 / 申请头衔 内容', desc: '给自己设置专属头衔（需机器人是群主）' },
+  { cmd: '设置管理@成员', desc: '将指定成员设为管理员（需大主人权限）' },
+  { cmd: '取消管理@成员', desc: '将指定成员降为普通成员（需大主人权限）' },
+  { cmd: '点赞 / 赞我', desc: '让机器人给你点赞（好友10次，非好友50次）' },
+  { cmd: '赞他@成员 / @成员 赞他', desc: '让机器人给指定成员点赞' },
+  { cmd: '改头衔', desc: '让群主机器人改其他人的头衔（需要配置里的主人权限或者群管理权限）'},
+  { cmd: '群公告', desc: '让机器人发群公告（需要机器人是群管理或者群主）'},
+  { cmd: '群待办', desc: '让机器人置顶引用的消息'},
+  { cmd: '取消待办', desc: '让机器人取消所有待办'},
+  { cmd: '批量移出', desc: '批量移出群成员' },
+  { cmd: '查等级 [等级]', desc: '查看群成员等级统计或指定等级人数' },
+  { cmd: '查潜水 [天数]', desc: '查看超过指定天数未发言的成员（默认30天）' },
+  { cmd: '清理潜水 [天数] -y', desc: '清理超过指定天数未发言的成员（必须带-y确认）' }
 ];
 
 function injectHelp() {
@@ -114,58 +115,48 @@ function parseText(text) {
 
 export default {
   name: '群管',
-  description: '匹配规则：消息包含 #踢/#禁言/#解禁/#头衔/#设置管理/#取消管理/#点赞 触发',
+  description: '匹配规则：踢/禁言/解禁/头衔/设置管理/取消管理/点赞/查等级/查潜水/清理潜水',
   match: (text) => {
-    if (!text) return false;
-    let textStr = parseText(text).trim();
-    if (!textStr) return false;
-
-    // 包含 # 即可
-    const hasPrefix = textStr.startsWith('#') || textStr.includes('#');
-    if (!hasPrefix) return false;
-
-    // 统一清洗前缀用于判断
-    const cmd = textStr.replace(/^#s#|#/g, '').trim();
+    if (!text || typeof text !== 'string') return false;
+    
+    const cmd = text.trim();
+    
     return cmd.startsWith('踢') || cmd.startsWith('禁言') || cmd.startsWith('解禁')
         || cmd.startsWith('头衔') || cmd.startsWith('设置管理')
         || cmd.startsWith('取消管理') || cmd.startsWith('点赞')
         || cmd.startsWith('赞我') || cmd.startsWith('申请头衔')
-        // 🌟 新增匹配：兼容 @成员 #赞他 和 #赞他 @成员
-        || textStr.includes('赞他') || textStr.includes('赞她') 
+        || cmd.includes('赞他') || cmd.includes('赞她') 
         || cmd.startsWith('改头衔') || cmd.startsWith('群公告')
-        || cmd.startsWith('批量移出');
+        || cmd.startsWith('批量移出')
+        || cmd.startsWith('群待办') || cmd.startsWith('取消待办')
+        || cmd.startsWith('查等级') || cmd.startsWith('查潜水') || cmd.startsWith('清理潜水');
   },
 
-  handle: async function({ text, chatId, isGroup, senderName, senderQQ, role }) {
+  handle: async function({ text, pureText, chatId, isGroup, senderName, senderQQ, role }) {
     if (!text) return false;
 
-    let textStr = parseText(text).trim();
-    if (!textStr) return false;
+    const cmd = (pureText || "").trim();
+    if (!cmd) return false;
 
-    // 统一清洗前缀
-    const cmd = textStr.replace(/^#s#|#/g, '').trim();
+    let textStr = parseText(text).trim();
 
     // ==========================================
-    // 提取目标QQ号（无论是 @成员 #赞他，还是 #踢@成员 都能精准提取）
+    // 提取目标QQ号
     // ==========================================
     let targetQQ = null;
 
-    // 1. 数组格式处理（标准消息段）
     if (Array.isArray(text)) {
         const atItem = text.find(item => item?.type === 'at');
         if (atItem && atItem.data && (atItem.data.qq || atItem.data.target)) {
             targetQQ = String(atItem.data.qq || atItem.data.target);
         }
-    } 
-    // 2. 字符串格式处理（兼容 @{at:3758575163} 格式）
-    else if (typeof text === 'string') {
+    } else if (typeof text === 'string') {
         const atMatch = text.match(/@\{at:(\d+)}/);
         if (atMatch) {
             targetQQ = atMatch[1];
         }
     }
 
-    // 3. 如果上面没拿到 QQ，尝试从文本里匹配纯数字或者昵称
     if (!targetQQ) {
         const match = textStr.match(/@\[([^\s]+)\]/);
         if (match) {
@@ -185,10 +176,6 @@ export default {
 
                 if (found) {
                     targetQQ = String(found.user_id);
-                    if (keyword.startsWith(targetQQ) && keyword.length > targetQQ.length) {
-                        const remaining = keyword.slice(targetQQ.length);
-                        textStr = textStr.replace(keyword, targetQQ + ' ' + remaining);
-                    }
                 }
             } catch (e) {
                 console.error('匹配群成员失败:', e);
@@ -205,9 +192,7 @@ export default {
       if (rawRole === 'owner' || rawRole === 'admin') {
         isGroupAdmin = true;
       }
-    } catch (e) {
-      // 忽略
-    }
+    } catch (e) {}
 
     const configAdmin = ['master', 'owner', 'admin'];
     let hasPermission = isGroupAdmin || configAdmin.includes(role);
@@ -217,81 +202,188 @@ export default {
       if (configAdmin.includes(userRole)) hasPermission = true;
     }
 
-    // 大主人权限检查（设置管理、取消管理）
-    const isMaster =(role === 'master' || getRole(senderQQ) === 'master');
+    const isMaster = (role === 'master' || getRole(senderQQ) === 'master');
 
     // ==========================================
-    // 🌟 点赞功能（已升级：支持赞自己和赞别人）
+    // 🌟 查等级（支持带参数）
+    // ==========================================
+    if (cmd.startsWith('查等级')) {
+        if (!isGroup) return '❌ 该指令仅限群聊使用';
+        if (!hasPermission) return '❌ 权限不足：仅限管理员及以上身份使用。';
+
+        const args = cmd.split(/\s+/);
+        const targetLevel = args[1];
+
+        try {
+            const res = await fetch(`${API}/get_group_member_list?group_id=${chatId}`);
+            const data = await res.json();
+            const members = data?.data || [];
+            if (members.length === 0) return '❌ 无法获取群成员列表';
+
+            if (targetLevel) {
+                const filtered = members.filter(m => String(m.level) === String(targetLevel));
+                return `📊 本群等级为 Lv.${targetLevel} 的成员共有 ${filtered.length} 人。`;
+            }
+
+            const levelCount = {};
+            for (const m of members) {
+                const lvl = m.level || '0';
+                levelCount[lvl] = (levelCount[lvl] || 0) + 1;
+            }
+            let levelText = `📊 本群成员等级统计（共 ${members.length} 人）：\n`;
+            const sortedLvls = Object.keys(levelCount).sort((a, b) => parseInt(b) - parseInt(a));
+            for (const lvl of sortedLvls) {
+                levelText += `Lv.${lvl} : ${levelCount[lvl]} 人\n`;
+            }
+            return levelText.trim() + `\n💡 提示：发送“查等级 1”可查询指定等级人数。`;
+        } catch (e) {
+            return `❌ 查询等级失败: ${e.message}`;
+        }
+    }
+
+    // ==========================================
+    // 🌟 查潜水 / 清理潜水
+    // ==========================================
+    if (cmd.startsWith('查潜水') || cmd.startsWith('清理潜水')) {
+        if (!isGroup) return '❌ 该指令仅限群聊使用';
+        
+        const isClean = cmd.startsWith('清理潜水');
+        const args = cmd.split(/\s+/);
+        const days = parseInt(args[1]) || 30;
+        
+        if (isClean && !cmd.includes('-y')) {
+            return `⚠️ 危险操作！如需清理，请发送：清理潜水 ${days} -y\n或先发送：查潜水 ${days} 查看名单。`;
+        }
+
+        try {
+            const memberRes = await fetch(`${API}/get_group_member_list?group_id=${chatId}`);
+            const memberData = await memberRes.json();
+            const members = memberData?.data || [];
+            if (members.length === 0) return '❌ 无法获取群成员列表';
+
+            const botRes = await fetch(`${API}/get_login_info`);
+            const botData = await botRes.json();
+            const botQQ = botData?.data?.user_id;
+
+            const threshold = Date.now() - days * 24 * 60 * 60 * 1000;
+            const silentMembers = [];
+
+            for (const m of members) {
+                if (m.role === 'owner' || m.role === 'admin' || m.user_id == botQQ) continue;
+                
+                let lastTime = 0;
+                if (m.last_sent_time && m.last_sent_time > 0) {
+                    lastTime = m.last_sent_time * 1000;
+                } else if (m.join_time && m.join_time > 0) {
+                    lastTime = m.join_time * 1000;
+                }
+
+                if (lastTime > 0 && lastTime < threshold) {
+                    silentMembers.push(m);
+                }
+            }
+
+            if (silentMembers.length === 0) {
+                return `✅ 没有超过 ${days} 天未发言的普通成员。`;
+            }
+
+            silentMembers.sort((a, b) => {
+                const timeA = (a.last_sent_time || a.join_time || 0);
+                const timeB = (b.last_sent_time || b.join_time || 0);
+                return timeA - timeB;
+            });
+
+            const displayLimit = 50;
+            const listText = silentMembers.slice(0, displayLimit).map(m => `${m.card || m.nickname} (${m.user_id})`).join('\n');
+            let resultMsg = `📊 超过 ${days} 天未发言的成员共 ${silentMembers.length} 人：\n${listText}\n`;
+            if (silentMembers.length > displayLimit) {
+                resultMsg += `...（名单过长，仅显示前 ${displayLimit} 人）\n`;
+            }
+
+            if (!isClean) {
+                return resultMsg + `\n⚠️ 若要清理他们，请发送：清理潜水 ${days} -y`;
+            }
+
+            if (!hasPermission) return '❌ 权限不足：此命令仅限群主、管理员或配置文件中的主人使用。';
+            
+            resultMsg += `\n🚀 开始批量清理...\n`;
+            let successCount = 0;
+            let failCount = 0;
+
+            for (const m of silentMembers) {
+                await new Promise(r => setTimeout(r, Math.random() * 400 + 300));
+                try {
+                    const kickRes = await fetch(`${API}/set_group_kick`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            group_id: Number(chatId),
+                            user_id: Number(m.user_id),
+                            reject_add_request: true
+                        })
+                    });
+                    const kickData = await kickRes.json();
+                    if (kickData.status === 'ok' || kickData.retcode === 0) {
+                        successCount++;
+                    } else {
+                        failCount++;
+                    }
+                } catch (_) {
+                    failCount++;
+                }
+            }
+
+            return resultMsg + `✅ 清理完成！成功移出 ${successCount} 人，失败 ${failCount} 人。`;
+
+        } catch (e) {
+            return `❌ 查询或清理失败: ${e.message}`;
+        }
+    }
+
+    // ==========================================
+    // 🌟 点赞功能
     // ==========================================
     if (cmd === '点赞' || cmd === '赞' || cmd === '赞我' || cmd.startsWith('赞他') || cmd.startsWith('赞她')) {
-
-        // 1. 确定目标是谁
-        let likeTargetQQ = senderQQ; // 默认赞自己
+        let likeTargetQQ = senderQQ; 
         let isLikeOther = false;
 
         if (cmd.startsWith('赞他') || cmd.startsWith('赞她')) {
             isLikeOther = true;
-            if (!targetQQ) {
-                return '⚠️ 用法：#赞他 @成员（请@你想要点赞的人）';
-            }
-            if (targetQQ === senderQQ) {
-                return '✨ 请不要用 #赞他 来赞自己，直接发 #赞我 即可~';
-            }
+            if (!targetQQ) return '⚠️ 用法：赞他 @成员（请@你想要点赞的人）';
+            if (targetQQ === senderQQ) return '✨ 请不要用 赞他 来赞自己，直接发 赞我 即可~';
             likeTargetQQ = targetQQ;
         }
 
         checkAndResetDaily();
+        if (!isLikeOther && likedToday.has(senderQQ)) return '今天已经给自己点过赞啦，明天再来吧~';
+        if (botConfig.bot && botConfig.bot.likeEnabled === false) return '❌ 点赞功能已关闭';
 
-        // 2. 检查今天是否已经赞过自己（给别人点赞暂不限制，但限制自己）
-        if (!isLikeOther && likedToday.has(senderQQ)) {
-            return '今天已经给自己点过赞啦，明天再来吧~';
-        }
-
-        // 3. 检查配置开关
-        if (botConfig.bot && botConfig.bot.likeEnabled === false) {
-            return '❌ 点赞功能已关闭';
-        }
-
-        // 4. 判断目标是否为好友
         let isFriend = false;
         try {
             const friendRes = await fetch(`${API}/get_friend_list`);
             const friendData = await friendRes.json();
             const friends = friendData.data || friendData.data?.data || [];
-            if (friends.some(f => f.user_id == likeTargetQQ)) {
-                isFriend = true;
-            }
-        } catch (e) {
-            console.log('获取好友列表失败:', e.message);
-        }
+            if (friends.some(f => f.user_id == likeTargetQQ)) isFriend = true;
+        } catch (e) {}
 
-        // 5. 决定点赞次数
         const times = isFriend ? 10 : 50;
         const identity = isFriend ? '好友' : '非好友';
-
-        // 6. 执行点赞
         const loops = Math.ceil(times / 10);
         for (let i = 0; i < loops; i++) {
-            try {
-                await fetch(`${API}/send_like?user_id=${likeTargetQQ}&times=10`);
-            } catch (e) {
-                console.log('点赞请求异常:', e.message);
-            }
+            try { await fetch(`${API}/send_like?user_id=${likeTargetQQ}&times=10`); } catch (e) {}
         }
 
-        // 7. 记录状态（如果是赞自己，记录下来防刷）
-        if (!isLikeOther) {
-            likedToday.add(senderQQ);
-        }
-
+        if (!isLikeOther) likedToday.add(senderQQ);
         const targetName = isLikeOther ? `@${likeTargetQQ}` : '你';
         return `✨ 点赞成功！[目标: ${targetName}] [关系: ${identity}] 本次共为你点赞 ${times} 次~`;
     }
 
-    // 设置管理（仅大主人）
+    // ==========================================
+    // 设置管理
+    // ==========================================
     if (cmd.startsWith('设置管理')) {
       if (!isMaster) return '❌ 权限不足：此命令仅限配置文件中的大主人（master）使用。';
-      if (!targetQQ) return '⚠️ 用法：#设置管理@成员';
+      if (!targetQQ) return '⚠️ 用法：设置管理@成员';
 
       try {
         const botRes = await fetch(`${API}/get_login_info`);
@@ -326,10 +418,12 @@ export default {
       }
     }
 
-    // 取消管理（仅大主人）
+    // ==========================================
+    // 取消管理
+    // ==========================================
     if (cmd.startsWith('取消管理')) {
       if (!isMaster) return '❌ 权限不足：此命令仅限配置文件中的大主人（master）使用。';
-      if (!targetQQ) return '⚠️ 用法：#取消管理@成员';
+      if (!targetQQ) return '⚠️ 用法：取消管理@成员';
 
       try {
         const botRes = await fetch(`${API}/get_login_info`);
@@ -364,7 +458,9 @@ export default {
       }
     }
 
+    // ==========================================
     // 发送群公告
+    // ==========================================
     if (cmd.startsWith('群公告')) {
         if (!hasPermission) return '❌ 权限不足：此命令仅限管理员使用';
 
@@ -380,8 +476,8 @@ export default {
           }
         }
 
-        const noticeText = text.replace(/^#?群公告\s*/, '').trim();
-        if (!noticeText) return '⚠️ 用法：#群公告 公告内容（可附带一张图片）';
+        const noticeText = text.replace(/^群公告\s*/, '').trim();
+        if (!noticeText) return '⚠️ 用法：群公告 公告内容（可附带一张图片）';
 
         let imageUrl = '';
         const imgMatch = text.match(/\[CQ:image.*?url=(https?:\/\/[^\]]+)/);
@@ -414,9 +510,11 @@ export default {
         }
     }
 
+    // ==========================================
     // 踢人
+    // ==========================================
     if (cmd.startsWith('踢')) {
-      if (!targetQQ) return '⚠️ 用法：#踢@成员';
+      if (!targetQQ) return '⚠️ 用法：踢@成员';
       if (!hasPermission) return '❌ 权限不足：此命令仅限群主、管理员或配置文件中的主人使用。';
 
       try {
@@ -440,7 +538,9 @@ export default {
       }
     }
 
-    // ===== #批量移出 =====
+    // ==========================================
+    // 批量移出
+    // ==========================================
     if (cmd.startsWith('批量移出')) {
           const isReject = /(-r|--拒|--拒绝)/i.test(textStr);
           const cleanText = textStr.replace(/(-r|--拒|--拒绝)/ig, '').trim();
@@ -527,8 +627,11 @@ export default {
           return msg;
       }
 
-      if (cmd.startsWith('禁言')) {
-        if (!targetQQ) return '⚠️ 用法：#禁言@成员 [秒数/分钟/小时/天数]，例：#禁言@成员 5m 或 1天';
+    // ==========================================
+    // 禁言
+    // ==========================================
+    if (cmd.startsWith('禁言')) {
+        if (!targetQQ) return '⚠️ 用法：禁言@成员 [秒数/分钟/小时/天数]，例：禁言@成员 5m 或 1天';
         if (!hasPermission) return '❌ 权限不足：此命令仅限群主、管理员或配置文件中的主人使用。';
 
         let duration = 600; // 默认10分钟
@@ -558,7 +661,7 @@ export default {
                     break;
                 case 'd':
                 case '天':
-               case '日':
+                case '日':
                     duration = value * 60 * 60 * 24;
                     break;
                 default:
@@ -587,9 +690,11 @@ export default {
         }
     }
 
+    // ==========================================
     // 解禁
+    // ==========================================
     if (cmd.startsWith('解禁')) {
-      if (!targetQQ) return '⚠️ 用法：#解禁@成员';
+      if (!targetQQ) return '⚠️ 用法：解禁@成员';
       if (!hasPermission) return '❌ 权限不足：此命令仅限群主、管理员或配置文件中的主人使用。';
 
       try {
@@ -613,10 +718,12 @@ export default {
       }
     }
 
-    // ====== #改头衔 指令 ======
+    // ==========================================
+    // 改头衔
+    // ==========================================
     if (cmd.startsWith('改头衔')) {
         if (!targetQQ) {
-            return '❌ 格式错误：#改头衔 @成员 新头衔（改自己直接：#改头衔 新头衔）';
+            return '❌ 格式错误：改头衔 @成员 新头衔（改自己直接：改头衔 新头衔）';
         }
 
         let newTitle = '';
@@ -626,10 +733,10 @@ export default {
                 .map(item => item?.data?.text || '')
                 .join('')
                 .trim()
-                .replace(/^#改头衔\s*/, '')
+                .replace(/^改头衔\s*/, '') 
                 .trim();
         } else {
-            newTitle = textStr.replace(/^#改头衔/, '').trim();
+            newTitle = textStr.replace(/^改头衔/, '').trim();
             const bracketIndex = newTitle.indexOf(']');
             if (bracketIndex !== -1) {
                 newTitle = newTitle.substring(bracketIndex + 1).trim();
@@ -700,10 +807,12 @@ export default {
         }
     }
 
-    // 头衔
+    // ==========================================
+    // 申请头衔
+    // ==========================================
     if (cmd.startsWith('头衔') || cmd.startsWith('申请头衔')) {
       const titleContent = cmd.replace(/^(申请头衔|头衔)\s*/, '').trim();
-      if (!titleContent) return '⚠️ 用法：#头衔 头衔内容';
+      if (!titleContent) return '⚠️ 用法：头衔 头衔内容';
 
       let botQQ = null;
       try {
@@ -748,6 +857,6 @@ export default {
       }
     }
 
-    return '⚠️ 用法：\n#踢@成员\n#禁言@成员 时长\n#解禁@成员\n#头衔 内容\n#设置管理@成员（仅大主人）\n#取消管理@成员（仅大主人）\n#点赞';
+    return '⚠️ 用法：\n踢@成员\n禁言@成员 时长\n解禁@成员\n头衔 内容\n设置管理@成员（仅大主人）\n取消管理@成员（仅大主人）\n点赞\n查等级\n查潜水 [天数]\n清理潜水 [天数] -y';
   }
 };
