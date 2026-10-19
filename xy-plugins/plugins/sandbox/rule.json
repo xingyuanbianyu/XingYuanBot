@@ -1,0 +1,6 @@
+{
+    "name": "Web沙盒",
+    "enabled": true,
+    "entry": "index.js",
+    "type": "command"
+}

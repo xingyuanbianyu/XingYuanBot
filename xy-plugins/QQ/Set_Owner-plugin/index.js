@@ -4,7 +4,7 @@ import { fileURLToPath } from 'url';
 import path from 'path';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-// 保留你原本的写法，因为作为插件，cwd 绝对是根目录，没毛病！
+// 使用 process.cwd() 确保无论在哪儿启动，都能精准找到根目录的配置
 const CONFIG_PATH = path.join(process.cwd(), 'xy-config', 'config', 'config.yaml');
 
 const verificationCodes = new Map();
@@ -16,8 +16,8 @@ function loadConfig() {
     const content = fs.readFileSync(CONFIG_PATH, 'utf-8');
     return yaml.parse(content) || {};
   } catch (e) {
-    console.error('[权限插件] config.yaml 解析失败:', e.message);
-    return {}; // 防止解析失败导致插件崩溃
+    console.error('[权限] 解析 config.yaml 失败:', e.message);
+    return null;
   }
 }
 
@@ -26,7 +26,7 @@ function saveConfig(config) {
     const content = yaml.stringify(config);
     fs.writeFileSync(CONFIG_PATH, content, 'utf-8');
   } catch (e) {
-    console.error('[权限插件] 写入配置失败:', e.message);
+    console.error('[权限] 写入 config.yaml 失败:', e.message);
   }
 }
 
@@ -54,18 +54,25 @@ function ensurePermissions(config) {
 }
 
 export default {
+  // 🌟 架构适配：app.js 传进来的 text 已经没有前缀了，直接判断开头即可
   match(text) {
-    const trimmed = (text || '').trim();
-    return /^(设置主人|设置小主人|取消主人|权限状态)/.test(trimmed);
+    if (typeof text !== 'string') return false;
+    const pureText = text.trim();
+    return pureText.startsWith('设置主人') || 
+           pureText.startsWith('设置小主人') || 
+           pureText.startsWith('取消主人') || 
+           pureText.startsWith('权限状态');
   },
 
-  async handle(std) {
-    const text = (std.content ?? std.text ?? '').trim();
-    // 【修复】强制把发送者QQ转为字符串，避免后续类型混乱
-    const senderQQ = String(std.senderId ?? std.senderQQ ?? '');
-    const role = std.role;
+  // 🌟 架构适配：直接使用 app.js 标准化后的 msgObj
+  async handle(msgObj) {
+    // app.js 已经洗干净了 pureText，如果没有，用 content 兜底并清除可能的前缀
+    const text = (msgObj.pureText || msgObj.content || msgObj.text || '').trim();
+    // 强制拿 app.js 处理好的 senderQQ
+    const senderQQ = String(msgObj.senderQQ || msgObj.senderId || msgObj.user_id || '');
+    const role = msgObj.role || 'member';
 
-    if (!text) return null;
+    if (!text || !senderQQ) return null;
 
     const args = text.split(/\s+/);
     const cmd = args[0];
@@ -92,11 +99,11 @@ export default {
     if (!config) return '配置文件不存在';
 
     const masterQQ = getMasterQQ(config);
-
+    // 🌟 核心修复：类型统一转 String 比较
     if (!masterQQ) {
       if (args.length === 1) {
         const code = generateCode();
-        // 【修复】存的时候强制转字符串
+        // 统一用 String(senderQQ) 存入
         verificationCodes.set(String(senderQQ), { code, time: Date.now() });
 
         const makedCode = '*'.repeat(code.length);
@@ -111,8 +118,10 @@ export default {
         return `✅ 验证码已生成，请在控制台查看，然后发送："设置主人 ${senderQQ} ${makedCode}"（5分钟内有效）`;
 
       } else if (args.length === 3) {
+        const targetQQ = String(args[1]);
         const code = args[2].toUpperCase();
-        // 【核心修复】直接通过 senderQQ 获取验证码（你给谁设置，就用谁的验证码）
+        
+        // 🌟 核心修复：必须查发送者自己的验证码，防伪造
         const verify = verificationCodes.get(String(senderQQ));
 
         if (!verify) return '❌ 验证失败，请重新执行"设置主人"指令';
@@ -125,9 +134,8 @@ export default {
         }
 
         ensurePermissions(config);
-        // 注意：这里使用的是 args[1] 作为目标QQ，即你想把谁设置为主人
-        config.permissions.owners[String(args[1])] = true;
-        config.permissions.permission_switch[String(args[1])] = 1;
+        config.permissions.owners[targetQQ] = true;
+        config.permissions.permission_switch[targetQQ] = 1;
         saveConfig(config);
         verificationCodes.delete(String(senderQQ));
 
@@ -137,7 +145,7 @@ export default {
         return '📌 指令格式：设置主人 <QQ号> <验证码>';
       }
     } else {
-      if (senderQQ !== masterQQ) {
+      if (String(senderQQ) !== String(masterQQ)) {
         return '❌ 已有大主人，只有大主人才能设置小主人';
       }
       return '📌 请使用"设置小主人 <QQ号>"指令来设置小主人';
@@ -148,7 +156,7 @@ export default {
     const config = loadConfig();
     const masterQQ = getMasterQQ(config);
 
-    if (senderQQ !== masterQQ) {
+    if (String(senderQQ) !== String(masterQQ)) {
       return '❌ 只有大主人可以设置小主人';
     }
 
@@ -173,7 +181,7 @@ export default {
     const config = loadConfig();
     const masterQQ = getMasterQQ(config);
 
-    if (senderQQ !== masterQQ) {
+    if (String(senderQQ) !== String(masterQQ)) {
       return '❌ 只有大主人可以取消主人';
     }
 
@@ -182,7 +190,7 @@ export default {
     }
 
     const targetQQ = String(args[1]);
-    if (targetQQ === masterQQ) {
+    if (targetQQ === String(masterQQ)) {
       return '❌ 不能取消大主人的身份';
     }
 
@@ -226,7 +234,7 @@ export default {
       return `📌 ${targetQQ} 是小主人，当前权限状态：${status}`;
     }
 
-    if (senderQQ !== masterQQ) {
+    if (String(senderQQ) !== String(masterQQ)) {
       return '❌ 只有大主人可以修改权限状态';
     }
 
@@ -235,6 +243,7 @@ export default {
     }
 
     const owners = config.permissions?.owners || {};
+
     if (owners[targetQQ] === undefined) {
       return `❌ ${targetQQ} 不是主人`;
     }

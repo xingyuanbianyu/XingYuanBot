@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <!-- 适配手机端，禁止双击缩放 -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>XingYuanBot - Node.js 沙盒</title>
+    <style>
+        body { background-color: #1e1e1e; color: #d4d4d4; font-family: 'Consolas', 'Courier New', monospace; margin: 0; padding: 10px; box-sizing: border-box; height: 100vh; display: flex; flex-direction: column; }
+        h2 { color: #569cd6; font-size: 18px; margin: 10px 0; text-align: center; }
+        #terminal { background-color: #000; border: 1px solid #333; flex: 1; overflow-y: auto; padding: 10px; border-radius: 5px; display: flex; flex-direction: column; }
+        #output { flex: 1; }
+        .line { margin-bottom: 5px; white-space: pre-wrap; word-wrap: break-word; font-size: 14px; }
+        .input-area { display: flex; margin-top: 10px; background: #111; border-top: 1px solid #333; padding-top: 10px; align-items: center;}
+        .prompt { color: #4ec9b0; margin-right: 10px; font-weight: bold; }
+        #cmd-input { background: transparent; border: none; color: #fff; font-family: inherit; font-size: 16px; flex: 1; outline: none; padding: 5px; }
+        #send-btn { background: #0e639c; color: white; border: none; padding: 8px 15px; border-radius: 3px; font-size: 14px; margin-left: 10px; cursor: pointer; }
+        #send-btn:active { background: #1177bb; }
+        .error { color: #f44747; }
+        .success { color: #b5cea8; }
+    </style>
+</head>
+<body>
+    <h2>🌟 Node.js 沙盒运行环境</h2>
+    <div id="terminal">
+        <div class="line success">欢迎使用！在这里可以执行任何 Node.js 代码，甚至调用 Bot 的全局函数（如 globalThis._ws）。</div>
+        <div class="line">输入代码后点击【执行】。比如：1 + 1，或者 globalThis.print('Hello')</div>
+        <div id="output"></div>
+        
+        <div class="input-area">
+            <span class="prompt">></span>
+            <input type="text" id="cmd-input" autocomplete="off" placeholder="在此输入代码...">
+            <button id="send-btn">执行</button>
+        </div>
+    </div>
+    <script>
+        const term = document.getElementById('terminal');
+        const output = document.getElementById('output');
+        const input = document.getElementById('cmd-input');
+        const sendBtn = document.getElementById('send-btn');
+        let ws;
+        let token = new URLSearchParams(window.location.search).get('token') || '';
+
+        function connect() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(`${protocol}//${window.location.host}/ws?token=${token}`);
+
+            ws.onopen = () => addLine('✅ WebSocket 已连接', 'success');
+            ws.onclose = () => addLine('❌ WebSocket 已断开', 'error');
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                if (data.type === 'result') {
+                    addLine(data.output, data.success ? 'success' : 'error');
+                }
+            };
+        }
+
+        function addLine(text, className = '') {
+            const div = document.createElement('div');
+            div.className = `line ${className}`;
+            div.innerText = text;
+            output.appendChild(div);
+            term.scrollTop = term.scrollHeight;
+        }
+
+        function executeCode() {
+            const code = input.value;
+            if (code.trim() === '') return;
+            
+            addLine(`> ${code}`);
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'exec', code }));
+            } else {
+                addLine('❌ 连接未建立', 'error');
+            }
+            input.value = '';
+            // 执行完继续保持聚焦，方便连续输入
+            input.focus(); 
+        }
+
+        // 点击执行按钮
+        sendBtn.addEventListener('click', executeCode);
+
+        // 电脑端按回车执行
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault(); // 阻止默认的回车换行
+                executeCode();
+            }
+        });
+
+        // 🌟 移动端福利：点击黑色终端空白区域，自动把光标聚焦到输入框，强行拉起键盘
+        term.addEventListener('click', (e) => {
+            // 如果点的是按钮或者文字，就不触发
+            if (e.target.tagName !== 'BUTTON' && e.target.tagName !== 'INPUT') {
+                input.focus();
+            }
+        });
+
+        connect();
+    </script>
+</body>
+</html>
