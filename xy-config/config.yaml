@@ -7,11 +7,10 @@ whitelist:
   enable: true          # 是否启用白名单
   list: 
     - "帮助"
-    - "状态"
-    - "群打卡"
-    - "撤回"
     - "赞他"
     - "赞她"
+    - "赞我"
+    - "https"
     
 group_events:
   enabled: false     # 总开关：如果为 false，所有入群退群提示全部静默

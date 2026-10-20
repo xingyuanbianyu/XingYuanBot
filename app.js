@@ -16,10 +16,8 @@ import { startBot } from './xy-bot/bot.js';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const dataDir = join(__dirname, 'xy-data');
 const configPath = join(__dirname, 'xy-config', 'config.yaml');
+const priorityPath = join(__dirname, 'xy-config', 'priority.yaml'); 
 
-// ========================
-// 核心：多账号连接池与路由
-// ========================
 const wsPool = new Map();        
 const wsToBotId = new Map();     
 const botIdToWs = new Map();     
@@ -31,6 +29,20 @@ const interactiveSessions = new Map();
 
 let cmdConfig = { enable: true, prefixes: ['#', '/'] };
 let whitelistConfig = { enable: false, list: [] };
+let priorityPlugins = new Set(); 
+
+function safeSend(ws, data) {
+    if (ws && ws.readyState === 1) {
+        try {
+            ws.send(JSON.stringify(data));
+            return true;
+        } catch (e) {
+            globalThis.print(`⚠️ [发送异常] ${e.message}`);
+            return false;
+        }
+    }
+    return false;
+}
 
 function loadCmdConfig() {
   try {
@@ -49,23 +61,35 @@ function loadCmdConfig() {
         }
       }
     }
-    globalThis.print(`⚙️ [配置] 前缀已重载，白名单已重载`);
+    
+    if (fs.existsSync(priorityPath)) {
+        const pContent = yaml.parse(fs.readFileSync(priorityPath, 'utf8')) || {};
+        if (Array.isArray(pContent.priority_plugins)) {
+            priorityPlugins = new Set(pContent.priority_plugins.map(String));
+        }
+    } else {
+        priorityPlugins = new Set();
+    }
+
+    globalThis.print(`⚙️ [配置] 前缀/白名单/特权插件 已重载`);
   } catch (e) {}
 }
 
 function watchConfig() {
   try {
-    fs.watch(configPath, (eventType) => {
-      if (eventType === 'change') {
-        setTimeout(() => { loadCmdConfig(); }, 150);
-      }
-    });
+    if (fs.existsSync(configPath)) {
+        fs.watch(configPath, (eventType) => {
+          if (eventType === 'change') setTimeout(() => { loadCmdConfig(); }, 150);
+        });
+    }
+    if (fs.existsSync(priorityPath)) {
+        fs.watch(priorityPath, (eventType) => {
+          if (eventType === 'change') setTimeout(() => { loadCmdConfig(); }, 150);
+        });
+    }
   } catch (e) {}
 }
 
-// ========================
-// 全局发送器
-// ========================
 globalThis.bot = {
   send: async (msg) => {
     let targetWs = null;
@@ -81,12 +105,20 @@ globalThis.bot = {
 
     if (msg.file) {
       const base64 = msg.file.toString('base64');
-      targetWs.send(JSON.stringify({ action: 'send_msg', params: { ...target, message: [{ type: 'image', data: { file: `base64://${base64}` } }] }, echo: Date.now() }));
+      safeSend(targetWs, {
+          action: 'send_msg', 
+          params: { ...target, message: [{ type: 'image', data: { file: `base64://${base64}` } }] }, 
+          echo: Date.now() 
+      });
       return;
     }
 
     if (msg.content) {
-      targetWs.send(JSON.stringify({ action: 'send_msg', params: { ...target, message: [{ type: 'text', data: { text: msg.content } }] }, echo: Date.now() }));
+      safeSend(targetWs, {
+          action: 'send_msg', 
+          params: { ...target, message: [{ type: 'text', data: { text: msg.content } }] }, 
+          echo: Date.now() 
+      });
     }
   }
 };
@@ -106,83 +138,72 @@ async function runPlugin(plugin, msg) {
 
   if (!handleFn) return false;
 
+  const pluginName = raw.name || plugin.name || '未知';
+  const isPriority = priorityPlugins.has(pluginName);
+
   const session = interactiveSessions.get(msg.senderQQ);
-  if (session && session.expireAt > Date.now()) {
-      const currentPluginName = raw.name || plugin.name || '未知';
-      if (session.pluginName === currentPluginName) {
+  if (session && session.expireAt > Date.now() && !isPriority) {
+      if (session.pluginName === pluginName) {
           try {
               const result = await handleFn(msg);
               if (result) {
                   const content = typeof result === 'string' ? result : (result.content || result.message);
                   if (content) globalThis.bot.send({ chatId: msg.chatId, isGroup: msg.isGroup, content, botId: msg.botId, _ws: msg._ws });
-                  
                   if (result && typeof result === 'object' && result.__interceptNext === false) {
                       interactiveSessions.delete(msg.senderQQ);
                   }
                   return true;
               }
-          } catch (e) {
-              interactiveSessions.delete(msg.senderQQ);
-          }
+          } catch (e) { interactiveSessions.delete(msg.senderQQ); }
           return true; 
       }
   }
 
   let matchText = (msg.pureText || "").trim();
-  if (!matchText) return false;
+  let finalPureText = matchText; // 🌟 提取到外层，修复作用域 Bug
 
-  let finalPureText = matchText;
-  let hasValidPrefix = false;
+  if (!isPriority) {
+      let hasValidPrefix = false;
 
-  for (const p of cmdConfig.prefixes) {
-    if (matchText.startsWith(p)) {
-      hasValidPrefix = true;
-      finalPureText = matchText.slice(p.length).trim();
-      break;
-    }
-  }
-
-  const isAdminCmd = /^(启用前缀|禁用前缀|查询前缀|添加前缀|删除前缀|启用指令白名单|禁用指令白名单|查询指令白名单|添加指令白名单|删除指令白名单)/.test(finalPureText);
-  let isWhitelisted = false;
-
-  if (!hasValidPrefix && !isAdminCmd && whitelistConfig.enable && whitelistConfig.list.length > 0) {
-    for (const word of whitelistConfig.list) {
-      if (finalPureText === word || (finalPureText.endsWith(word) && finalPureText.replace(word, '').trim().startsWith('@'))) {
-        isWhitelisted = true;
-        finalPureText = word; 
-        break;
+      for (const p of cmdConfig.prefixes) {
+        if (matchText.startsWith(p)) {
+          hasValidPrefix = true;
+          finalPureText = matchText.slice(p.length).trim(); // 剥离前缀
+          break;
+        }
       }
-    }
+
+      const isAdminCmd = /^(启用前缀|禁用前缀|查询前缀|添加前缀|删除前缀|启用指令白名单|禁用指令白名单|查询指令白名单|添加指令白名单|删除指令白名单)/.test(finalPureText);
+      let isWhitelisted = false;
+
+      if (!hasValidPrefix && !isAdminCmd && whitelistConfig.enable && whitelistConfig.list.length > 0) {
+        for (const word of whitelistConfig.list) {
+          if (finalPureText === word || (finalPureText.endsWith(word) && finalPureText.replace(word, '').trim().startsWith('@'))) {
+            isWhitelisted = true;
+            finalPureText = word; 
+            break;
+          }
+        }
+      }
+
+      // 空文本如纯图片不拦截，只有文字且无前缀才拦截
+      if (cmdConfig.enable && !hasValidPrefix && !isAdminCmd && !isWhitelisted && matchText) return false;
+
+      if (matchFn) {
+        try {
+          if (!matchFn(finalPureText)) return false; // 用剥离后的去匹配
+        } catch (e) { return false; }
+      }
   }
 
-  if (cmdConfig.enable && !hasValidPrefix && !isAdminCmd && !isWhitelisted) return false;
-  if (!finalPureText) return false;
-
-  if (matchFn) {
-    try {
-      if (!matchFn(finalPureText)) return false; 
-    } catch (e) { return false; }
-  }
-
+  // 🌟 把 msg 和 rawData 完美融合，既照顾老插件，又兼容新逻辑
   const pluginMsg = {
-    ...msg.rawData,        
+    ...msg,               
+    ...msg.rawData,       
     content: msg.content,               
     text: msg.message || [],            
-    pureText: finalPureText, 
+    pureText: finalPureText, // 🌟 这里的变量能正常读到了
     raw_message: msg.raw_message,
-    
-    user_id: msg.senderQQ,
-    senderId: msg.senderQQ,
-    senderQQ: msg.senderQQ,
-    senderName: msg.senderName,
-    sender: msg.sender,
-    
-    group_id: msg.isGroup ? msg.chatId : undefined,
-    chatId: msg.chatId,
-    isGroup: msg.isGroup,
-    message_type: msg.message_type,
-    role: msg.role || 'member',
-    
     botId: msg.botId, 
     _ws: msg._ws
   };
@@ -193,8 +214,7 @@ async function runPlugin(plugin, msg) {
     if (!result) return false;
 
     if (result && typeof result === 'object' && result.__interceptNext === true) {
-        const currentPluginName = raw.name || plugin.name || '未知';
-        interactiveSessions.set(msg.senderQQ, { pluginName: currentPluginName, expireAt: Date.now() + 3 * 60 * 1000 });
+        interactiveSessions.set(msg.senderQQ, { pluginName: pluginName, expireAt: Date.now() + 3 * 60 * 1000 });
     }
 
     if (typeof result === 'string') {
@@ -209,7 +229,7 @@ async function runPlugin(plugin, msg) {
     }
     return false;
   } catch (e) {
-    globalThis.print(`[插件报错] ${plugin.name}: ${e.message}`);
+    globalThis.print(`[插件报错] ${pluginName}: ${e.message}`);
     return false;
   }
 }
@@ -240,6 +260,7 @@ async function handleIncomingMessage(rawData, ws, registry, plugins) {
             break;
           }
         }
+        
         if (!stdMsg) return;
 
         if (parsed.post_type === 'message' && parsed.message_id) {
@@ -272,20 +293,22 @@ async function handleIncomingMessage(rawData, ws, registry, plugins) {
           for (const plugin of plugins) {
             if (plugin && plugin.handler) {
               const handled = await runPlugin(plugin, msg);
-              if (handled) break; 
+              const pluginName = plugin.handler.name || plugin.name || '未知';
+              const isPriority = priorityPlugins.has(pluginName);
+              if (handled && !isPriority) break; 
             }
           }
         }
-    } catch (e) {}
+    } catch (e) { globalThis.print(`[处理异常] ${e.message}`); }
 }
 
 // ========================
-// 🌟 核心改造：Web面板 + 真实代理启动
+// Web面板启动
 // ========================
 function startWebPanel(registry, plugins) {
     const app = express();
     const PORT = 4000;
-    const PUBLIC_IP = '118.178.186.173'; // 你的服务器公网IP
+    const PUBLIC_IP = '118.178.186.173'; 
     let currentWsPort = 30100; 
     let currentWebUI = 6100; 
     const instances = new Map();
@@ -385,11 +408,9 @@ function startWebPanel(registry, plugins) {
 
             const pidFile = join(userDir, 'napcat.pid');
             if (fsExtra.existsSync(pidFile)) fsExtra.removeSync(pidFile);
-            
             const cacheDir = join(userDir, 'data', 'nt_qq');
             if (fsExtra.existsSync(cacheDir)) fsExtra.emptyDirSync(cacheDir);
 
-            // 修改 WebUI 配置
             const webuiConfigPath = join(userDir, 'config', 'webui.json');
             if (fsExtra.existsSync(webuiConfigPath)) {
                 const webuiConfig = fsExtra.readJsonSync(webuiConfigPath);
@@ -398,8 +419,7 @@ function startWebPanel(registry, plugins) {
                 fsExtra.writeJsonSync(webuiConfigPath, webuiConfig);
             }
 
-            // 修改 WS 配置 (这步是新增的！解决 ECONNREFUSED 30100 的问题)
-            const onebotConfigPath = join(userDir, 'config', 'onebot11.json'); // 常见的配置文件
+            const onebotConfigPath = join(userDir, 'config', 'onebot11.json');
             if (fsExtra.existsSync(onebotConfigPath)) {
                  const obConfig = fsExtra.readJsonSync(onebotConfigPath);
                  if (obConfig.network && obConfig.network.websocketServers && obConfig.network.websocketServers.length > 0) {
@@ -408,9 +428,8 @@ function startWebPanel(registry, plugins) {
                  fsExtra.writeJsonSync(onebotConfigPath, obConfig);
             }
 
-            // 🌟 终极修复：使用 napcat.sh 或 napcat.mjs，而不是直接跑 qq 本体！
-            // 这里的启动路径需要你确认。如果是 bash napcat.sh 则写这个。
-            // 注意：我们把 XDG_CONFIG_HOME 和 HOME 隔离了，防止它去污染原目录！
+            globalThis.print(`🚀 [面板] 正在拉起实例 ${instanceId} (WS: ${wsPort}, WebUI: ${webuiPort})`);
+            
             const child = spawn('bash', ['./napcat.sh'], {
                 cwd: userDir,
                 env: { 
@@ -424,22 +443,36 @@ function startWebPanel(registry, plugins) {
             });
 
             child.on('exit', (code) => {
-                globalThis.print(`⚠️ [面板] 实例意外退出，退出码: ${code}`);
+                globalThis.print(`⚠️ [面板] 实例 ${instanceId} 退出，退出码: ${code}`);
+                instances.delete(instanceId);
             });
 
             instances.set(instanceId, { wsPort, webuiPort, child, online: false, userDir });
-
             res.json({ success: true, instanceId });
 
             setTimeout(() => {
+                globalThis.print(`🔗 [面板] 尝试接入实例 WS: ws://127.0.0.1:${wsPort}`);
                 const newWs = new WebSocket(`ws://127.0.0.1:${wsPort}`);
+                
                 newWs.on('open', () => {
                     const inst = instances.get(instanceId);
                     if (inst) inst.online = true;
-                    globalThis.print(`✅ [面板] 动态实例接入成功`);
+                    globalThis.print(`✅ [面板] 实例 ${instanceId} 动态接入成功`);
                 });
+                
                 newWs.on('message', (msg) => handleIncomingMessage(msg.toString(), newWs, registry, plugins));
+                
                 newWs.on('error', (err) => globalThis.print(`❌ [面板] 实例连接失败: ${err.message}`));
+                
+                newWs.on('close', () => {
+                    globalThis.print(`🔌 [面板] 实例 ${instanceId} WS 连接断开`);
+                    wsPool.delete(newWs);
+                    const botId = wsToBotId.get(newWs);
+                    if (botId) {
+                        botIdToWs.delete(botId);
+                        wsToBotId.delete(newWs);
+                    }
+                });
             }, 15000); 
 
         } catch (e) {
@@ -447,12 +480,10 @@ function startWebPanel(registry, plugins) {
         }
     });
 
-    // 读取实例目录下的二维码
     app.get('/api/qrcode/:id', (req, res) => {
         const inst = instances.get(req.params.id);
         if (!inst) return res.status(404).send('Not found');
         
-        // 这里用相对路径去实例目录里找
         const qrPath = join(inst.userDir, 'opt', 'QQ', 'resources', 'app', 'app_launcher', 'napcat', 'cache', 'qrcode.png');
         
         if (fsExtra.existsSync(qrPath)) {
@@ -472,9 +503,6 @@ function startWebPanel(registry, plugins) {
     });
 }
 
-// ========================
-// 主函数
-// ========================
 async function main() {
   await lib(); 
   console.log('🚀 XingYuanBot (全栈核心版) 启动中...\n');

@@ -10,16 +10,33 @@ const handlers = new Map();
 const clients = new Set();
 let serverInstance = null;
 
+// 兜底日志工具，防止主程序没挂载 globalThis.print 时崩溃
+const log = (msg) => (globalThis.print || console.log)(msg);
+const writeLogSafe = (mod, msg) => {
+  if (globalThis.writeLog) globalThis.writeLog(mod, msg);
+};
+
+// 安全发送函数（防止客户端闪退导致抛错崩溃主进程）
+function safeSend(ws, data) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    try {
+      ws.send(JSON.stringify(data));
+    } catch (e) {
+      log(`⚠️ [wsServer] 发送失败: ${e.message}`);
+    }
+  }
+}
+
 // ========================
 // 方法注册
 // ========================
 globalThis.wsRegister = function (methodName, handler) {
   if (!methodName || typeof handler !== 'function') {
-    print(`❌ [wsServer] 注册失败: method=${methodName}, handler必须是函数`);
+    log(`❌ [wsServer] 注册失败: method=${methodName}, handler必须是函数`);
     return false;
   }
   handlers.set(methodName, handler);
-  print(`✅ [wsServer] 已注册方法: ${methodName}`);
+  log(`✅ [wsServer] 已注册方法: ${methodName}`);
   return true;
 };
 
@@ -32,7 +49,7 @@ globalThis.wsUnregister = function (methodName) {
 // ========================
 globalThis.wsStartServer = function (options = {}) {
   if (serverInstance) {
-    print(`⚠️ [wsServer] 服务器已在运行 (端口 ${options.port || 8765})`);
+    log(`⚠️ [wsServer] 服务器已在运行 (端口 ${options.port || 8765})`);
     return serverInstance;
   }
 
@@ -43,22 +60,22 @@ globalThis.wsStartServer = function (options = {}) {
 
   serverInstance.on('listening', () => {
     const displayHost = host === '0.0.0.0' ? '0.0.0.0' : host;
-    print(`🚀 [wsServer] 监听中 ws://${displayHost}:${port}`);
-    writeLog('ws_server', `服务器启动 ws://${displayHost}:${port}`);
+    log(`🚀 [wsServer] 监听中 ws://${displayHost}:${port}`);
+    writeLogSafe('ws_server', `服务器启动 ws://${displayHost}:${port}`);
   });
 
   serverInstance.on('connection', (ws, req) => {
     const clientIp = req.socket.remoteAddress || 'unknown';
     clients.add(ws);
-    print(`📡 [wsServer] 客户端接入: ${clientIp} (在线 ${clients.size})`);
-    writeLog('ws_server', `客户端接入: ${clientIp}`);
+    log(`📡 [wsServer] 客户端接入: ${clientIp} (在线 ${clients.size})`);
+    writeLogSafe('ws_server', `客户端接入: ${clientIp}`);
 
     ws.on('message', async (raw) => {
       let msg;
       try {
         msg = JSON.parse(raw.toString('utf8'));
       } catch (e) {
-        ws.send(JSON.stringify({ success: false, error: '消息必须是合法JSON' }));
+        safeSend(ws, { success: false, error: '消息必须是合法JSON' });
         return;
       }
 
@@ -67,44 +84,43 @@ globalThis.wsStartServer = function (options = {}) {
       const msgId = msg.id || null;
 
       if (!method) {
-        ws.send(JSON.stringify({ id: msgId, success: false, error: '缺少 method 字段' }));
+        safeSend(ws, { id: msgId, success: false, error: '缺少 method 字段' });
         return;
       }
 
       const handler = handlers.get(method);
       if (!handler) {
-        print(`⚠️ [wsServer] 未注册的方法: ${method}`);
-        ws.send(JSON.stringify({ id: msgId, success: false, error: `方法不存在: ${method}` }));
+        log(`⚠️ [wsServer] 未注册的方法: ${method}`);
+        safeSend(ws, { id: msgId, success: false, error: `方法不存在: ${method}` });
         return;
       }
 
       // 执行处理方法
-      let result;
       try {
-        result = await handler(params, ws);
-        ws.send(JSON.stringify({ id: msgId, success: true, result }));
-        print(`📤 [wsServer] ${method} → 成功`);
+        const result = await handler(params, ws);
+        safeSend(ws, { id: msgId, success: true, result });
+        log(`📤 [wsServer] ${method} → 成功`);
       } catch (err) {
         const errMsg = err.message || String(err);
-        print(`❌ [wsServer] ${method} 异常: ${errMsg}`);
-        ws.send(JSON.stringify({ id: msgId, success: false, error: errMsg }));
+        log(`❌ [wsServer] ${method} 异常: ${errMsg}`);
+        safeSend(ws, { id: msgId, success: false, error: errMsg });
       }
     });
 
     ws.on('close', () => {
       clients.delete(ws);
-      print(`🔌 [wsServer] 客户端断开 (在线 ${clients.size})`);
-      writeLog('ws_server', `客户端断开, 剩余 ${clients.size}`);
+      log(`🔌 [wsServer] 客户端断开 (在线 ${clients.size})`);
+      writeLogSafe('ws_server', `客户端断开, 剩余 ${clients.size}`);
     });
 
     ws.on('error', (err) => {
-      print(`⚠️ [wsServer] 连接错误: ${err.message}`);
+      log(`⚠️ [wsServer] 连接错误: ${err.message}`);
     });
   });
 
   serverInstance.on('error', (err) => {
-    print(`❌ [wsServer] 服务器错误: ${err.message}`);
-    writeLog('ws_server', `服务器错误: ${err.message}`);
+    log(`❌ [wsServer] 服务器错误: ${err.message}`);
+    writeLogSafe('ws_server', `服务器错误: ${err.message}`);
   });
 
   return serverInstance;
@@ -115,14 +131,14 @@ globalThis.wsStartServer = function (options = {}) {
 // ========================
 globalThis.wsStopServer = function () {
   if (!serverInstance) {
-    print(`⚠️ [wsServer] 服务器未运行`);
+    log(`⚠️ [wsServer] 服务器未运行`);
     return false;
   }
   serverInstance.close(() => {
     serverInstance = null;
     clients.clear();
-    print(`🛑 [wsServer] 服务器已停止`);
-    writeLog('ws_server', '服务器已停止');
+    log(`🛑 [wsServer] 服务器已停止`);
+    writeLogSafe('ws_server', '服务器已停止');
   });
   return true;
 };
@@ -132,19 +148,21 @@ globalThis.wsStopServer = function () {
 // ========================
 globalThis.wsBroadcast = function (method, data = {}) {
   if (!serverInstance) {
-    print(`⚠️ [wsServer] 服务器未运行，无法广播`);
+    log(`⚠️ [wsServer] 服务器未运行，无法广播`);
     return 0;
   }
-  const payload = JSON.stringify({ method, data, type: 'broadcast' });
+  const payload = { method, data, type: 'broadcast' };
   let count = 0;
   for (const ws of clients) {
     if (ws.readyState === WebSocket.OPEN) {
-      ws.send(payload);
-      count++;
+      try {
+        ws.send(JSON.stringify(payload));
+        count++;
+      } catch (e) {}
     }
   }
   if (count > 0) {
-    print(`📢 [wsServer] 广播 ${method} → ${count} 个客户端`);
+    log(`📢 [wsServer] 广播 ${method} → ${count} 个客户端`);
   }
   return count;
 };

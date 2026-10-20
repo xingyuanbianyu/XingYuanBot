@@ -6,9 +6,6 @@ class DailyTool {
         this.apiBase = 'http://127.0.0.1:3000';
     }
 
-    /**
-     * 统一 GET 请求封装
-     */
     async napcatGet(action, params = {}) {
         const url = new URL(`${this.apiBase}/${action}`);
         Object.entries(params).forEach(([k, v]) => url.searchParams.append(k, v));
@@ -16,22 +13,20 @@ class DailyTool {
         return await res.json();
     }
 
-    // ✅ 底层已经剥离了前缀（如 # 或 /），这里直接匹配纯文本
     match(text) {
         if (typeof text !== 'string') return false;
         return text.trim() === '群打卡';
     }
 
-    // ✅ 接收完整的 msg 对象，以便提取发送者 QQ
     async handle(msg) {
         const senderQQ = String(msg.senderQQ || msg.user_id || msg.senderId || '');
         
-        // ✅ 修正权限校验：如果当前用户不是大主人或小主人，就拦截
-        if (!hasPermission(senderQQ, 'owner')) {
-            return '❌ 权限不足：该指令仅限主人使用。';
+        // 🌟 核心修复：将 'owner' 改为 'master'！
+        // 这样只有配置文件里标记为 true 的大主人才能触发，小主人发会被直接拦截。
+        if (!hasPermission(senderQQ, 'master')) {
+            return '❌ 权限不足：该指令仅限【大主人】使用。';
         }
 
-        // ✅ 兜底获取全局工具（防止 lib.cjs 没挂载成功报错）
         const sleepFn = globalThis.sleep || ((ms) => new Promise(r => setTimeout(r, ms)));
         const randomFn = globalThis.random || ((min, max) => Math.floor(Math.random() * (max - min + 1)) + min);
 
@@ -55,11 +50,9 @@ class DailyTool {
 
             for (const group of groups) {
                 try {
-                    // 随机延迟防风控
                     await sleepFn(randomFn(400, 1000));
                     let isSignSuccess = false;
 
-                    // 尝试 1：NapCat 风格 (GET /set_group_sign)
                     try {
                         const signRes = await this.napcatGet('set_group_sign', {
                             group_id: String(group.group_id)
@@ -69,7 +62,6 @@ class DailyTool {
                         }
                     } catch (e) {}
 
-                    // 尝试 2：LLOneBot 风格 (POST /send_group_sign)
                     if (!isSignSuccess) {
                         try {
                             const llobotRes = await fetch(`${this.apiBase}/send_group_sign`, {
@@ -84,7 +76,6 @@ class DailyTool {
                         } catch (e) {}
                     }
 
-                    // 统计结果并推入内存缓冲
                     const groupName = group.group_name || '未知群名';
                     if (isSignSuccess) {
                         successCount++;
@@ -104,7 +95,6 @@ class DailyTool {
             logBuffer.push(`🏁 群打卡结束！成功 ${successCount} 个，失败 ${failCount} 个`);
             logBuffer.push(`========================================\n`);
 
-            // 一次性调用全局 writeLog 写入文件
             const finalLogContent = logBuffer.join('\n');
             if (typeof globalThis.writeLog === 'function') {
                 globalThis.writeLog('daily-tool', finalLogContent);
@@ -112,7 +102,6 @@ class DailyTool {
                 console.log(finalLogContent);
             }
 
-            // ✅ 核心优化：直接返回字符串，app.js 会自动识别并发送
             return `群打卡任务完成！\n共 ${groups.length} 个群，成功 ${successCount} 个，失败 ${failCount} 个。`;
 
         } catch (err) {

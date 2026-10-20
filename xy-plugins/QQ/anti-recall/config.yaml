@@ -1,0 +1,11 @@
+# 是否开启防撤回
+enabled: true
+
+# 转发目标设置
+# 类型：group（群） 或 private（私聊）
+target_type: "group"
+# 目标群号或 QQ 号（请修改为你自己的）
+target_id: 123456789 
+
+# 发送前缀提示，放在原文前面
+alert_text: "🛑 【防撤回拦截】\n发送者："

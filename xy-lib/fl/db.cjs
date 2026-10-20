@@ -4,63 +4,48 @@
 const Database = require('better-sqlite3');
 const fs = require('fs');
 const path = require('path');
+const { fileURLToPath } = require('url'); // 🌟 引入 url 模块
 
 // ========================
-// 获取调用方的 __dirname (精准定位到触发 db 的插件目录)
+// 获取调用方的 __dirname
 // ========================
 function getCallerDir() {
   const err = new Error();
   const stack = err.stack || '';
   const lines = stack.split('\n');
 
-  // 从第 3 行开始查找（跳过 Error 行、当前函数自身）
+  // 从第 3 行开始找，跳过 Error 本身和当前 db.js
   for (let i = 3; i < lines.length; i++) {
     const line = lines[i];
     
-    // 忽略 Node 内部模块和 node_modules 中的堆栈
-    if (line.includes('node:') || line.includes('internal/') || line.includes('node_modules')) {
-      continue;
-    }
-    // 只忽略 db.js 自身，绝不忽略 index.js！
-    if (line.includes('db.js')) {
-      continue;
-    }
+    // 🌟 跳过内部模块和当前模块
+    if (line.includes('db.js') || line.includes('node:internal')) continue;
 
-    // 兼容 CJS 和 ESM 堆栈格式
+    // 匹配 file:/// 格式（ESM） 或者 普通绝对路径（CJS）
     const match = line.match(/\(([^)]+):[0-9]+:[0-9]+\)/) || line.match(/at\s+(.+):[0-9]+:[0-9]+/);
+    
     if (match) {
       let filePath = match[1];
       
-      // 处理 ESM 环境的 file:// 协议 (新版 Node 常见)
-      if (filePath.startsWith('file:///')) {
+      // 处理 file:/// 协议（ESM 环境）
+      if (filePath.startsWith('file://')) {
         try {
-          filePath = require('url').fileURLToPath(filePath);
+          filePath = fileURLToPath(filePath);
         } catch (e) {
-          // 降级处理，兼容 Windows 路径
-          filePath = filePath.replace(/^file:\/\/\//, '');
-          if (filePath.startsWith('/') && /^[A-Za-z]:/.test(filePath.substring(1))) {
-             filePath = filePath.substring(1); // 去掉盘符前的斜杠
-          }
+          filePath = filePath.replace(/^file:\/{3}/, '');
         }
-      } else {
-         filePath = filePath.replace(/^file:\/{3}/, '');
       }
 
-      // 确保是绝对路径
+      // 确保是合法的绝对路径
       if (/^[A-Za-z]:/.test(filePath) || /^\//.test(filePath)) {
-        // 返回调用该 db 的文件所在目录
         return path.dirname(filePath);
       }
     }
   }
   
-  // 兜底策略：万一找不到调用方，强制使用项目根目录下的 xy-data
-  const rootDir = path.resolve(__dirname, '..');
-  const fallbackDir = path.join(rootDir, 'xy-data');
-  if (!fs.existsSync(fallbackDir)) {
-     fs.mkdirSync(fallbackDir, { recursive: true });
-  }
-  return fallbackDir;
+  // 🌟 兜底警告：如果在异步栈里丢失了调用方，强制返回根目录并打印警告
+  console.warn('⚠️ [DB警告] 无法从调用栈中解析出插件路径，将使用根目录作为数据库存放点！');
+  return process.cwd();
 }
 
 // ========================
@@ -77,7 +62,7 @@ function getDbInstance(dbPath) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   
   const db = new Database(dbPath, { verbose: null });
-  db.pragma('journal_mode = WAL'); // 性能优化
+  db.pragma('journal_mode = WAL'); // 性能优化（读写不打架）
   dbCache.set(dbPath, db);
   return db;
 }
@@ -102,7 +87,8 @@ globalThis.db = function (action, options = {}) {
       try {
         const db = getDbInstance(dbPath);
         if (params.length > 0) {
-          db.prepare(sql).run(...params);
+          // exec 不支持参数，改用 run
+          db.prepare(sql).run(...params); 
         } else {
           db.exec(sql);
         }

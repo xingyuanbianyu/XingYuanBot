@@ -2,12 +2,37 @@ import { generateHelpCard } from './card.js';
 import fs from 'fs';
 import path from 'path';
 import yaml from 'yaml';
+import os from 'os'; // 🌟 新增引入系统模块
 import { fileURLToPath } from 'url';
 import { manageBlacklist } from '../../../xy-bot/blacklist.js';
 import { hasPermission, getRole } from '../../../xy-config/config/permissions.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CONFIG_PATH = path.join(__dirname, '../../../xy-config/config.yaml');
+
+// 🌟 辅助函数：格式化运行时间
+function formatUptime(seconds) {
+    const d = Math.floor(seconds / (3600 * 24));
+    const h = Math.floor(seconds % (3600 * 24) / 3600);
+    const m = Math.floor(seconds % 3600 / 60);
+    const s = Math.floor(seconds % 60);
+    let str = '';
+    if (d > 0) str += `${d}天`;
+    if (h > 0) str += `${h}小时`;
+    if (m > 0) str += `${m}分`;
+    str += `${s}秒`;
+    return str;
+}
+
+// 🌟 辅助函数：格式化内存大小
+function formatBytes(bytes, decimals = 2) {
+    if (bytes === 0) return '0 Bytes';
+    const k = 1024;
+    const dm = decimals < 0 ? 0 : decimals;
+    const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
+}
 
 export default {
   name: '指令',
@@ -44,7 +69,6 @@ export default {
         const pureText = (msgObj.pureText || "").trim();
         const senderId = String(msgObj.senderQQ || msgObj.user_id || msgObj.senderId || '');
         const senderName = msgObj.senderName || '未知';
-        // 🌟 核心修复：补上 chatId 的提取
         const chatId = msgObj.chatId || msgObj.group_id || msgObj.user_id; 
         
         if (!senderId || senderId === 'undefined') return null;
@@ -209,7 +233,6 @@ export default {
         // ==========================================
         if (pureText === '帮助') {
           try {
-            // 🌟 核心修复：把 chatId 传进去，生成针对该群的动态图片！
             const imagePath = await generateHelpCard(chatId);
             const buffer = fs.readFileSync(imagePath);
             return { file: buffer };
@@ -220,15 +243,41 @@ export default {
         }
 
         // ==========================================
-        // [ 状态 ] 指令
+        // 🌟 [ 状态 ] 指令 —— 满血增强版
         // ==========================================
         if (pureText === '状态') {
           if (!hasPermission(senderId, 'admin') && !hasPermission(senderId, 'master') && !hasPermission(senderId, 'owner')) {
             return '❌ 权限不足：该指令仅限管理员及以上身份使用。';
           }
-          const mem = Math.round(process.memoryUsage().heapUsed / 1024 / 1024 * 100) / 100;
-          const uptime = Math.round(process.uptime());
-          return `运行状态：正常\n内存占用：${mem} MB\n运行时间：${uptime} 秒`;
+          
+          // 1. 获取进程内存 (Node.js 占用)
+          const mem = process.memoryUsage();
+          
+          // 2. 获取系统内存
+          const totalMem = os.totalmem();
+          const freeMem = os.freemem();
+          const usedMem = totalMem - freeMem;
+          
+          // 3. 获取 CPU 信息
+          const cpus = os.cpus();
+          const cpuModel = cpus.length > 0 ? cpus[0].model.trim() : '未知';
+          
+          // 4. 获取系统负载 (1分钟、5分钟、15分钟平均负载)
+          const loadAvg = os.loadavg();
+
+          // 拼接输出信息
+          const lines = [
+              `🟢 运行状态：正常运行`,
+              `⏱️ 运行时间：${formatUptime(process.uptime())}`,
+              `📦 Node 版本：${process.version}`,
+              `💻 系统平台：${os.type()} ${os.release()} (${os.arch()})`,
+              `🖥️ 处理器 (CPU)：${cpus.length} 核 | ${cpuModel}`,
+              `📊 系统负载：${loadAvg[0].toFixed(2)}, ${loadAvg[1].toFixed(2)}, ${loadAvg[2].toFixed(2)}`,
+              `🧠 系统内存：${formatBytes(usedMem)} / ${formatBytes(totalMem)} (占用 ${((usedMem / totalMem) * 100).toFixed(1)}%)`,
+              `🚀 进程内存：${formatBytes(mem.rss)} (堆内存: ${formatBytes(mem.heapUsed)})`
+          ];
+
+          return lines.join('\n');
         }
 
         // ==========================================

@@ -1,0 +1,9 @@
+{
+  "name": "防撤回",
+  "version": "1.0.0",
+  "author": "Bot",
+  "description": "旁路备份消息，拦截撤回并转发",
+  "type": "message",
+  "priority": 999,
+  "enable": true
+}

@@ -9,9 +9,34 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MENU_PATH = path.resolve(__dirname, '../../plugins/指令/menu.json');
 const API = 'http://127.0.0.1:3000';
 
-// 记录今天已点赞过的用户
-const likedToday = new Set();
-let lastRecordDate = new Date().getDate();
+// ==========================================
+// 🌟 核心改造：使用全局 globalThis.db 持久化
+// ==========================================
+const DB_NAME = 'group_data'; // 统一使用 group_data.db
+
+// 初始化点赞记录表
+if (typeof globalThis.db === 'function') {
+    globalThis.db('exec', { 
+        dbName: DB_NAME, 
+        sql: 'CREATE TABLE IF NOT EXISTS like_records (user_id TEXT PRIMARY KEY, last_like_cycle TEXT NOT NULL)' 
+    });
+} else {
+    console.error('[群管] 严重警告: globalThis.db 未挂载，点赞持久化功能将失效！');
+}
+
+// 获取当前应该属于哪一天的“点赞周期”（凌晨 1 点刷新）
+function getCurrentLikeCycle() {
+    const now = new Date();
+    // 如果当前时间是凌晨 0 点到 1 点之间，它依然属于昨天的周期
+    if (now.getHours() < 1) {
+        now.setDate(now.getDate() - 1);
+    }
+    const y = now.getFullYear();
+    const m = String(now.getMonth() + 1).padStart(2, '0');
+    const d = String(now.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+}
+
 let botInfoData;
 
 // 读取 bot.yaml 配置
@@ -24,15 +49,6 @@ try {
     console.log('[配置警告] 读取 bot.yaml 失败:', e.message);
 }
 
-// 每天自动清空点赞记录
-function checkAndResetDaily() {
-    const today = new Date().getDate();
-    if (today !== lastRecordDate) {
-        likedToday.clear();
-        lastRecordDate = today;
-    }
-}
-
 const myCommands = [
   { cmd: '踢@成员', desc: '将指定成员踢出群聊' },
   { cmd: '禁言@成员QQ号 秒', desc: '禁言指定成员，默认600秒' },
@@ -40,7 +56,7 @@ const myCommands = [
   { cmd: '头衔 内容 / 申请头衔 内容', desc: '给自己设置专属头衔（需机器人是群主）' },
   { cmd: '设置管理@成员', desc: '将指定成员设为管理员（需大主人权限）' },
   { cmd: '取消管理@成员', desc: '将指定成员降为普通成员（需大主人权限）' },
-  { cmd: '点赞 / 赞我', desc: '让机器人给你点赞（好友10次，非好友50次）' },
+  { cmd: '点赞 / 赞我', desc: '让机器人给你点赞（每天1点重置）' },
   { cmd: '赞他@成员 / @成员 赞他', desc: '让机器人给指定成员点赞' },
   { cmd: '改头衔', desc: '让群主机器人改其他人的头衔（需要配置里的主人权限或者群管理权限）'},
   { cmd: '群公告', desc: '让机器人发群公告（需要机器人是群管理或者群主）'},
@@ -205,7 +221,7 @@ export default {
     const isMaster = (role === 'master' || getRole(senderQQ) === 'master');
 
     // ==========================================
-    // 🌟 查等级（支持带参数）
+    // 🌟 查等级
     // ==========================================
     if (cmd.startsWith('查等级')) {
         if (!isGroup) return '❌ 该指令仅限群聊使用';
@@ -341,7 +357,7 @@ export default {
     }
 
     // ==========================================
-    // 🌟 点赞功能
+    // 🌟 点赞功能（使用 globalThis.db）
     // ==========================================
     if (cmd === '点赞' || cmd === '赞' || cmd === '赞我' || cmd.startsWith('赞他') || cmd.startsWith('赞她')) {
         let likeTargetQQ = senderQQ; 
@@ -354,8 +370,24 @@ export default {
             likeTargetQQ = targetQQ;
         }
 
-        checkAndResetDaily();
-        if (!isLikeOther && likedToday.has(senderQQ)) return '今天已经给自己点过赞啦，明天再来吧~';
+        // 🌟 实时计算当前属于哪个周期（每天凌晨 1 点刷新）
+        const currentCycle = getCurrentLikeCycle();
+
+        // 只对“给自己点赞”做频率限制
+        if (!isLikeOther && typeof globalThis.db === 'function') {
+            const dbRes = globalThis.db('find', {
+                dbName: DB_NAME,
+                table: 'like_records',
+                where: 'user_id = ?',
+                params: [String(senderQQ)],
+                all: false
+            });
+
+            if (dbRes.success && dbRes.data && dbRes.data.last_like_cycle === currentCycle) {
+                return `今天已经给自己点过赞啦，明天凌晨 1 点后再来吧~\n(当前周期: ${currentCycle})`;
+            }
+        }
+
         if (botConfig.bot && botConfig.bot.likeEnabled === false) return '❌ 点赞功能已关闭';
 
         let isFriend = false;
@@ -373,9 +405,17 @@ export default {
             try { await fetch(`${API}/send_like?user_id=${likeTargetQQ}&times=10`); } catch (e) {}
         }
 
-        if (!isLikeOther) likedToday.add(senderQQ);
+        // 🌟 点赞成功后，写入/更新数据库
+        if (!isLikeOther && typeof globalThis.db === 'function') {
+            globalThis.db('exec', {
+                dbName: DB_NAME,
+                sql: 'INSERT OR REPLACE INTO like_records (user_id, last_like_cycle) VALUES (?, ?)',
+                params: [String(senderQQ), currentCycle]
+            });
+        }
+
         const targetName = isLikeOther ? `@${likeTargetQQ}` : '你';
-        return `✨ 点赞成功！[目标: ${targetName}] [关系: ${identity}] 本次共为你点赞 ${times} 次~`;
+        return `✨ 点赞成功！[目标: ${targetName}] [关系: ${identity}] 本次共为你点赞 ${times} 次~\n(当前点赞周期: ${currentCycle}，每日 1:00 刷新)`;
     }
 
     // ==========================================

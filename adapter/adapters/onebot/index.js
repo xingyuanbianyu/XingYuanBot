@@ -21,16 +21,13 @@ export default class OneBotAdapter {
     // 事件通知 → 走事件链路，不进消息链路
     if (raw.post_type === 'notice') {
       this.handleNotice(raw);
-      return null;
+      return null; // 触发完事件后直接返回 null，交给 app.js 丢弃
     }
 
     if (raw.post_type !== 'message' && raw.post_type !== 'message_sent') return null;
 
-    // 保留原始消息段数组，旧插件（如 #踢）要靠它提取 @ 的 QQ
     const messageSegments = raw.message || [];
 
-    // 🌟 核心修复 1：构建完全干净的纯文本，用于 match 匹配
-    // 剔除引用、@、表情等干扰，只保留文字，并消除多余空格
     const pureText = messageSegments
       .filter(m => m.type === 'text')
       .map(m => m.data?.text || '')
@@ -38,7 +35,6 @@ export default class OneBotAdapter {
       .replace(/\s+/g, ' ')
       .trim();
 
-    // 🌟 核心修复 2：构建带标记的展示文本，用于日志和部分需要上下文的插件
     const displayContent = messageSegments.map(m => {
       if (m.type === 'reply') {
         const refId = m.data?.id ?? m.data?.message_id ?? '';
@@ -51,23 +47,25 @@ export default class OneBotAdapter {
       return m.data?.text ?? `[${m.type}]`;
     }).join('') ?? '';
 
+    const selfId = String(raw.self_id || '');
+    const chatId = String(raw.group_id ?? raw.user_id ?? '');
+    const senderId = String(raw.user_id ?? '');
+    const messageId = raw.message_id ?? raw.id ?? raw.seq ?? raw.msg_id ?? null;
+
     return {
       type: raw.post_type === 'message_sent' ? 'send' : 'receive',
       chatType: raw.message_type === 'group' ? 'group' : 'private',
-      chatId: raw.group_id ?? raw.user_id,
-      chatName: raw.group_name ?? String(raw.group_id ?? raw.user_id),
-      senderId: raw.user_id,
-      senderName: raw.sender?.nickname ?? raw.sender?.card ?? String(raw.user_id),
-      messageId: raw.message_id ?? raw.id ?? raw.seq ?? raw.msg_id ?? null,
-
-      // 补全旧插件必须的核心字段
-      senderQQ: raw.user_id,
+      selfId: selfId,           
+      chatId: chatId,
+      chatName: raw.group_name ?? String(chatId),
+      senderId: senderId,
+      senderName: raw.sender?.nickname ?? raw.sender?.card ?? String(senderId),
+      messageId: messageId,
+      senderQQ: senderId,
       role: raw.sender?.role ?? 'member',
-      
-      // 🌟 将核心数据全部抛出去，任君挑选！
-      messageSegments,  // 原始消息段数组
-      pureText,         // 纯文字，专供 match
-      content: displayContent, // 带标记的文本，专供 log 或 handle 兜底
+      messageSegments,  
+      pureText,         
+      content: displayContent, 
     };
   }
 
@@ -77,7 +75,6 @@ export default class OneBotAdapter {
         ? { message_type: 'group', group_id: std.chatId }
         : { message_type: 'private', user_id: std.chatId };
 
-    // 1. 纯文本
     if (typeof reply === 'string') {
       return {
         action: 'send_msg',
@@ -85,7 +82,6 @@ export default class OneBotAdapter {
       };
     }
 
-    // 2. 规范图片格式
     if (reply?.type === 'image' && reply.file) {
       return {
         action: 'send_msg',
@@ -96,7 +92,6 @@ export default class OneBotAdapter {
       };
     }
 
-    // 3. 混合多段
     if (Array.isArray(reply)) {
       return {
         action: 'send_msg',
@@ -111,7 +106,6 @@ export default class OneBotAdapter {
       };
     }
 
-    // 4. 兼容旧格式
     if (reply?.file) {
       let buf = null;
       if (Buffer.isBuffer(reply.file)) buf = reply.file;
@@ -131,13 +125,11 @@ export default class OneBotAdapter {
     return null;
   }
 
-  /** 订阅事件 */
   onEvent(event, handler) {
     if (!this.eventHandlers.has(event)) this.eventHandlers.set(event, new Set());
     this.eventHandlers.get(event).add(handler);
   }
 
-  /** 触发事件 */
   emitEvent(event, payload) {
     const handlers = this.eventHandlers.get(event);
     if (!handlers) return;
@@ -146,18 +138,16 @@ export default class OneBotAdapter {
     }
   }
 
-  /** 处理 notice 事件 */
   handleNotice(raw) {
     if (raw.post_type !== 'notice') return;
 
-    // 🌟 核心修复：把原始包 raw 打包进去，供插件直接挖掘昵称等数据
     const basePayload = {
       groupId: raw.group_id,
       userId: raw.user_id,
       operatorId: raw.operator_id,
       subType: raw.sub_type,
-      selfId: raw.self_id,
-      raw: raw // 🌟 原始数据透传，插件里的 e.raw 现在有值了！
+      selfId: String(raw.self_id || ''), 
+      raw: raw 
     };
 
     if (raw.notice_type === 'group_increase') {
@@ -165,6 +155,12 @@ export default class OneBotAdapter {
     } else if (raw.notice_type === 'group_decrease') {
       const ev = raw.sub_type === 'kick' ? 'group.kick' : 'group.decrease';
       this.emitEvent(ev, basePayload);
+    } 
+    // 🌟 核心：补全撤回事件的发射
+    else if (raw.notice_type === 'group_recall') {
+      this.emitEvent('group.recall', basePayload);
+    } else if (raw.notice_type === 'friend_recall') {
+      this.emitEvent('friend.recall', basePayload);
     }
   }
 }

@@ -18,24 +18,28 @@ db.exec(`
   )
 `);
 
-console.log('✅ 数据库初始化完成 (ESM模式)');
+console.log('✅ 群管数据库初始化完成 (ESM模式)');
 
 export default {
     name: "群管工具箱",
     description: "支持 撤回、群待办、取消待办",
+    // 明确不带 events，因为这属于普通消息触发
 
     match: function (text) {
         if (typeof text !== 'string') return false;
+        // 兼容带前缀或不带前缀的匹配
         return /撤回|群待办|取消待办/i.test(text);
     },
 
     handle: async function (msg, matchResult) {
-        let text = (msg.pureText || "").trim();
+        // 🌟 核心修复：自动剥离 # 或 / 前缀，确保后续判断能命中
+        let text = (msg.pureText || "").trim().replace(/^[#\/]+/, '').trim();
         if (!text) return null;
 
-        const chatId = msg.chatId || msg.group_id;
-        const commandMsgId = msg.message_id || msg.messageId;
+        const chatId = msg.chatId || msg.group_id || msg.rawData?.group_id;
+        const commandMsgId = msg.message_id || msg.messageId || msg.rawData?.message_id;
 
+        // 从标准 content 中提取引用 ID
         let m = (msg.content || "").match(/\[引用ID:(-?\d+)\]/);
         let refId = m ? parseInt(m[1]) : null;
 
@@ -45,14 +49,17 @@ export default {
 
         // ================= 1. 撤回逻辑 =================
         if (isRecall) {
-            if (!refId) return '⚠️ 未找到引用ID，请回复需要撤回的消息后使用';
+            if (!refId) return '⚠️ 未找到引用ID，请回复需要撤回的消息后使用 #撤回';
 
             try {
+                // 撤回引用的消息
                 await fetch('http://127.0.0.1:3000/delete_msg', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ message_id: refId })
                 });
+                
+                // 撤回指令本身
                 if (commandMsgId) {
                     await new Promise(r => setTimeout(r, 300));
                     await fetch('http://127.0.0.1:3000/delete_msg', {
@@ -61,7 +68,7 @@ export default {
                         body: JSON.stringify({ message_id: commandMsgId })
                     });
                 }
-                return null; 
+                return null; // 撤回成功不需要发提示
             } catch (err) {
                 return `❌ 撤回失败: ${err.message}`;
             }
@@ -93,7 +100,7 @@ export default {
             if (checkResult !== true) return checkResult;
 
             const targetMsgId = refId || commandMsgId;
-            if (!targetMsgId) return '⚠️ 无法获取消息ID，请引用一条消息或直接发送本指令';
+            if (!targetMsgId) return '⚠️ 无法获取消息ID，请引用一条消息或直接发送指令';
 
             async function tryTodo(actionName) {
                 try {
@@ -159,7 +166,7 @@ export default {
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({
                                 group_id: Number(chatId),
-                                message_id: String(messageId) // 🌟 恢复传入 message_id
+                                message_id: String(messageId)
                             })
                         });
                         return await res.json();
@@ -182,13 +189,12 @@ export default {
                     }
                 }
 
-                // 无论成功还是失败，只要触发了取消逻辑，本地记录直接清空
+                // 清空记录
                 db.prepare('DELETE FROM group_todos WHERE group_id = ?').run(String(chatId));
 
                 if (success) {
                     return '✅ 取消待办成功';
                 } else {
-                    // 🌟 截图中反映出来的“缺少参数”或“不存在”，全都视为失效并清理
                     if (String(lastError).includes('不存在') || String(lastError).includes('缺少参数') || String(lastError).includes('Not Found')) {
                         return '✅ 群待办已失效或被手动取消，本地记录已清理。';
                     }

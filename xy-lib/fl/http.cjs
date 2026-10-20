@@ -14,7 +14,8 @@
  * @returns {Promise<{ status: number, data: any, error?: string }>}
  */
 globalThis.httpRequest = function (options = {}) {
-  return new Promise(async (resolve) => {
+  // 🌟 修复 1：去掉外面的 async
+  return new Promise((resolve) => {
     const http = require('http');
     const https = require('https');
 
@@ -31,7 +32,6 @@ globalThis.httpRequest = function (options = {}) {
     // ---- 2. URL 解析 ----
     let parsedUrl;
     try {
-      // 如果没有协议头，自动补 http://
       if (!/^https?:\/\//i.test(rawUrl)) {
         rawUrl = 'http://' + rawUrl;
       }
@@ -83,16 +83,18 @@ globalThis.httpRequest = function (options = {}) {
       res.on('end', () => {
         const raw = Buffer.concat(chunks).toString('utf8');
         let parsed = raw;
-        if (options.json !== false && raw.trim().startsWith('{') || raw.trim().startsWith('[')) {
+        
+        // 🌟 修复 2：加上括号，修正优先级问题
+        if (options.json !== false && (raw.trim().startsWith('{') || raw.trim().startsWith('['))) {
           try { parsed = JSON.parse(raw); } catch (e) { /* 不是 JSON，保持原样 */ }
         }
+        
         resolve({ status: res.statusCode, data: parsed });
       });
     });
 
     // ---- 5. 错误处理 ----
     req.on('error', (err) => {
-      // 区分"连接失败"和"参数问题"
       let errMsg = `❌ 请求失败 [${method} ${parsedUrl.hostname}:${port}${reqPath}]`;
       if (err.code === 'ECONNREFUSED') {
         errMsg += ' → 连接被拒绝（检查地址/端口是否正确、服务是否启动）';
