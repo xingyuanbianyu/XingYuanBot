@@ -1,0 +1,9 @@
+{
+  "name": "群事件配置",
+  "version": "1.0.0",
+  "author": "Bot",
+  "description": "独立管理群事件提示的开关",
+  "type": "message",
+  "priority": 1,
+  "enable": true
+}

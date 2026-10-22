@@ -17,6 +17,7 @@ const CONFIG_PATH = join(PROJECT_ROOT, 'xy-data', 'config.yaml');
 // 内部状态
 // ========================
 let configData = null;
+let watchTimer = null; // 防抖定时器
 
 // ========================
 // 默认配置
@@ -87,8 +88,6 @@ export function getConfig() {
 
 // ========================
 // 判定：指定 QQ 是否被屏蔽
-// 规则：
-//   白名单非空 → 只允许白名单内；白名单为空 → 用黑名单过滤
 // ========================
 export function isQQAllowed(qq) {
   const cfg = getConfig();
@@ -116,7 +115,7 @@ export function isGroupAllowed(groupId) {
 }
 
 // ========================
-// 手动重载（改完配置不想重启机器人时调用）
+// 手动重载
 // ========================
 export function reloadConfig() {
   console.log('🔄 [配置] 正在重载...');
@@ -124,7 +123,29 @@ export function reloadConfig() {
 }
 
 // ========================
-// 默认导出：不预先调用 loadConfig()，避免 ESM 循环依赖问题
-// 其他模块可以直接 `import { getConfig } from './config.js'`
+// 🌟 核心新增：文件变动自动监听
 // ========================
+function initWatcher() {
+  // 初始加载一次
+  loadConfig();
+
+  try {
+    // 监听文件变化
+    fs.watch(CONFIG_PATH, (eventType) => {
+      // 加入防抖机制，防止编辑器保存时触发多次导致频繁重载
+      if (watchTimer) clearTimeout(watchTimer);
+      watchTimer = setTimeout(() => {
+        console.log(`👀 [配置] 检测到文件变化，正在热更新...`);
+        reloadConfig();
+      }, 200); // 延迟 200ms 执行
+    });
+    console.log(`👀 [配置] 已开启热监听: ${CONFIG_PATH}`);
+  } catch (e) {
+    console.error(`❌ [配置] 监听文件失败: ${e.message}`);
+  }
+}
+
+// 启动时执行一次监听挂载
+initWatcher();
+
 export default { loadConfig, getConfig, reloadConfig, isQQAllowed, isGroupAllowed };

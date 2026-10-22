@@ -2,10 +2,12 @@ import { generateHelpCard } from './card.js';
 import fs from 'fs';
 import path from 'path';
 import yaml from 'yaml';
-import os from 'os'; // 🌟 新增引入系统模块
+import os from 'os'; 
 import { fileURLToPath } from 'url';
 import { manageBlacklist } from '../../../xy-bot/blacklist.js';
 import { hasPermission, getRole } from '../../../xy-config/config/permissions.js';
+// 🌟 引入全局配置读取
+import { getConfig } from '../../../xy-bot/config.js'; 
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CONFIG_PATH = path.join(__dirname, '../../../xy-config/config.yaml');
@@ -49,10 +51,13 @@ export default {
                         pureText === '查询前缀' || pureText.startsWith('添加前缀') ||
                         pureText.startsWith('删除前缀');
 
-    // 🌟 白名单管理指令
+    // 🌟 指令白名单管理指令
     const isWhitelistCmd = pureText === '启用指令白名单' || pureText === '禁用指令白名单' ||
                            pureText === '查询指令白名单' || pureText.startsWith('添加指令白名单') ||
                            pureText.startsWith('删除指令白名单');
+
+    // 🌟 新增：全局黑白名单查询
+    const isGlobalListCmd = pureText === '查询黑名单' || pureText === '查询白名单';
 
     return pureText === '帮助' ||
         pureText === '状态' ||
@@ -60,9 +65,11 @@ export default {
         pureText === '权限' ||
         pureText === '重启' ||
         pureText === '重载' ||
+        pureText === '菜单' ||
         isBlacklistCmd ||
         isPrefixCmd ||
-        isWhitelistCmd;
+        isWhitelistCmd ||
+        isGlobalListCmd;
   },
 
   handle: async (msgObj) => {
@@ -74,6 +81,27 @@ export default {
         if (!senderId || senderId === 'undefined') return null;
 
         const isMaster = hasPermission(senderId, 'master');
+
+        // ==========================================
+        // 🌟 新增功能块：[ 全局黑/白名单查询 ]
+        // ==========================================
+        if (pureText === '查询黑名单' || pureText === '查询白名单') {
+            if (!isMaster) return '❌ 权限不足：仅大主人可查看全局黑白名单。';
+            
+            const cfg = getConfig();
+            
+            if (pureText === '查询黑名单') {
+                const qqList = cfg.blacklist_qq.length > 0 ? cfg.blacklist_qq.join('\n') : '空';
+                const groupList = cfg.blacklist_group.length > 0 ? cfg.blacklist_group.join('\n') : '空';
+                return `🛑 全局黑名单配置：\n\n👤 黑名单用户：\n${qqList}\n\n👥 黑名单群聊：\n${groupList}`;
+            }
+            
+            if (pureText === '查询白名单') {
+                const qqList = cfg.whitelist_qq.length > 0 ? cfg.whitelist_qq.join('\n') : '空';
+                const groupList = cfg.whitelist_group.length > 0 ? cfg.whitelist_group.join('\n') : '空';
+                return `🛡️ 全局白名单配置：\n\n👤 白名单用户：\n${qqList}\n\n👥 白名单群聊：\n${groupList}`;
+            }
+        }
 
         // ==========================================
         // 🌟 功能块 1：[ 前缀管理指令 ] 仅限大主人使用
@@ -133,7 +161,7 @@ export default {
         }
 
         // ==========================================
-        // 🌟 功能块 2：[ 白名单管理指令 ] 仅限大主人使用
+        // 🌟 功能块 2：[ 指令白名单管理 ] 仅限大主人使用
         // ==========================================
         if (pureText === '启用指令白名单' || pureText === '禁用指令白名单' || pureText === '查询指令白名单' || pureText.startsWith('添加指令白名单') || pureText.startsWith('删除指令白名单')) {
             if (!isMaster) return '❌ 权限不足：仅大主人可管理白名单。';
@@ -146,7 +174,7 @@ export default {
                 const wl = config.whitelist;
 
                 if (pureText === '查询指令白名单') {
-                    return `🛡️ 当前指令白名单配置：\n状态：${wl.enable ? '✅ 启用' : '❌ 禁用'}\n特权指令：${wl.list && wl.list.length > 0 ? wl.list.join(' , ') : '空'}`;
+                    return `🛡️ 当前免前缀指令白名单：\n状态：${wl.enable ? '✅ 启用' : '❌ 禁用'}\n特权指令：${wl.list && wl.list.length > 0 ? wl.list.join(' , ') : '空'}`;
                 }
 
                 if (pureText === '启用指令白名单') {
@@ -231,7 +259,7 @@ export default {
         // ==========================================
         // [ 帮助 ] 指令
         // ==========================================
-        if (pureText === '帮助') {
+        if (pureText === '帮助' || pureText === '菜单') {
           try {
             const imagePath = await generateHelpCard(chatId);
             const buffer = fs.readFileSync(imagePath);
@@ -243,29 +271,21 @@ export default {
         }
 
         // ==========================================
-        // 🌟 [ 状态 ] 指令 —— 满血增强版
+        // 🌟 [ 状态 ] 指令
         // ==========================================
         if (pureText === '状态') {
           if (!hasPermission(senderId, 'admin') && !hasPermission(senderId, 'master') && !hasPermission(senderId, 'owner')) {
             return '❌ 权限不足：该指令仅限管理员及以上身份使用。';
           }
           
-          // 1. 获取进程内存 (Node.js 占用)
           const mem = process.memoryUsage();
-          
-          // 2. 获取系统内存
           const totalMem = os.totalmem();
           const freeMem = os.freemem();
           const usedMem = totalMem - freeMem;
-          
-          // 3. 获取 CPU 信息
           const cpus = os.cpus();
           const cpuModel = cpus.length > 0 ? cpus[0].model.trim() : '未知';
-          
-          // 4. 获取系统负载 (1分钟、5分钟、15分钟平均负载)
           const loadAvg = os.loadavg();
 
-          // 拼接输出信息
           const lines = [
               `🟢 运行状态：正常运行`,
               `⏱️ 运行时间：${formatUptime(process.uptime())}`,
@@ -297,7 +317,7 @@ export default {
             pyProcess.unref();
             setTimeout(() => { process.exit(0); }, 2000);
           }, 1000);
-          return '🔷 机器人正在重启，请稍候...';
+          return '🔷 Bot 正在重启，请稍候...';
         }
 
         // ==========================================
@@ -329,7 +349,7 @@ export default {
             return '❌ 权限不足：仅主人可执行关闭操作。';
           }
           setTimeout(() => { process.exit(0); }, 1500);
-          return '🔷 机器人已关闭。';
+          return '🔷 Bot已退出。';
         }
 
         return null;

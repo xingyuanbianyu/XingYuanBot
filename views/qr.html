@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>扫码登录 - 云挂机</title>
+    <style>
+        body { font-family: sans-serif; background: #121212; color: #e0e0e0; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; flex-direction: column; }
+        .qr-box { background: #1e1e1e; padding: 30px; border-radius: 12px; text-align: center; width: 320px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); }
+        h2 { margin-top: 0; color: #fff; }
+        .img-container { width: 260px; height: 260px; background: #000; border-radius: 8px; margin: 20px auto; display: flex; justify-content: center; align-items: center; overflow: hidden; position: relative; }
+        #qr-img { width: 100%; height: 100%; object-fit: contain; display: none; }
+        .loading { color: #888; font-size: 14px; position: absolute; }
+        #status { font-size: 14px; color: #10b981; margin-top: 15px; font-weight: bold; }
+        .back-link { margin-top: 20px; color: #3b82f6; text-decoration: none; font-size: 14px; display: inline-block; }
+        .back-link:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <div class="qr-box">
+        <h2>📱 请扫码登录</h2>
+        <p style="color: #aaa; font-size: 13px; margin: 0;">使用手机 QQ 扫码，成功后自动跳转</p>
+        
+        <div class="img-container">
+            <span class="loading" id="loading-text">二维码生成中...</span>
+            <img id="qr-img" src="" alt="二维码">
+        </div>
+        
+        <div id="status">等待扫码...</div>
+        <a href="/" class="back-link">返回控制台</a>
+    </div>
+
+    <script>
+        const urlParams = new URLSearchParams(window.location.search);
+        const instanceId = urlParams.get('id');
+        
+        if (!instanceId) {
+            document.getElementById('loading-text').innerText = '缺少实例ID参数';
+            document.getElementById('status').innerText = '非法访问';
+            document.getElementById('status').style.color = '#ef4444';
+        }
+
+        let pollImgTimer = null;
+        let pollStatusTimer = null;
+
+        function startPolling() {
+            const qrImg = document.getElementById('qr-img');
+            const loadingText = document.getElementById('loading-text');
+            
+            pollImgTimer = setInterval(() => {
+                qrImg.src = '/api/qrcode/' + instanceId + '?t=' + Date.now();
+                qrImg.onload = () => { 
+                    qrImg.style.display = 'block'; 
+                    loadingText.style.display = 'none';
+                };
+                qrImg.onerror = () => {};
+            }, 2000);
+
+            pollStatusTimer = setInterval(async () => {
+                try {
+                    const res = await fetch('/api/state');
+                    const data = await res.json();
+                    const inst = data.instances.find(i => i.id === instanceId);
+                    
+                    if (inst && inst.online) {
+                        clearInterval(pollImgTimer);
+                        clearInterval(pollStatusTimer);
+                        document.getElementById('status').innerText = '✅ 扫码成功，正在跳转...';
+                        document.getElementById('status').style.color = '#10b981';
+                        qrImg.style.display = 'none';
+                        setTimeout(() => {
+                            window.location.href = '/';
+                        }, 1500);
+                    } else if (!inst) {
+                        clearInterval(pollImgTimer);
+                        clearInterval(pollStatusTimer);
+                        document.getElementById('status').innerText = '❌ 实例已停止或消失';
+                        document.getElementById('status').style.color = '#ef4444';
+                        document.getElementById('loading-text').innerText = '已断开';
+                    }
+                } catch (e) {}
+            }, 3000);
+        }
+
+        if (instanceId) {
+            startPolling();
+        }
+    </script>
+</body>
+</html>

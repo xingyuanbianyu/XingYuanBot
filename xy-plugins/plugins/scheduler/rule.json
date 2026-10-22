@@ -1,0 +1,9 @@
+{
+  "name": "定时调度",
+  "version": "1.0.0",
+  "author": "Bot",
+  "description": "系统级定时任务，自动触发指令或打卡",
+  "type": "message",
+  "priority": 1,
+  "enable": true
+}

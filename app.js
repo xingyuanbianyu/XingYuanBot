@@ -3,27 +3,44 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 import yaml from 'yaml';
-import express from 'express';
-import fsExtra from 'fs-extra';
-import { spawn, execSync } from 'child_process';
-import { WebSocket } from 'ws';
 
 import { loadNetworkConfig, startNetwork } from './xy-bot/network.js';
 import { AdapterRegistry } from './xy-bot/adapter-registry.js';
 import { loadPlugins } from './xy-bot/plugin-loader.js';
 import { startBot } from './xy-bot/bot.js';
 
+import { isQQAllowed, isGroupAllowed } from './xy-bot/config.js';
+import { getRole } from './xy-config/config/permissions.js';
+
+import { startWebPanel } from './web-panel.js';
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const dataDir = join(__dirname, 'xy-data');
 const configPath = join(__dirname, 'xy-config', 'config.yaml');
 const priorityPath = join(__dirname, 'xy-config', 'priority.yaml'); 
+const ownerFilePath = join(__dirname, 'xy-data', 'owner.json'); // 号主记录文件
 
-const wsPool = new Map();        
-const wsToBotId = new Map();     
-const botIdToWs = new Map();     
+// 🌟 共享状态
+const sharedState = {
+    wsPool: new Map(),
+    wsToBotId: new Map(),
+    botIdToWs: new Map(),
+    instances: new Map(),
+    ownerQQ: null // 全局记录号主
+};
+
+// 读取号主记录
+if (fs.existsSync(ownerFilePath)) {
+    try {
+        const data = JSON.parse(fs.readFileSync(ownerFilePath, 'utf8'));
+        sharedState.ownerQQ = data.ownerQQ || null;
+    } catch (e) {}
+}
+
 globalThis._ws = null; 
+globalThis.botInfo = { qq: '10000' };
 
-const processedMessages = new Set();
+let processedMessages = [];
 const MAX_CACHE_SIZE = 2000;
 const interactiveSessions = new Map();
 
@@ -70,9 +87,9 @@ function loadCmdConfig() {
     } else {
         priorityPlugins = new Set();
     }
-
-    globalThis.print(`⚙️ [配置] 前缀/白名单/特权插件 已重载`);
-  } catch (e) {}
+  } catch (e) {
+    globalThis.print(`⚠️ [配置加载失败] ${e.message}`);
+  }
 }
 
 function watchConfig() {
@@ -93,7 +110,7 @@ function watchConfig() {
 globalThis.bot = {
   send: async (msg) => {
     let targetWs = null;
-    if (msg.botId) targetWs = botIdToWs.get(String(msg.botId));
+    if (msg.botId) targetWs = sharedState.botIdToWs.get(String(msg.botId));
     if (!targetWs && msg._ws) targetWs = msg._ws;
     if (!targetWs) targetWs = globalThis._ws;
 
@@ -154,13 +171,16 @@ async function runPlugin(plugin, msg) {
                   }
                   return true;
               }
-          } catch (e) { interactiveSessions.delete(msg.senderQQ); }
+          } catch (e) { 
+              interactiveSessions.delete(msg.senderQQ); 
+              globalThis.print(`[插件异常] ${pluginName} 交互模式报错: ${e.message}`);
+          }
           return true; 
       }
   }
 
   let matchText = (msg.pureText || "").trim();
-  let finalPureText = matchText; // 🌟 提取到外层，修复作用域 Bug
+  let finalPureText = matchText; 
 
   if (!isPriority) {
       let hasValidPrefix = false;
@@ -168,7 +188,7 @@ async function runPlugin(plugin, msg) {
       for (const p of cmdConfig.prefixes) {
         if (matchText.startsWith(p)) {
           hasValidPrefix = true;
-          finalPureText = matchText.slice(p.length).trim(); // 剥离前缀
+          finalPureText = matchText.slice(p.length).trim(); 
           break;
         }
       }
@@ -178,31 +198,30 @@ async function runPlugin(plugin, msg) {
 
       if (!hasValidPrefix && !isAdminCmd && whitelistConfig.enable && whitelistConfig.list.length > 0) {
         for (const word of whitelistConfig.list) {
-          if (finalPureText === word || (finalPureText.endsWith(word) && finalPureText.replace(word, '').trim().startsWith('@'))) {
+          if (matchText === word) {
             isWhitelisted = true;
-            finalPureText = word; 
             break;
           }
         }
       }
 
-      // 空文本如纯图片不拦截，只有文字且无前缀才拦截
-      if (cmdConfig.enable && !hasValidPrefix && !isAdminCmd && !isWhitelisted && matchText) return false;
+      if (cmdConfig.enable && !hasValidPrefix && !isAdminCmd && !isWhitelisted && matchText) {
+          return false;
+      }
 
       if (matchFn) {
         try {
-          if (!matchFn(finalPureText)) return false; // 用剥离后的去匹配
+          if (!matchFn(finalPureText)) return false; 
         } catch (e) { return false; }
       }
   }
 
-  // 🌟 把 msg 和 rawData 完美融合，既照顾老插件，又兼容新逻辑
   const pluginMsg = {
     ...msg,               
     ...msg.rawData,       
     content: msg.content,               
     text: msg.message || [],            
-    pureText: finalPureText, // 🌟 这里的变量能正常读到了
+    pureText: finalPureText, 
     raw_message: msg.raw_message,
     botId: msg.botId, 
     _ws: msg._ws
@@ -235,8 +254,10 @@ async function runPlugin(plugin, msg) {
 }
 
 async function handleIncomingMessage(rawData, ws, registry, plugins) {
-    if (!wsPool.has(ws)) {
-      wsPool.set(ws, { connectedAt: Date.now() });
+    if (!ws || ws.readyState !== 1) return;
+
+    if (!sharedState.wsPool.has(ws)) {
+      sharedState.wsPool.set(ws, { connectedAt: Date.now() });
       globalThis._ws = ws; 
     }
 
@@ -246,10 +267,18 @@ async function handleIncomingMessage(rawData, ws, registry, plugins) {
 
         if (parsed.self_id) {
             const botId = String(parsed.self_id);
-            if (!wsToBotId.has(ws)) {
-                wsToBotId.set(ws, botId);
-                botIdToWs.set(botId, ws);
+            globalThis.botInfo.qq = botId; 
+            if (!sharedState.wsToBotId.has(ws)) {
+                sharedState.wsToBotId.set(ws, botId);
+                sharedState.botIdToWs.set(botId, ws);
                 globalThis.print(`🔗 [路由] 动态绑定连接成功，Bot QQ: ${botId}`);
+                
+                // 🌟 记录号主 QQ
+                if (sharedState.ownerQQ !== botId) {
+                    sharedState.ownerQQ = botId;
+                    fs.writeFileSync(ownerFilePath, JSON.stringify({ ownerQQ: botId, updateAt: Date.now() }, null, 2));
+                    globalThis.print(`👑 [系统] 已将 ${botId} 记录为号主！`);
+                }
             }
         }
 
@@ -263,14 +292,29 @@ async function handleIncomingMessage(rawData, ws, registry, plugins) {
         
         if (!stdMsg) return;
 
-        if (parsed.post_type === 'message' && parsed.message_id) {
-          const msgId = `${stdMsg.selfId}_${parsed.message_id}_${stdMsg.senderId}`;
-          if (processedMessages.has(msgId)) return;
-          processedMessages.add(msgId);
-          if (processedMessages.size > MAX_CACHE_SIZE) processedMessages.clear();
-        }
-
         if (parsed.post_type === 'message') {
+          const senderQQ = stdMsg.senderId;
+          const chatId = stdMsg.chatId;
+          const isGroup = stdMsg.chatType === 'group';
+          
+          let userRole = 'member';
+          try {
+             userRole = getRole(senderQQ);
+          } catch(e) {}
+
+          // 号主直接放行，不受白名单限制
+          if (userRole !== 'master' && userRole !== 'owner' && senderQQ !== sharedState.ownerQQ) {
+              if (isGroup && !isGroupAllowed(chatId)) return;
+              if (!isQQAllowed(senderQQ)) return;
+          }
+
+          if (parsed.message_id) {
+            const msgId = `${stdMsg.selfId}_${parsed.message_id}_${stdMsg.senderId}`;
+            if (processedMessages.includes(msgId)) return;
+            processedMessages.push(msgId);
+            if (processedMessages.length > MAX_CACHE_SIZE) processedMessages.shift();
+          }
+
           const msg = {
             type: 'receive',
             post_type: parsed.post_type,
@@ -302,213 +346,19 @@ async function handleIncomingMessage(rawData, ws, registry, plugins) {
     } catch (e) { globalThis.print(`[处理异常] ${e.message}`); }
 }
 
-// ========================
-// Web面板启动
-// ========================
-function startWebPanel(registry, plugins) {
-    const app = express();
-    const PORT = 4000;
-    const PUBLIC_IP = '118.178.186.173'; 
-    let currentWsPort = 30100; 
-    let currentWebUI = 6100; 
-    const instances = new Map();
-
-    const PARENT_DIR = join(__dirname, '..');
-    let TEMPLATE_DIR = join(PARENT_DIR, 'napcat-template');
-    if (!fsExtra.existsSync(TEMPLATE_DIR)) {
-        TEMPLATE_DIR = join(PARENT_DIR, 'Napcat');
-    }
-
-    app.use(express.json());
-
-    app.get('/', (req, res) => {
-        res.send(`
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <meta charset="utf-8">
-            <title>云挂机平台</title>
-            <style>
-                body { font-family: sans-serif; background: #1e1e1e; color: #fff; padding: 20px; }
-                .card { background: #333; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
-                .btn { padding: 10px 20px; background: #4CAF50; color: white; border: none; border-radius: 5px; cursor: pointer; }
-                #qr-img { max-width: 300px; display: none; margin-top: 15px; border: 5px solid #fff; border-radius: 5px; }
-            </style>
-        </head>
-        <body>
-            <h2>🚀 云挂机平台</h2>
-            <div class="card">
-                <h3>新建实例</h3>
-                <button class="btn" onclick="createInstance()">启动并扫码登录</button>
-                <p id="status" style="color: #aaa; margin-top: 10px;">点击按钮开始扫码...</p>
-                <img id="qr-img" src="" alt="二维码加载中...">
-            </div>
-            <script>
-                let currentInstanceId = null;
-
-                async function createInstance() {
-                    document.getElementById('status').innerText = '正在启动协议端，请稍候...';
-                    document.getElementById('qr-img').style.display = 'none';
-
-                    const res = await fetch('/api/create', { method: 'POST' });
-                    const data = await res.json();
-                    
-                    if (data.success) {
-                        document.getElementById('status').innerText = '请使用手机 QQ 扫码登录：';
-                        currentInstanceId = data.instanceId;
-                        pollQR();
-                        pollStatus();
-                    } else {
-                        document.getElementById('status').innerText = '启动失败: ' + data.msg;
-                    }
-                }
-
-                function pollQR() {
-                    const timer = setInterval(() => {
-                        if (!currentInstanceId) return clearInterval(timer);
-                        const img = document.getElementById('qr-img');
-                        img.src = '/api/qrcode/' + currentInstanceId + '?t=' + Date.now();
-                        img.onload = () => { img.style.display = 'block'; };
-                        img.onerror = () => { img.style.display = 'none'; };
-                    }, 2000);
-                }
-
-                function pollStatus() {
-                    const timer = setInterval(async () => {
-                        if (!currentInstanceId) return clearInterval(timer);
-                        const res = await fetch('/api/status/' + currentInstanceId);
-                        const data = await res.json();
-                        if (data.online) {
-                            clearInterval(timer);
-                            document.getElementById('status').innerText = '✅ 扫码成功，机器人已成功连入主控！';
-                            document.getElementById('qr-img').style.display = 'none';
-                            document.getElementById('qr-img').src = "";
-                        }
-                    }, 3000);
-                }
-            </script>
-        </body>
-        </html>
-        `);
-    });
-
-    app.post('/api/create', async (req, res) => {
-        try {
-            const wsPort = currentWsPort++;
-            const webuiPort = currentWebUI++;
-            const instanceId = `user_${Date.now()}`;
-            
-            const userDir = join(__dirname, 'instances', instanceId);
-
-            if (!fsExtra.existsSync(TEMPLATE_DIR)) {
-                return res.status(500).json({ success: false, msg: `找不到协议端模板: ${TEMPLATE_DIR}` });
-            }
-            
-            fsExtra.copySync(TEMPLATE_DIR, userDir);
-
-            const pidFile = join(userDir, 'napcat.pid');
-            if (fsExtra.existsSync(pidFile)) fsExtra.removeSync(pidFile);
-            const cacheDir = join(userDir, 'data', 'nt_qq');
-            if (fsExtra.existsSync(cacheDir)) fsExtra.emptyDirSync(cacheDir);
-
-            const webuiConfigPath = join(userDir, 'config', 'webui.json');
-            if (fsExtra.existsSync(webuiConfigPath)) {
-                const webuiConfig = fsExtra.readJsonSync(webuiConfigPath);
-                webuiConfig.port = webuiPort;
-                webuiConfig.host = '0.0.0.0'; 
-                fsExtra.writeJsonSync(webuiConfigPath, webuiConfig);
-            }
-
-            const onebotConfigPath = join(userDir, 'config', 'onebot11.json');
-            if (fsExtra.existsSync(onebotConfigPath)) {
-                 const obConfig = fsExtra.readJsonSync(onebotConfigPath);
-                 if (obConfig.network && obConfig.network.websocketServers && obConfig.network.websocketServers.length > 0) {
-                     obConfig.network.websocketServers[0].port = wsPort;
-                 }
-                 fsExtra.writeJsonSync(onebotConfigPath, obConfig);
-            }
-
-            globalThis.print(`🚀 [面板] 正在拉起实例 ${instanceId} (WS: ${wsPort}, WebUI: ${webuiPort})`);
-            
-            const child = spawn('bash', ['./napcat.sh'], {
-                cwd: userDir,
-                env: { 
-                    ...process.env, 
-                    HOME: userDir, 
-                    XDG_CONFIG_HOME: join(userDir, '.config'),
-                    NAPCAT_WEBUI_PORT: webuiPort.toString(),
-                    NAPCAT_WS_PORT: wsPort.toString()
-                },
-                stdio: 'inherit' 
-            });
-
-            child.on('exit', (code) => {
-                globalThis.print(`⚠️ [面板] 实例 ${instanceId} 退出，退出码: ${code}`);
-                instances.delete(instanceId);
-            });
-
-            instances.set(instanceId, { wsPort, webuiPort, child, online: false, userDir });
-            res.json({ success: true, instanceId });
-
-            setTimeout(() => {
-                globalThis.print(`🔗 [面板] 尝试接入实例 WS: ws://127.0.0.1:${wsPort}`);
-                const newWs = new WebSocket(`ws://127.0.0.1:${wsPort}`);
-                
-                newWs.on('open', () => {
-                    const inst = instances.get(instanceId);
-                    if (inst) inst.online = true;
-                    globalThis.print(`✅ [面板] 实例 ${instanceId} 动态接入成功`);
-                });
-                
-                newWs.on('message', (msg) => handleIncomingMessage(msg.toString(), newWs, registry, plugins));
-                
-                newWs.on('error', (err) => globalThis.print(`❌ [面板] 实例连接失败: ${err.message}`));
-                
-                newWs.on('close', () => {
-                    globalThis.print(`🔌 [面板] 实例 ${instanceId} WS 连接断开`);
-                    wsPool.delete(newWs);
-                    const botId = wsToBotId.get(newWs);
-                    if (botId) {
-                        botIdToWs.delete(botId);
-                        wsToBotId.delete(newWs);
-                    }
-                });
-            }, 15000); 
-
-        } catch (e) {
-            res.status(500).json({ success: false, msg: e.message });
-        }
-    });
-
-    app.get('/api/qrcode/:id', (req, res) => {
-        const inst = instances.get(req.params.id);
-        if (!inst) return res.status(404).send('Not found');
-        
-        const qrPath = join(inst.userDir, 'opt', 'QQ', 'resources', 'app', 'app_launcher', 'napcat', 'cache', 'qrcode.png');
-        
-        if (fsExtra.existsSync(qrPath)) {
-            res.sendFile(qrPath);
-        } else {
-            res.status(404).send('QR Code not found');
-        }
-    });
-
-    app.get('/api/status/:id', (req, res) => {
-        const inst = instances.get(req.params.id);
-        res.json({ online: inst ? inst.online : false });
-    });
-
-    app.listen(PORT, '0.0.0.0', () => {
-        globalThis.print(`🚀 网页挂机面板已启动: http://${PUBLIC_IP}:${PORT}`);
-    });
-}
-
 async function main() {
   await lib(); 
-  console.log('🚀 XingYuanBot (全栈核心版) 启动中...\n');
+  console.log('🚀 XingYuanBot 启动中...\n');
 
   loadCmdConfig();
   watchConfig();
+
+  setInterval(() => {
+      const now = Date.now();
+      for (const [qq, sess] of interactiveSessions) {
+          if (sess.expireAt <= now) interactiveSessions.delete(qq);
+      }
+  }, 60000);
 
   const netConfigs = loadNetworkConfig(dataDir);
   const registry = new AdapterRegistry();
@@ -516,6 +366,10 @@ async function main() {
 
   const { plugins, errors } = await loadPlugins(registry);
   globalThis.print(`\n✅ 已成功加载 ${plugins.length} 个插件\n`);
+
+  globalThis.handleIncomingMessage = handleIncomingMessage;
+  globalThis._registry = registry;
+  globalThis._plugins = plugins;
 
   if (netConfigs.length > 0) {
       const connections = await startNetwork(
@@ -526,9 +380,15 @@ async function main() {
       registry.mountNetwork(connections);
   }
 
-  startWebPanel(registry, plugins);
+  startWebPanel({
+      registry,
+      plugins,
+      handleIncomingMessage,
+      sharedState,
+      __dirname
+  });
 
-  globalThis.print('\n✅ 主控与网页面板均启动完成，已就绪。\n');
+  globalThis.print('\n✅ 主控与网页面板均启动完成。\n');
   startBot();
 }
 
@@ -536,3 +396,18 @@ main().catch(e => {
   globalThis.print(`💥 启动失败: ${e.message}`);
   process.exit(1);
 });
+
+function cleanupAllInstances() {
+    globalThis.print('⚠️ 接收到退出信号，正在清理所有子进程...');
+    for (const [id, inst] of sharedState.instances) {
+        try {
+            if (inst.child && !inst.child.killed) {
+                inst.child.kill('SIGKILL');
+            }
+        } catch(e) {}
+    }
+    process.exit(0);
+}
+
+process.on('SIGINT', cleanupAllInstances);
+process.on('SIGTERM', cleanupAllInstances);

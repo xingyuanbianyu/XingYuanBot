@@ -7,36 +7,51 @@ import yaml from 'yaml';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-function getConfig() {
-  const raw = fs.readFileSync(
-      path.join(__dirname, '../../../temp/vris/vris.yaml'),
-      'utf-8'
-  );
-  return yaml.parse(raw);
+// 🌟 核心：精准指向配置插件生成的数据库文件
+const SHARED_DB_PATH = path.resolve(__dirname, '../../plugins/event-settings/group_data.db');
+
+function getTemplateConfig() {
+  try {
+    const raw = fs.readFileSync(path.join(__dirname, '../../../temp/vris/vris.yaml'), 'utf-8');
+    return yaml.parse(raw);
+  } catch (e) { return {}; }
 }
 
 function getBotConfig() {
   try {
-    const raw = fs.readFileSync(
-        path.join(__dirname, '../../../xy-data/config.yaml'),
-        'utf-8'
-    );
+    const raw = fs.readFileSync(path.join(__dirname, '../../../xy-data/config.yaml'), 'utf-8');
     const parsed = yaml.parse(raw) || {};
     return {
       blacklist_group: (parsed.blacklist_group || []).map(String),
-      // 🌟 新增：读取事件插件全局开关（默认开启）
       eventEnabled: parsed.group_events?.enabled !== false,
-      // 🌟 新增：单独控制入群和退群提示（默认开启）
-      welcomeEnabled: parsed.group_events?.welcome !== false,
-      decreaseEnabled: parsed.group_events?.decrease !== false
     };
   } catch (e) {
-    return { blacklist_group: [], eventEnabled: true, welcomeEnabled: true, decreaseEnabled: true };
+    return { blacklist_group: [], eventEnabled: true };
   }
 }
 
+// 🌟 跨目录读取数据库配置
+function getGroupSettings(groupId) {
+    const gid = String(groupId);
+    let settings = { welcome: 1, decrease: 1, kick: 1 }; // 默认全开
+    
+    if (typeof globalThis.db === 'function') {
+        const res = globalThis.db('find', {
+            dbPath: SHARED_DB_PATH, // 👈 绝杀，直接读那个文件
+            table: 'group_event_settings', 
+            where: 'group_id = ?', 
+            params: [gid], 
+            all: false
+        });
+        if (res.success && res.data) {
+            settings = { welcome: res.data.welcome, decrease: res.data.decrease, kick: res.data.kick };
+        }
+    }
+    return settings;
+}
+
 function render(key, vars) {
-  const tpl = getConfig()[key];
+  const tpl = getTemplateConfig()[key];
   if (!tpl) return null;
   let s = tpl;
   s = s.replace(/\{qq\}/g, String(vars.qq ?? '未知'));
@@ -81,35 +96,32 @@ async function getGroupName(groupId, userId) {
     });
     const data = await res.json();
     return data.data?.card || data.data?.nickname || null;
-  } catch (e) {
-    return null;
-  }
+  } catch (e) { return null; }
 }
 
 export default {
-  name: 'group-events',
+  name: '群事件提示',
   events: ['group.increase', 'group.decrease', 'group.kick'],
 
   async onEvent(e, conn) {
     const botConfig = getBotConfig();
-
-    // 🌟 核心开关：如果总开关关了，直接死掉，不往下走
     if (!botConfig.eventEnabled) return;
-
-    // 🌟 独立开关控制
-    if (e.event === 'group.increase' && !botConfig.welcomeEnabled) return;
-    if (e.event !== 'group.increase' && !botConfig.decreaseEnabled) return;
-
-    // 只检查群黑名单
     if (botConfig.blacklist_group.includes(String(e.groupId))) return;
+
+    // 读配置
+    const groupSets = getGroupSettings(e.groupId);
 
     const key = e.event === 'group.increase' ? 'welcome'
         : e.event === 'group.kick'     ? 'kick'
             : 'decrease';
 
+    // 拦截判定
+    if (key === 'welcome' && !groupSets.welcome) return;
+    if (key === 'decrease' && !groupSets.decrease) return;
+    if (key === 'kick' && !groupSets.kick) return;
+
     let qqValue;
     let opValue;
-
     const raw = e.raw || {};
 
     if (key === 'welcome') {

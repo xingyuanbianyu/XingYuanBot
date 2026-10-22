@@ -8,87 +8,83 @@ import { parse as parseYaml } from 'yaml';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MENU_PATH = path.resolve(__dirname, '../../plugins/指令/menu.json');
 const API = 'http://127.0.0.1:3000';
+const DB_NAME = 'group_data';
 
-// ==========================================
-// 🌟 核心改造：使用全局 globalThis.db 持久化
-// ==========================================
-const DB_NAME = 'group_data'; // 统一使用 group_data.db
-
-// 初始化点赞记录表
+// 初始化数据库表
 if (typeof globalThis.db === 'function') {
+    globalThis.db('exec', { dbName: DB_NAME, sql: 'CREATE TABLE IF NOT EXISTS like_records (user_id TEXT PRIMARY KEY, last_like_cycle TEXT NOT NULL)' });
     globalThis.db('exec', { 
         dbName: DB_NAME, 
-        sql: 'CREATE TABLE IF NOT EXISTS like_records (user_id TEXT PRIMARY KEY, last_like_cycle TEXT NOT NULL)' 
+        sql: 'CREATE TABLE IF NOT EXISTS group_ban_settings (group_id TEXT PRIMARY KEY, auto_ban INTEGER DEFAULT 1)' 
     });
-} else {
-    console.error('[群管] 严重警告: globalThis.db 未挂载，点赞持久化功能将失效！');
+    globalThis.db('exec', { 
+        dbName: DB_NAME, 
+        sql: `CREATE TABLE IF NOT EXISTS group_reject_list (
+            group_id TEXT, 
+            user_id TEXT, 
+            nickname TEXT,
+            create_time INTEGER,
+            PRIMARY KEY(group_id, user_id)
+        )` 
+    });
 }
 
-// 获取当前应该属于哪一天的“点赞周期”（凌晨 1 点刷新）
 function getCurrentLikeCycle() {
     const now = new Date();
-    // 如果当前时间是凌晨 0 点到 1 点之间，它依然属于昨天的周期
-    if (now.getHours() < 1) {
-        now.setDate(now.getDate() - 1);
-    }
-    const y = now.getFullYear();
-    const m = String(now.getMonth() + 1).padStart(2, '0');
-    const d = String(now.getDate()).padStart(2, '0');
-    return `${y}-${m}-${d}`;
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 }
 
 let botInfoData;
-
-// 读取 bot.yaml 配置
 let botConfig = {};
 try {
     const yamlPath = path.join(__dirname, '../../../xy-config/config/bot.yaml');
-    const yamlContent = fs.readFileSync(yamlPath, 'utf8');
-    botConfig = parseYaml(yamlContent) || {};
-} catch (e) {
-    console.log('[配置警告] 读取 bot.yaml 失败:', e.message);
+    botConfig = parseYaml(fs.readFileSync(yamlPath, 'utf8')) || {};
+} catch (e) {}
+
+// 🌟 辅助函数：检查 Bot 自身是否是管理员或群主
+async function checkBotRole(chatId) {
+    try {
+        const botQQ = globalThis.botInfo?.qq || (await (await fetch(`${API}/get_login_info`)).json())?.data?.user_id;
+        if (!botQQ) return false;
+        const res = await fetch(`${API}/get_group_member_info?group_id=${chatId}&user_id=${botQQ}&no_cache=true`);
+        const data = await res.json();
+        const role = data?.data?.role;
+        return role === 'owner' || role === 'admin';
+    } catch (e) {
+        return false;
+    }
 }
 
 const myCommands = [
-  { cmd: '踢@成员', desc: '将指定成员踢出群聊' },
+  { cmd: '随机抽人 [数量] [指令]', desc: '随机抽取成员，可附带指令。支持 {QQ} 或 @ 占位符' },
+  { cmd: '查询群黑名单', desc: '查看本群自定义的黑名单（退群/被踢的人都在这里）' },
+  { cmd: '拉黑群成员@成员', desc: '手动将某人加入本群黑名单' },
+  { cmd: '解除拉黑@成员', desc: '将某人从本群黑名单中移除（支持输入QQ号）' },
+  { cmd: '踢@成员', desc: '将指定成员踢出群聊并强制拉黑' },
   { cmd: '禁言@成员QQ号 秒', desc: '禁言指定成员，默认600秒' },
   { cmd: '解禁@QQ号', desc: '解除指定成员的禁言' },
-  { cmd: '头衔 内容 / 申请头衔 内容', desc: '给自己设置专属头衔（需机器人是群主）' },
-  { cmd: '设置管理@成员', desc: '将指定成员设为管理员（需大主人权限）' },
-  { cmd: '取消管理@成员', desc: '将指定成员降为普通成员（需大主人权限）' },
-  { cmd: '点赞 / 赞我', desc: '让机器人给你点赞（每天1点重置）' },
+  { cmd: '头衔 内容 / 申请头衔 内容', desc: '给自己设置专属头衔' },
+  { cmd: '设置管理@成员', desc: '将指定成员设为管理员（需大主人）' },
+  { cmd: '取消管理@成员', desc: '将指定成员降为普通成员（需大主人）' },
+  { cmd: '点赞 / 赞我', desc: '让机器人给你点赞（每天0点重置）' },
   { cmd: '赞他@成员 / @成员 赞他', desc: '让机器人给指定成员点赞' },
-  { cmd: '改头衔', desc: '让群主机器人改其他人的头衔（需要配置里的主人权限或者群管理权限）'},
-  { cmd: '群公告', desc: '让机器人发群公告（需要机器人是群管理或者群主）'},
-  { cmd: '群待办', desc: '让机器人置顶引用的消息'},
-  { cmd: '取消待办', desc: '让机器人取消所有待办'},
+  { cmd: '改头衔 [@成员] 内容', desc: '让群主机器人改其他人的头衔'},
+  { cmd: '群公告 内容', desc: '发布群公告'},
+  { cmd: '查公告', desc: '查看本群的历史公告及ID'},
+  { cmd: '删公告 [ID]', desc: '删除指定的群公告' },
   { cmd: '批量移出', desc: '批量移出群成员' },
-  { cmd: '查等级 [等级]', desc: '查看群成员等级统计或指定等级人数' },
-  { cmd: '查潜水 [天数]', desc: '查看超过指定天数未发言的成员（默认30天）' },
-  { cmd: '清理潜水 [天数] -y', desc: '清理超过指定天数未发言的成员（必须带-y确认）' }
+  { cmd: '查等级 [等级]', desc: '查看群成员等级统计' },
+  { cmd: '查潜水 [天数]', desc: '查看超过指定天数未发言的成员' },
+  { cmd: '清理潜水 [天数] -y', desc: '清理潜水成员' }
 ];
 
 function injectHelp() {
-  if (!fs.existsSync(MENU_PATH)) {
-    console.log('[群管] 找不到 menu.json，跳过帮助注册');
-    return;
-  }
+  if (!fs.existsSync(MENU_PATH)) return;
   try {
     let menu = JSON.parse(fs.readFileSync(MENU_PATH, 'utf-8'));
     const existingCmds = Object.values(menu.commands || {}).map(v => v.cmd);
-    const alreadyInjected = myCommands.every(c => existingCmds.includes(c.cmd));
-
-    if (alreadyInjected) {
-      console.log('[群管] 指令已存在，跳过引入');
-      return;
-    }
-
-    let maxId = 0;
-    for (const key of Object.keys(menu.commands || {})) {
-      const num = parseInt(key);
-      if (!isNaN(num) && maxId < num) maxId = num;
-    }
-
+    if (myCommands.every(c => existingCmds.includes(c.cmd))) return;
+    let maxId = Math.max(0, ...Object.keys(menu.commands || {}).map(k => parseInt(k) || 0));
     const myIds = [];
     for (const item of myCommands) {
       maxId++;
@@ -96,807 +92,673 @@ function injectHelp() {
       menu.commands[maxId] = { cmd: item.cmd, desc: item.desc };
       myIds.push(maxId);
     }
-
     if (!menu.categories) menu.categories = [];
-    menu.categories.push({
-      name: '群管',
-      description: '群管理（管理员及以上可用）',
-      color: '#459c5f',
-      items: myIds
-    });
-
+    menu.categories.push({ name: '群管', description: '群管理', color: '#459c5f', items: myIds });
     menu.version = (menu.version || 0) + 1;
     fs.writeFileSync(MENU_PATH, JSON.stringify(menu, null, 4), 'utf-8');
-    console.log('[群管] 帮助信息已注册到 menu.json，版本已升至:', menu.version);
-  } catch (e) {
-    console.error('[群管] 读取 menu.json 失败:', e.message);
-  }
+  } catch (e) {}
 }
-
 injectHelp();
 
 function parseText(text) {
-  let textStr = '';
-  if (Array.isArray(text)) {
-    textStr = text.map(item => item?.data?.text ? item.data.text : '').join('');
-  } else if (typeof text === 'object' && text != null && text.text !== undefined) {
-    textStr = text.text;
-  } else if (typeof text === 'string') {
-    textStr = text;
-  } else {
-    textStr = String(text || '');
-  }
-  return textStr;
+  if (Array.isArray(text)) return text.map(item => item?.data?.text ? item.data.text : '').join('');
+  if (typeof text === 'object' && text != null && text.text !== undefined) return text.text;
+  return String(text || '');
+}
+
+async function sendForwardMsg(ws, chatId, isGroup, title, msgList) {
+    if (!ws || ws.readyState !== 1) return false;
+    const nodes = msgList.map(m => ({
+        type: 'node',
+        data: { name: title, uin: String(globalThis.botInfo?.qq || 10000), content: [{ type: 'text', data: { text: m } }] }
+    }));
+    const action = isGroup ? 'send_group_forward_msg' : 'send_private_forward_msg';
+    const params = { ...(isGroup ? { group_id: Number(chatId) } : { user_id: Number(chatId) }), messages: nodes };
+    try {
+        ws.send(JSON.stringify({ action, params, echo: Date.now() }));
+        return true;
+    } catch (e) { return false; }
 }
 
 export default {
   name: '群管',
-  description: '匹配规则：踢/禁言/解禁/头衔/设置管理/取消管理/点赞/查等级/查潜水/清理潜水',
+  description: '群管工具箱',
+  events: ['group.decrease', 'group.kick', 'group.request'],
+
   match: (text) => {
     if (!text || typeof text !== 'string') return false;
-    
     const cmd = text.trim();
-    
-    return cmd.startsWith('踢') || cmd.startsWith('禁言') || cmd.startsWith('解禁')
-        || cmd.startsWith('头衔') || cmd.startsWith('设置管理')
-        || cmd.startsWith('取消管理') || cmd.startsWith('点赞')
-        || cmd.startsWith('赞我') || cmd.startsWith('申请头衔')
-        || cmd.includes('赞他') || cmd.includes('赞她') 
-        || cmd.startsWith('改头衔') || cmd.startsWith('群公告')
-        || cmd.startsWith('批量移出')
-        || cmd.startsWith('群待办') || cmd.startsWith('取消待办')
-        || cmd.startsWith('查等级') || cmd.startsWith('查潜水') || cmd.startsWith('清理潜水');
+    if (cmd.includes('添加定时') || cmd.includes('查看定时') || cmd.includes('删除定时')) return false;
+    return cmd.startsWith('随机抽人') || cmd.startsWith('踢') || cmd.startsWith('禁言') || cmd.startsWith('解禁')
+        || cmd.startsWith('头衔') || cmd.startsWith('设置管理') || cmd.startsWith('取消管理') 
+        || cmd.startsWith('点赞') || cmd.startsWith('赞我') || cmd.startsWith('申请头衔')
+        || cmd.includes('赞他') || cmd.includes('赞她') || cmd.startsWith('改头衔') 
+        || cmd.startsWith('群公告') || cmd.startsWith('查公告') || cmd.startsWith('删公告') 
+        || cmd.startsWith('批量移出') || cmd.startsWith('群待办') 
+        || cmd.startsWith('取消待办') || cmd.startsWith('查等级') || cmd.startsWith('查潜水') || cmd.startsWith('清理潜水')
+        || cmd.startsWith('查询群黑名单') || cmd.startsWith('拉黑群成员') || cmd.startsWith('解除拉黑');
   },
 
-  handle: async function({ text, pureText, chatId, isGroup, senderName, senderQQ, role }) {
-    if (!text) return false;
+  async onEvent(e, context) {
+      const groupId = String(e.groupId);
+      if (typeof globalThis.db !== 'function') return;
 
+      if (e.event === 'group.decrease' || e.event === 'group.kick') {
+          const userId = String(e.userId); 
+          if (userId === String(globalThis.botInfo?.qq)) return;
+          
+          const res = globalThis.db('find', { dbName: DB_NAME, table: 'group_ban_settings', where: 'group_id = ?', params: [groupId], all: false });
+          if (!res.data || res.data.auto_ban === 1) {
+              let nick = e.raw?.nickname || e.raw?.card || '未知';
+              if (nick === '未知') {
+                  try {
+                      const infoRes = await fetch(`${API}/get_group_member_info?group_id=${groupId}&user_id=${userId}&no_cache=true`);
+                      const infoData = await infoRes.json();
+                      if (infoData?.data) nick = infoData.data.card || infoData.data.nickname || nick;
+                  } catch(err) {}
+              }
+              globalThis.db('exec', {
+                  dbName: DB_NAME,
+                  sql: 'INSERT OR REPLACE INTO group_reject_list (group_id, user_id, nickname, create_time) VALUES (?, ?, ?, ?)',
+                  params: [groupId, userId, nick, Math.floor(Date.now() / 1000)]
+              });
+          }
+      }
+
+      if (e.event === 'group.request') {
+          const userId = String(e.userId);
+          const flag = e.raw?.flag;
+          const subType = e.raw?.sub_type;
+          const checkRes = globalThis.db('find', { dbName: DB_NAME, table: 'group_reject_list', where: 'group_id = ? AND user_id = ?', params: [groupId, userId], all: false });
+
+          if (checkRes.success && checkRes.data) {
+              try {
+                  await fetch(`${API}/set_group_add_request`, {
+                      method: 'POST', headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ flag: flag, sub_type: subType, approve: false, reason: '您已被本群拉黑，拒绝加入。' })
+                  });
+              } catch (err) {}
+          }
+      }
+  },
+
+  handle: async function({ text, pureText, chatId, isGroup, senderName, senderQQ, role, _ws }) {
+    if (!text) return false;
     const cmd = (pureText || "").trim();
     if (!cmd) return false;
-
     let textStr = parseText(text).trim();
 
-    // ==========================================
-    // 提取目标QQ号
-    // ==========================================
-    let targetQQ = null;
+    // 提取发送者权限
+    let isGroupAdmin = false;
+    try {
+      const res = await fetch(`${API}/get_group_member_info?group_id=${chatId}&user_id=${senderQQ}`);
+      const rawRole = (await res.json())?.data?.role;
+      if (rawRole === 'owner' || rawRole === 'admin') isGroupAdmin = true;
+    } catch (e) {}
+    const configAdmin = ['master', 'owner', 'admin'];
+    let hasPermission = isGroupAdmin || configAdmin.includes(role) || (typeof getRole === 'function' && configAdmin.includes(getRole(senderQQ)));
+    const isMaster = (role === 'master' || getRole(senderQQ) === 'master');
 
-    if (Array.isArray(text)) {
-        const atItem = text.find(item => item?.type === 'at');
-        if (atItem && atItem.data && (atItem.data.qq || atItem.data.target)) {
-            targetQQ = String(atItem.data.qq || atItem.data.target);
+    // ==========================================
+    // 🌟 撤回指令（新增）
+    // ==========================================
+    if (cmd.startsWith('撤回')) {
+        if (!isGroup) return '❌ 该指令仅限群聊使用';
+        if (!hasPermission) return '❌ 权限不足：仅限管理员或主人使用。';
+
+        // 检查 Bot 是不是管理
+        if (!(await checkBotRole(chatId))) return '❌ 操作失败：Bot 不是管理员或群主，无法撤回。';
+
+        // 获取引用的消息ID
+        let refId = null;
+        if (Array.isArray(text)) {
+            const replyItem = text.find(item => item?.type === 'reply');
+            if (replyItem && replyItem.data) refId = replyItem.data.id || replyItem.data.message_id;
         }
-    } else if (typeof text === 'string') {
-        const atMatch = text.match(/@\{at:(\d+)}/);
-        if (atMatch) {
-            targetQQ = atMatch[1];
+        if (!refId) {
+            const match = textStr.match(/\[引用ID:(-?\d+)\]/);
+            if (match) refId = match[1];
+        }
+
+        if (!refId) return '⚠️ 用法：引用一条消息发送“撤回”。';
+
+        try {
+            const result = await (await fetch(`${API}/delete_msg`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message_id: Number(refId) })
+            })).json();
+            if (result.status === 'ok' || result.retcode === 0) return '✅ 撤回成功。';
+            return `❌ 撤回失败：${result.msg || result.message}`;
+        } catch (e) { return `❌ 请求失败: ${e.message}`; }
+    }
+
+    // ==========================================
+    // 查询群黑名单
+    // ==========================================
+    if (cmd === '查询群黑名单') {
+        if (!isGroup) return '❌ 该指令仅限群聊使用';
+        if (!hasPermission) return '❌ 权限不足。';
+        if (typeof globalThis.db !== 'function') return '❌ 数据库未挂载。';
+
+        const res = globalThis.db('find', { dbName: DB_NAME, table: 'group_reject_list', where: 'group_id = ?', params: [String(chatId)] });
+        if (!res.success || !res.data || res.data.length === 0) return '📭 本群的数据库黑名单为空。';
+
+        if (res.data.length > 5) {
+            let msgList = [];
+            res.data.forEach((row, index) => {
+                const date = new Date(row.create_time * 1000).toLocaleString('zh-CN');
+                msgList.push(`[${index + 1}] ${row.nickname} (${row.user_id})\n拉黑时间: ${date}`);
+            });
+            msgList.unshift(`🛑 本群数据库黑名单（共 ${res.data.length} 人）`);
+            if (await sendForwardMsg(_ws, chatId, isGroup, '群黑名单查询', msgList)) return true;
+        }
+
+        let reply = `🛑 本群数据库黑名单（共 ${res.data.length} 人）：\n\n`;
+        res.data.forEach((row, index) => {
+            const date = new Date(row.create_time * 1000).toLocaleString('zh-CN');
+            reply += `${index + 1}. ${row.nickname} (${row.user_id})\n   拉黑时间: ${date}\n`;
+        });
+        reply += `\n💡 发送：解除拉黑 [QQ号] 可移出黑名单。`;
+        return reply.trim();
+    }
+
+    // ==========================================
+    // 手动拉黑 / 解除拉黑
+    // ==========================================
+    if (cmd.startsWith('拉黑群成员') || cmd.startsWith('解除拉黑')) {
+        if (!isGroup) return '❌ 该指令仅限群聊使用';
+        if (!hasPermission) return '❌ 权限不足。';
+        
+        let targetQQ = null;
+        if (Array.isArray(text)) {
+            const atItem = text.find(item => item?.type === 'at');
+            if (atItem && atItem.data) targetQQ = String(atItem.data.qq || atItem.data.target);
+        }
+        if (!targetQQ) {
+            const match = textStr.match(/@([^\s]+)/) || textStr.match(/(?<!\d)(\d{5,12})(?!\d)/);
+            if (match) targetQQ = match[1];
+        }
+        if (!targetQQ) return `⚠️ 用法：${cmd.startsWith('拉黑') ? '拉黑群成员 @某人' : '解除拉黑 [QQ号]'}`;
+
+        if (typeof globalThis.db === 'function') {
+            if (cmd.startsWith('拉黑群成员')) {
+                globalThis.db('exec', {
+                    dbName: DB_NAME,
+                    sql: 'INSERT OR REPLACE INTO group_reject_list (group_id, user_id, nickname, create_time) VALUES (?, ?, ?, ?)',
+                    params: [String(chatId), targetQQ, '手动拉黑', Math.floor(Date.now() / 1000)]
+                });
+                return `✅ 已将 ${targetQQ} 加入本群数据库黑名单。`;
+            } else {
+                globalThis.db('exec', {
+                    dbName: DB_NAME,
+                    sql: 'DELETE FROM group_reject_list WHERE group_id = ? AND user_id = ?',
+                    params: [String(chatId), targetQQ]
+                });
+                return `✅ 已将 ${targetQQ} 从本群数据库黑名单中移除。`;
+            }
         }
     }
 
+    // ==========================================
+    // 提取目标QQ（统一放在这里）
+    // ==========================================
+    let targetQQ = null;
+    let targetName = null;
+    if (Array.isArray(text)) {
+        const atItem = text.find(item => item?.type === 'at');
+        if (atItem && atItem.data && (atItem.data.qq || atItem.data.target)) targetQQ = String(atItem.data.qq || atItem.data.target);
+    } else if (typeof text === 'string') {
+        const atMatch = text.match(/@\{at:(\d+)}/) || text.match(/\[CQ:at,qq=(\d+)\]/);
+        if (atMatch) targetQQ = atMatch[1];
+    }
     if (!targetQQ) {
-        const match = textStr.match(/@\[([^\s]+)\]/);
+        const match = textStr.match(/@([^\s]+)/) || textStr.match(/(?<!\d)(\d{5,12})(?!\d)/);
         if (match) {
             const keyword = match[1];
             try {
                 const memberRes = await fetch(`${API}/get_group_member_list?group_id=${chatId}`);
-                const memberData = await memberRes.json();
-                const members = memberData?.data || [];
-
-                const found = members.find(m => {
-                    const uid = String(m.user_id);
-                    if (keyword.startsWith(uid)) return true;
-                    if ((m.nickname && m.nickname.includes(keyword)) ||
-                        (m.card && m.card.includes(keyword))) return true;
-                    return false;
-                });
-
-                if (found) {
-                    targetQQ = String(found.user_id);
-                }
-            } catch (e) {
-                console.error('匹配群成员失败:', e);
-            }
+                const members = (await memberRes.json())?.data || [];
+                const found = members.find(m => String(m.user_id) === keyword || (m.nickname && m.nickname.includes(keyword)) || (m.card && m.card.includes(keyword)));
+                if (found) { targetQQ = String(found.user_id); targetName = found.card || found.nickname; }
+            } catch (e) {}
         }
     }
 
-    // 检查群权限
-    let isGroupAdmin = false;
-    try {
-      const res = await fetch(`${API}/get_group_member_info?group_id=${chatId}&user_id=${senderQQ}`);
-      const data = await res.json();
-      const rawRole = data?.data?.role;
-      if (rawRole === 'owner' || rawRole === 'admin') {
-        isGroupAdmin = true;
-      }
-    } catch (e) {}
+    // ==========================================
+    // 踢人 / 禁言 / 解禁
+    // ==========================================
+    if (cmd.startsWith('踢') || cmd.startsWith('禁言') || cmd.startsWith('解禁')) {
+        if (!targetQQ) return `⚠️ 用法：${cmd.split(' ')[0]}@成员`;
+        if (!hasPermission) return '❌ 权限不足。';
+        
+        // 🌟 判定 Bot 权限
+        if (!(await checkBotRole(chatId))) return '❌ 操作失败：Bot 不是管理员或群主，无法执行该操作。';
 
-    const configAdmin = ['master', 'owner', 'admin'];
-    let hasPermission = isGroupAdmin || configAdmin.includes(role);
+        if (cmd.startsWith('踢')) {
+            try {
+                const result = await (await fetch(`${API}/set_group_kick`, { 
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, 
+                    body: JSON.stringify({ group_id: Number(chatId), user_id: Number(targetQQ), reject_add_request: true }) 
+                })).json();
+                
+                if (result.status === 'ok' || result.retcode === 0) {
+                    if (typeof globalThis.db === 'function') {
+                        globalThis.db('exec', { 
+                            dbName: DB_NAME, sql: 'INSERT OR REPLACE INTO group_reject_list (group_id, user_id, nickname, create_time) VALUES (?, ?, ?, ?)', 
+                            params: [String(chatId), targetQQ, targetName || '被踢出', Math.floor(Date.now() / 1000)] 
+                        });
+                    }
+                    return `✅ 已成功踢出，并已记入本群黑名单。`;
+                }
+                return `❌ 踢人失败：${result.msg || result.message}`;
+            } catch (err) { return `❌ 请求失败：${err.message}`; }
+        }
 
-    if (!hasPermission && typeof getRole === 'function') {
-      const userRole = getRole(senderQQ);
-      if (configAdmin.includes(userRole)) hasPermission = true;
+        if (cmd.startsWith('禁言')) {
+            let duration = 600; 
+            const durationMatch = cmd.replace(targetQQ, "").match(/(\d+)\s*(s|秒|m|分钟|min|h|小时|d|天|日)?/i);
+            if (durationMatch) {
+                const value = parseInt(durationMatch[1]);
+                const unit = (durationMatch[2] || 'm').toLowerCase();
+                duration = unit.includes('s') || unit.includes('秒') ? value : unit.includes('h') || unit.includes('时') ? value * 3600 : unit.includes('d') || unit.includes('天') ? value * 86400 : value * 60;
+            }
+            try {
+                const result = await (await fetch(`${API}/set_group_ban`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ group_id: Number(chatId), user_id: Number(targetQQ), duration: duration }) })).json();
+                if (cmd.includes('@') && cmd.includes('禁言')) return true; 
+                return result.status === 'ok' ? `✅ 已禁言 @${targetQQ} ${duration}秒` : `❌ 禁言失败：${result.msg || result.message}`;
+            } catch (e) { return `❌ 禁言失败：${e.message}`; }
+        }
+
+        if (cmd.startsWith('解禁')) {
+            try {
+                const result = await (await fetch(`${API}/set_group_ban`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ group_id: Number(chatId), user_id: Number(targetQQ), duration: 0 }) })).json();
+                return result.status === 'ok' ? `✅ 已成功解除禁言` : `❌ 解禁失败：${result.msg || result.message}`;
+            } catch (err) { return `❌ 请求失败：${err.message}`; }
+        }
     }
 
-    const isMaster = (role === 'master' || getRole(senderQQ) === 'master');
-
     // ==========================================
-    // 🌟 查等级
+    // 随机抽人
     // ==========================================
-    if (cmd.startsWith('查等级')) {
+    if (cmd.startsWith('随机抽人')) {
         if (!isGroup) return '❌ 该指令仅限群聊使用';
-        if (!hasPermission) return '❌ 权限不足：仅限管理员及以上身份使用。';
+        let restCmd = cmd.replace(/^随机抽人\s*/, '').trim();
+        let count = 1; 
+        let actionCmd = restCmd;
 
-        const args = cmd.split(/\s+/);
-        const targetLevel = args[1];
+        const countMatch = restCmd.match(/^(\d+)\s*(.*)$/);
+        if (countMatch) { count = parseInt(countMatch[1]); actionCmd = countMatch[2].trim(); }
+
+        actionCmd = actionCmd.replace(/^[#\/]+/, '').trim();
+        if (count <= 0) return '⚠️ 抽取人数必须大于 0';
+
+        let isLikeCmd = actionCmd.includes('赞他') || actionCmd.includes('赞她');
+        if (isLikeCmd && !actionCmd.includes('-s')) actionCmd += ' -s';
+
+        let template = actionCmd;
+        if (!template.includes('{QQ}') && !template.includes('@')) template = `${template} {QQ}`;
+        else template = template.replace(/@/g, '{QQ}');
+        const textParts = template.split('{QQ}');
 
         try {
             const res = await fetch(`${API}/get_group_member_list?group_id=${chatId}`);
             const data = await res.json();
-            const members = data?.data || [];
-            if (members.length === 0) return '❌ 无法获取群成员列表';
+            let rawMembers = data?.data || [];
+            let memberMap = new Map();
+            for (const m of rawMembers) { if (m.user_id && m.user_id !== '0') memberMap.set(String(m.user_id), m); }
+            let members = Array.from(memberMap.values());
+            if (members.length === 0) return '❌ 无法获取群成员列表。';
 
-            if (targetLevel) {
-                const filtered = members.filter(m => String(m.level) === String(targetLevel));
-                return `📊 本群等级为 Lv.${targetLevel} 的成员共有 ${filtered.length} 人。`;
+            let winners = [];
+            if (members.length <= count) { winners = members; } 
+            else {
+                let pool = [...members];
+                for (let i = 0; i < count; i++) {
+                    const randIndex = globalThis.random(0, pool.length - 1);
+                    winners.push(pool[randIndex]);
+                    pool.splice(randIndex, 1); 
+                }
             }
 
-            const levelCount = {};
-            for (const m of members) {
-                const lvl = m.level || '0';
-                levelCount[lvl] = (levelCount[lvl] || 0) + 1;
+            if (!actionCmd) {
+                let atSegments = [{ type: 'text', data: { text: `🎲 抽取完毕！(群总人数: ${members.length})\n本次抽中的幸运儿是：\n` } }];
+                winners.forEach(w => {
+                    atSegments.push({ type: 'at', data: { qq: String(w.user_id) } });
+                    atSegments.push({ type: 'text', data: { text: ` ` } });
+                });
+                return atSegments;
             }
-            let levelText = `📊 本群成员等级统计（共 ${members.length} 人）：\n`;
-            const sortedLvls = Object.keys(levelCount).sort((a, b) => parseInt(b) - parseInt(a));
-            for (const lvl of sortedLvls) {
-                levelText += `Lv.${lvl} : ${levelCount[lvl]} 人\n`;
-            }
-            return levelText.trim() + `\n💡 提示：发送“查等级 1”可查询指定等级人数。`;
-        } catch (e) {
-            return `❌ 查询等级失败: ${e.message}`;
-        }
+
+            (async () => {
+                let successCount = 0;
+                for (let i = 0; i < winners.length; i++) {
+                    const w = winners[i];
+                    try {
+                        let fakeMessageSegments = [];
+                        let rawMessageText = '';
+                        for (let j = 0; j < textParts.length; j++) {
+                            if (textParts[j]) {
+                                fakeMessageSegments.push({ type: 'text', data: { text: textParts[j] } });
+                                rawMessageText += textParts[j];
+                            }
+                            if (j < textParts.length - 1) {
+                                fakeMessageSegments.push({ type: 'at', data: { qq: String(w.user_id) } });
+                                rawMessageText += `@${w.user_id}`;
+                            }
+                        }
+                        const fakeMsgData = {
+                            time: Math.floor(Date.now() / 1000), self_id: Number(globalThis.botInfo?.qq || 10000), 
+                            post_type: "message", message_type: "group", sub_type: "normal", message_id: Math.floor(Math.random() * 10000000),
+                            group_id: Number(chatId), user_id: Number(senderQQ), raw_message: `#${rawMessageText}`, font: 0,
+                            sender: { user_id: Number(senderQQ), nickname: senderName, card: senderName, role: role },
+                            message: [{ type: 'text', data: { text: '#' } }, ...fakeMessageSegments]
+                        };
+                        if (typeof globalThis.handleIncomingMessage === 'function' && globalThis._ws) {
+                            globalThis.handleIncomingMessage(JSON.stringify(fakeMsgData), globalThis._ws, globalThis._registry, globalThis._plugins);
+                            successCount++;
+                        }
+                    } catch (e) {}
+                    if (i < winners.length - 1) await globalThis.sleep(1200); 
+                }
+                globalThis.print(`[群管] 随机抽人回调执行完毕，成功静默处理 ${successCount}/${winners.length} 人。`);
+            })();
+
+            let names = winners.map(w => w.card || w.nickname || '神秘人');
+            let tipMsg = `🎲 随机抽人回调启动！\n✨ 抽中人数：${winners.length} 人\n🔗 执行模板：${template.replace(/{QQ}/g, '@抽中者').replace('-s', '')}\n`;
+            if (winners.length > 5) tipMsg += `(名单: ${names.slice(0, 5).join(', ')} 等 ${winners.length} 人...)\n`;
+            else tipMsg += `(名单: ${names.join(', ')})\n`;
+            tipMsg += `⏳ 正在后台匀速派发，请稍候查看结果。`;
+            return tipMsg;
+        } catch (e) { return `❌ 随机抽人失败: ${e.message}`; }
     }
 
     // ==========================================
-    // 🌟 查潜水 / 清理潜水
+    // 查等级 / 查潜水（合并消息逻辑保留）
     // ==========================================
+    if (cmd.startsWith('查等级')) {
+        if (!isGroup) return '❌ 该指令仅限群聊使用';
+        if (!hasPermission) return '❌ 权限不足：仅限管理员及以上身份使用。';
+        const targetLevel = cmd.split(/\s+/)[1];
+        try {
+            const res = await fetch(`${API}/get_group_member_list?group_id=${chatId}`);
+            let rawMembers = (await res.json())?.data || [];
+            let memberMap = new Map();
+            for (const m of rawMembers) { if (m.user_id && m.user_id !== '0') memberMap.set(String(m.user_id), m); }
+            let members = Array.from(memberMap.values());
+            if (members.length === 0) return '❌ 无法获取群成员列表';
+            
+            if (targetLevel) {
+                const filtered = members.filter(m => {
+                    let lvl = m.level;
+                    if (!lvl || lvl === '0' || lvl === 0 || parseInt(lvl) < 1) lvl = '1';
+                    return String(lvl) === String(targetLevel);
+                });
+                if (filtered.length === 0) return `📊 本群没有等级为 Lv.${targetLevel} 的成员。`;
+                
+                if (filtered.length > 10) {
+                    let msgList = [];
+                    filtered.forEach((m, index) => { msgList.push(`${index + 1}. ${m.card || m.nickname || '未知昵称'} (${m.user_id})`); });
+                    msgList.unshift(`📊 本群等级为 Lv.${targetLevel} 的成员共有 ${filtered.length} 人：`);
+                    if (await sendForwardMsg(_ws, chatId, isGroup, `查等级 Lv.${targetLevel}`, msgList)) return true;
+                }
+
+                let levelText = `📊 本群等级为 Lv.${targetLevel} 的成员共有 ${filtered.length} 人：\n`;
+                filtered.slice(0, 50).forEach((m, index) => { levelText += `${index + 1}. ${m.card || m.nickname || '未知昵称'} (${m.user_id})\n`; });
+                if (filtered.length > 50) levelText += `...（仅显示前 50 人）\n`;
+                return levelText.trim();
+            } else {
+                const levelCount = {};
+                for (const m of members) {
+                    let lvl = m.level;
+                    if (!lvl || lvl === '0' || lvl === 0 || parseInt(lvl) < 1) lvl = '1';
+                    levelCount[lvl] = (levelCount[lvl] || 0) + 1;
+                }
+                let levelText = `📊 本群成员等级统计（共 ${members.length} 人）：\n`;
+                for (const lvl of Object.keys(levelCount).sort((a, b) => parseInt(b) - parseInt(a))) { levelText += `Lv.${lvl} : ${levelCount[lvl]} 人\n`; }
+                return levelText.trim() + `\n💡 提示：发送“查等级 1”可查看具体成员。`;
+            }
+        } catch (e) { return `❌ 查询等级失败: ${e.message}`; }
+    }
+
     if (cmd.startsWith('查潜水') || cmd.startsWith('清理潜水')) {
         if (!isGroup) return '❌ 该指令仅限群聊使用';
-        
         const isClean = cmd.startsWith('清理潜水');
-        const args = cmd.split(/\s+/);
-        const days = parseInt(args[1]) || 30;
+        const days = parseInt(cmd.split(/\s+/)[1]) || 30;
+        if (isClean && !cmd.includes('-y')) return `⚠️ 危险操作！如需清理，请发送：清理潜水 ${days} -y`;
         
-        if (isClean && !cmd.includes('-y')) {
-            return `⚠️ 危险操作！如需清理，请发送：清理潜水 ${days} -y\n或先发送：查潜水 ${days} 查看名单。`;
-        }
+        // 🌟 判定 Bot 权限
+        if (isClean && !(await checkBotRole(chatId))) return '❌ 操作失败：Bot 不是管理员或群主，无法清理成员。';
 
         try {
-            const memberRes = await fetch(`${API}/get_group_member_list?group_id=${chatId}`);
-            const memberData = await memberRes.json();
-            const members = memberData?.data || [];
-            if (members.length === 0) return '❌ 无法获取群成员列表';
-
-            const botRes = await fetch(`${API}/get_login_info`);
-            const botData = await botRes.json();
-            const botQQ = botData?.data?.user_id;
-
+            const res = await fetch(`${API}/get_group_member_list?group_id=${chatId}`);
+            let rawMembers = (await res.json())?.data || [];
+            let memberMap = new Map();
+            for (const m of rawMembers) { if (m.user_id && m.user_id !== '0') memberMap.set(String(m.user_id), m); }
+            let members = Array.from(memberMap.values());
+            const botQQ = (await (await fetch(`${API}/get_login_info`)).json())?.data?.user_id;
             const threshold = Date.now() - days * 24 * 60 * 60 * 1000;
-            const silentMembers = [];
-
-            for (const m of members) {
-                if (m.role === 'owner' || m.role === 'admin' || m.user_id == botQQ) continue;
-                
-                let lastTime = 0;
-                if (m.last_sent_time && m.last_sent_time > 0) {
-                    lastTime = m.last_sent_time * 1000;
-                } else if (m.join_time && m.join_time > 0) {
-                    lastTime = m.join_time * 1000;
-                }
-
-                if (lastTime > 0 && lastTime < threshold) {
-                    silentMembers.push(m);
-                }
-            }
-
-            if (silentMembers.length === 0) {
-                return `✅ 没有超过 ${days} 天未发言的普通成员。`;
-            }
-
-            silentMembers.sort((a, b) => {
-                const timeA = (a.last_sent_time || a.join_time || 0);
-                const timeB = (b.last_sent_time || b.join_time || 0);
-                return timeA - timeB;
-            });
-
-            const displayLimit = 50;
-            const listText = silentMembers.slice(0, displayLimit).map(m => `${m.card || m.nickname} (${m.user_id})`).join('\n');
-            let resultMsg = `📊 超过 ${days} 天未发言的成员共 ${silentMembers.length} 人：\n${listText}\n`;
-            if (silentMembers.length > displayLimit) {
-                resultMsg += `...（名单过长，仅显示前 ${displayLimit} 人）\n`;
-            }
-
-            if (!isClean) {
-                return resultMsg + `\n⚠️ 若要清理他们，请发送：清理潜水 ${days} -y`;
-            }
-
-            if (!hasPermission) return '❌ 权限不足：此命令仅限群主、管理员或配置文件中的主人使用。';
+            let silentMembers = members.filter(m => m.role !== 'owner' && m.role !== 'admin' && m.user_id != botQQ && (m.last_sent_time || m.join_time) * 1000 < threshold);
             
-            resultMsg += `\n🚀 开始批量清理...\n`;
-            let successCount = 0;
-            let failCount = 0;
-
-            for (const m of silentMembers) {
-                await new Promise(r => setTimeout(r, Math.random() * 400 + 300));
-                try {
-                    const kickRes = await fetch(`${API}/set_group_kick`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            group_id: Number(chatId),
-                            user_id: Number(m.user_id),
-                            reject_add_request: true
-                        })
-                    });
-                    const kickData = await kickRes.json();
-                    if (kickData.status === 'ok' || kickData.retcode === 0) {
-                        successCount++;
-                    } else {
-                        failCount++;
-                    }
-                } catch (_) {
-                    failCount++;
-                }
+            if (silentMembers.length === 0) return `✅ 没有超过 ${days} 天未发言的普通成员。`;
+            silentMembers.sort((a, b) => (a.last_sent_time || a.join_time) - (b.last_sent_time || b.join_time));
+            
+            if (!isClean && silentMembers.length > 10) {
+                let msgList = [];
+                silentMembers.forEach((m, index) => { msgList.push(`${index + 1}. ${m.card || m.nickname} (${m.user_id})`); });
+                msgList.unshift(`📊 超过 ${days} 天未发言的成员共 ${silentMembers.length} 人：\n若要清理，请发送：清理潜水 ${days} -y`);
+                if (await sendForwardMsg(_ws, chatId, isGroup, `潜水成员名单`, msgList)) return true;
             }
 
-            return resultMsg + `✅ 清理完成！成功移出 ${successCount} 人，失败 ${failCount} 人。`;
-
-        } catch (e) {
-            return `❌ 查询或清理失败: ${e.message}`;
-        }
+            const listText = silentMembers.slice(0, 50).map(m => `${m.card || m.nickname} (${m.user_id})`).join('\n');
+            let resultMsg = `📊 超过 ${days} 天未发言的成员共 ${silentMembers.length} 人：\n${listText}\n`;
+            if (silentMembers.length > 50) resultMsg += `...（仅显示前 50 人）\n`;
+            if (!isClean) return resultMsg + `\n⚠️ 若要清理他们，请发送：清理潜水 ${days} -y`;
+            if (!hasPermission) return '❌ 权限不足。';
+            resultMsg += `\n🚀 开始批量清理...\n`;
+            let s = 0, f = 0;
+            for (const m of silentMembers) {
+                await globalThis.sleep(400);
+                try {
+                    const k = await (await fetch(`${API}/set_group_kick`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ group_id: Number(chatId), user_id: Number(m.user_id), reject_add_request: true }) })).json();
+                    if (k.status === 'ok' || k.retcode === 0) s++; else f++;
+                } catch (_) { f++; }
+            }
+            return resultMsg + `✅ 清理完成！成功 ${s} 人，失败 ${f} 人。`;
+        } catch (e) { return `❌ 查询或清理失败: ${e.message}`; }
     }
 
     // ==========================================
-    // 🌟 点赞功能（使用 globalThis.db）
+    // 点赞
     // ==========================================
-    if (cmd === '点赞' || cmd === '赞' || cmd === '赞我' || cmd.startsWith('赞他') || cmd.startsWith('赞她')) {
+    if (cmd === '点赞' || cmd === '赞' || cmd === '赞我' || cmd.includes('赞他') || cmd.includes('赞她')) {
         let likeTargetQQ = senderQQ; 
-        let isLikeOther = false;
-
-        if (cmd.startsWith('赞他') || cmd.startsWith('赞她')) {
-            isLikeOther = true;
-            if (!targetQQ) return '⚠️ 用法：赞他 @成员（请@你想要点赞的人）';
-            if (targetQQ === senderQQ) return '✨ 请不要用 赞他 来赞自己，直接发 赞我 即可~';
+        let isLikeOther = cmd.includes('赞他') || cmd.includes('赞她');
+        let isSilent = cmd.includes('-s');
+        if (isLikeOther) {
+            if (!targetQQ) return '⚠️ 未找到该成员，请真实艾特（@）对方，或者确认对方在群里。';
             likeTargetQQ = targetQQ;
         }
-
-        // 🌟 实时计算当前属于哪个周期（每天凌晨 1 点刷新）
         const currentCycle = getCurrentLikeCycle();
-
-        // 只对“给自己点赞”做频率限制
         if (!isLikeOther && typeof globalThis.db === 'function') {
-            const dbRes = globalThis.db('find', {
-                dbName: DB_NAME,
-                table: 'like_records',
-                where: 'user_id = ?',
-                params: [String(senderQQ)],
-                all: false
-            });
-
-            if (dbRes.success && dbRes.data && dbRes.data.last_like_cycle === currentCycle) {
-                return `今天已经给自己点过赞啦，明天凌晨 1 点后再来吧~\n(当前周期: ${currentCycle})`;
-            }
+            const dbRes = globalThis.db('find', { dbName: DB_NAME, table: 'like_records', where: 'user_id = ?', params: [String(senderQQ)], all: false });
+            if (dbRes.success && dbRes.data && dbRes.data.last_like_cycle === currentCycle) return `今天已经给自己点过赞啦，明天 0 点后再来吧~`;
         }
-
         if (botConfig.bot && botConfig.bot.likeEnabled === false) return '❌ 点赞功能已关闭';
-
         let isFriend = false;
         try {
             const friendRes = await fetch(`${API}/get_friend_list`);
-            const friendData = await friendRes.json();
-            const friends = friendData.data || friendData.data?.data || [];
+            const friends = (await friendRes.json()).data || [];
             if (friends.some(f => f.user_id == likeTargetQQ)) isFriend = true;
         } catch (e) {}
-
         const times = isFriend ? 10 : 50;
-        const identity = isFriend ? '好友' : '非好友';
         const loops = Math.ceil(times / 10);
         for (let i = 0; i < loops; i++) {
             try { await fetch(`${API}/send_like?user_id=${likeTargetQQ}&times=10`); } catch (e) {}
         }
-
-        // 🌟 点赞成功后，写入/更新数据库
         if (!isLikeOther && typeof globalThis.db === 'function') {
-            globalThis.db('exec', {
-                dbName: DB_NAME,
-                sql: 'INSERT OR REPLACE INTO like_records (user_id, last_like_cycle) VALUES (?, ?)',
-                params: [String(senderQQ), currentCycle]
-            });
+            globalThis.db('exec', { dbName: DB_NAME, sql: 'INSERT OR REPLACE INTO like_records (user_id, last_like_cycle) VALUES (?, ?)', params: [String(senderQQ), currentCycle] });
         }
-
-        const targetName = isLikeOther ? `@${likeTargetQQ}` : '你';
-        return `✨ 点赞成功！[目标: ${targetName}] [关系: ${identity}] 本次共为你点赞 ${times} 次~\n(当前点赞周期: ${currentCycle}，每日 1:00 刷新)`;
+        if (isLikeOther) {
+            if (isSilent) return true;
+            if (!targetName) {
+                try {
+                    const memRes = await fetch(`${API}/get_group_member_info?group_id=${chatId}&user_id=${likeTargetQQ}`);
+                    const memData = await memRes.json();
+                    if (memData && memData.data) targetName = memData.data.card || memData.data.nickname;
+                } catch (e) {}
+            }
+            return `✨ 已成功为 @${targetName || likeTargetQQ} 点赞 ${times} 次！`;
+        }
+        return `✨ 点赞成功！[目标: 你] [关系: ${isFriend ? '好友' : '非好友'}] 本次共为你点赞 ${times} 次~\n(每日 0:00 刷新)`;
     }
 
     // ==========================================
-    // 设置管理
+    // 设置/取消管理
     // ==========================================
-    if (cmd.startsWith('设置管理')) {
-      if (!isMaster) return '❌ 权限不足：此命令仅限配置文件中的大主人（master）使用。';
-      if (!targetQQ) return '⚠️ 用法：设置管理@成员';
+    if (cmd.startsWith('设置管理') || cmd.startsWith('取消管理')) {
+      const isSet = cmd.startsWith('设置管理');
+      if (!isMaster) return '❌ 权限不足：仅大主人可用。';
+      if (!targetQQ) return `⚠️ 用法：${isSet ? '设置' : '取消'}管理@成员`;
+      
+      // 🌟 判定 Bot 权限（必须群主才能设置管理）
+      const botQQ = (await (await fetch(`${API}/get_login_info`)).json())?.data?.user_id;
+      if ((await (await fetch(`${API}/get_group_member_info?group_id=${chatId}&user_id=${botQQ}`)).json())?.data?.role !== 'owner') return `❌ Bot权限不足：需要是群主才能设置/取消管理员。`;
 
       try {
-        const botRes = await fetch(`${API}/get_login_info`);
-        const botData = await botRes.json();
-        const botQQ = botData?.data?.user_id;
-
-        if (botQQ) {
-          const botInfoRes = await fetch(`${API}/get_group_member_info?group_id=${chatId}&user_id=${botQQ}`);
-          botInfoData = await botInfoRes.json();
-          if (botInfoData?.data?.role !== 'owner') {
-            return '❌ Bot权限不足：机器人需要是群主才能设置管理员。';
-          }
-        }
-
-        const res = await fetch(`${API}/set_group_admin`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            group_id: Number(chatId),
-            user_id: Number(targetQQ),
-            enable: true
-          })
-        });
-        const result = await res.json();
-        if (result.status === 'ok') {
-          return `✅ 已成功将 ${targetQQ} 设置为管理员。`;
-        } else {
-          return `❌ 设置管理失败：${result.msg || result.message}`;
-        }
-      } catch (err) {
-        return `❌ 请求失败：${err.message}`;
-      }
+        const res = await fetch(`${API}/set_group_admin`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ group_id: Number(chatId), user_id: Number(targetQQ), enable: isSet }) });
+        return (await res.json()).status === 'ok' ? `✅ 已成功${isSet ? '设置' : '取消'}管理员。` : `❌ 失败。`;
+      } catch (err) { return `❌ 请求失败：${err.message}`; }
     }
 
     // ==========================================
-    // 取消管理
-    // ==========================================
-    if (cmd.startsWith('取消管理')) {
-      if (!isMaster) return '❌ 权限不足：此命令仅限配置文件中的大主人（master）使用。';
-      if (!targetQQ) return '⚠️ 用法：取消管理@成员';
-
-      try {
-        const botRes = await fetch(`${API}/get_login_info`);
-        const botData = await botRes.json();
-        const botQQ = botData?.data?.user_id;
-
-        if (botQQ) {
-          const botInfoRes = await fetch(`${API}/get_group_member_info?group_id=${chatId}&user_id=${botQQ}`);
-          botInfoData = await botInfoRes.json();
-          if (botInfoData?.data?.role !== 'owner') {
-            return '❌ Bot权限不足：机器人需要是群主才能取消管理员。';
-          }
-        }
-
-        const res = await fetch(`${API}/set_group_admin`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            group_id: Number(chatId),
-            user_id: Number(targetQQ),
-            enable: false
-          })
-        });
-        const result = await res.json();
-        if (result.status === 'ok') {
-          return `✅ 已成功取消 ${targetQQ} 的管理员身份。`;
-        } else {
-          return `❌ 取消管理失败：${result.msg || result.message}`;
-        }
-      } catch (err) {
-        return `❌ 请求失败：${err.message}`;
-      }
-    }
-
-    // ==========================================
-    // 发送群公告
+    // 群公告相关
     // ==========================================
     if (cmd.startsWith('群公告')) {
-        if (!hasPermission) return '❌ 权限不足：此命令仅限管理员使用';
+        if (!hasPermission) return '❌ 权限不足。';
+        
+        // 🌟 判定 Bot 权限
+        if (!(await checkBotRole(chatId))) return '❌ 操作失败：Bot 不是管理员或群主，无法发布公告。';
 
-        const botRes = await fetch(`${API}/get_login_info`);
-        const botData = await botRes.json();
-        const botQQ = botData?.data?.user_id;
-
-        if (botQQ) {
-          const botInfoRes = await fetch(`${API}/get_group_member_info?group_id=${chatId}&user_id=${botQQ}`);
-          botInfoData = await botInfoRes.json();
-          if (botInfoData?.data?.role !== 'owner' && botInfoData?.data?.role !== 'admin') {
-            return '❌ Bot权限不足：需要先给Bot设置群管理员或者群主。';
-          }
-        }
-
-        const noticeText = text.replace(/^群公告\s*/, '').trim();
-        if (!noticeText) return '⚠️ 用法：群公告 公告内容（可附带一张图片）';
-
-        let imageUrl = '';
-        const imgMatch = text.match(/\[CQ:image.*?url=(https?:\/\/[^\]]+)/);
-        if (imgMatch) {
-            imageUrl = imgMatch[1];
-        }
-
-        const bodyData = {
-            group_id: Number(chatId),
-            content: noticeText
-        };
-        if (imageUrl) {
-            bodyData.image = imageUrl;
-        }
-
+        const noticeText = cmd.replace(/^群公告\s*/, '').trim();
+        let imageUrl = ''; 
+        const imgMatch = textStr.match(/\[CQ:image.*?url=(https?:\/\/[^\]]+)/);
+        if (imgMatch) imageUrl = imgMatch[1];
+        if (!noticeText && !imageUrl) return '⚠️ 用法：群公告 公告内容';
         try {
-            const res = await fetch(`${API}/_send_group_notice`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(bodyData)
-            });
-            const result = await res.json();
-            if (result.status === 'ok') {
-                return '✅ 群公告发布成功！';
-            } else {
-                return `❌ 发布公告失败：${result.msg || result.message}`;
-            }
-        } catch (e) {
-            return `❌ 发布公告失败：${e.message}`;
+            const result = await (await fetch(`${API}/_send_group_notice`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ group_id: Number(chatId), content: noticeText || ' ', ...(imageUrl ? { image: imageUrl } : {}) }) })).json();
+            return (result.status === 'ok' || result.retcode === 0) ? '✅ 群公告发布成功！' : `❌ 失败：${result.msg || result.message}`;
+        } catch (e) { return `❌ 失败：${e.message}`; }
+    }
+
+    if (cmd === '查公告' || cmd.startsWith('删公告')) {
+        if (!isGroup) return '❌ 该指令仅限群聊使用';
+        if (!hasPermission) return '❌ 权限不足：仅限管理员及以上身份使用。';
+        
+        // 🌟 判定 Bot 权限
+        if (!(await checkBotRole(chatId))) return '❌ 操作失败：Bot 不是管理员或群主，无法操作公告。';
+
+        if (cmd === '查公告') {
+            try {
+                const res = await fetch(`${API}/_get_group_notice`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ group_id: Number(chatId) }) });
+                const result = await res.json();
+                const notices = result.data || [];
+                if (notices.length === 0) return '📭 当前群没有发布过任何公告。';
+                
+                if (notices.length > 3) {
+                    let msgList = [];
+                    for (let i = 0; i < notices.length; i++) {
+                        const item = notices[i];
+                        const date = new Date(item.publish_time * 1000).toLocaleString('zh-CN');
+                        const contentText = item.message?.text ? item.message.text.replace(/\[CQ:image[^\]]*\]/g, '[图片]') : '未知内容';
+                        msgList.push(`[ID: ${item.notice_id}]\n📅 ${date}\n📝 ${contentText}`);
+                    }
+                    msgList.unshift(`📢 本群共有 ${notices.length} 条公告（最新在前）：`);
+                    if (await sendForwardMsg(_ws, chatId, isGroup, '群公告记录', msgList)) return true;
+                }
+    
+                let reply = `📢 本群共有 ${notices.length} 条公告（最新在前）：\n`;
+                for (let i = 0; i < Math.min(notices.length, 5); i++) {
+                    const item = notices[i];
+                    const date = new Date(item.publish_time * 1000).toLocaleString('zh-CN');
+                    const contentText = item.message?.text ? item.message.text.replace(/\[CQ:image[^\]]*\]/g, '[图片]') : '未知内容';
+                    reply += `\n[ID: ${item.notice_id}]\n📅 ${date}\n📝 ${contentText.substring(0, 50)}${contentText.length > 50 ? '...' : ''}\n`;
+                }
+                if (notices.length > 5) reply += `\n... 仅显示最新 5 条\n`;
+                return reply.trim() + `\n\n💡 发送：删公告 [ID] 可删除。`;
+            } catch (e) { return `❌ 查公告失败: ${e.message}`; }
+        }
+
+        if (cmd.startsWith('删公告')) {
+            const noticeId = cmd.split(/\s+/)[1];
+            if (!noticeId) return '⚠️ 用法：删公告 [公告ID]\n请先发送“查公告”获取ID，防止误删。';
+            try {
+                const res = await fetch(`${API}/_del_group_notice`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ group_id: Number(chatId), notice_id: noticeId }) });
+                const result = await res.json();
+                return (result.status === 'ok' || result.retcode === 0) ? `✅ 已成功删除公告 [ID: ${noticeId}]。` : `❌ 删除失败：${result.msg || result.message || '可能是ID错误或公告已不存在'}`;
+            } catch (e) { return `❌ 删除公告失败: ${e.message}`; }
         }
     }
 
     // ==========================================
-    // 踢人
-    // ==========================================
-    if (cmd.startsWith('踢')) {
-      if (!targetQQ) return '⚠️ 用法：踢@成员';
-      if (!hasPermission) return '❌ 权限不足：此命令仅限群主、管理员或配置文件中的主人使用。';
-
-      try {
-        const res = await fetch(`${API}/set_group_kick`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            group_id: Number(chatId),
-            user_id: Number(targetQQ),
-            reject_add_request: false
-          })
-        });
-        const result = await res.json();
-        if (result.status === 'ok') {
-          return `✅ 已成功踢出 ${targetQQ}`;
-        } else {
-          return `❌ 踢人失败：${result.msg || result.message}`;
-        }
-      } catch (err) {
-        return `❌ 请求失败：${err.message}`;
-      }
-    }
-
-    // ==========================================
-    // 批量移出
-    // ==========================================
-    if (cmd.startsWith('批量移出')) {
-          const isReject = /(-r|--拒|--拒绝)/i.test(textStr);
-          const cleanText = textStr.replace(/(-r|--拒|--拒绝)/ig, '').trim();
-          const targets = [];
-
-          if (Array.isArray(text)) {
-              for (const seg of text) {
-                  if (seg?.type === 'at' && seg.data) {
-                      const qq = seg.data.qq || seg.data.target;
-                      if (qq) targets.push(String(qq).replace(/[^0-9]/g, ''));
-                  }
-              }
-          } else if (typeof text === 'string') {
-              for (const m of cleanText.matchAll(/\[CQ:at,qq=(\d+)\]/g)) {
-                  targets.push(m[1]);
-              }
-              for (const m of cleanText.matchAll(/(?<![0-9])([1-9][0-9]{4,11})(?![0-9])/g)) {
-                  targets.push(m[1]);
-              }
-          }
-
-          const uniqueTargets = [...new Set(targets.filter(q => q.length >= 5))];
-
-          if (uniqueTargets.length === 0) {
-              return '未找到要移出的人，请 @ 对方或输入 QQ 号';
-          }
-
-          let successCount = 0;
-
-          try {
-              const r = await fetch(`${API}/set_group_kick_members`, {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({
-                      group_id: String(chatId),
-                      user_id: uniqueTargets
-                  })
-              });
-              const d = await r.json();
-              if (d.status === 'ok' || d.retcode === 0) {
-                  successCount = uniqueTargets.length;
-              }
-          } catch (_) {}
-
-          if (successCount === 0) {
-              try {
-                  const r = await fetch(`${API}/batch_delete_group_member`, {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({
-                          group_id: Number(chatId),
-                          user_ids: uniqueTargets
-                      })
-                  });
-                  const d = await r.json();
-                  if (d.status === 'ok' || d.retcode === 0) {
-                      successCount = uniqueTargets.length;
-                  }
-              } catch (_) {}
-          }
-
-          if (successCount === 0) {
-              for (const uid of uniqueTargets) {
-                  await new Promise(resolve => setTimeout(resolve, Math.random() * 600 + 400));
-                  try {
-                      const r = await fetch(`${API}/set_group_kick`, {
-                          method: 'POST',
-                          headers: { 'Content-Type': 'application/json' },
-                          body: JSON.stringify({
-                              group_id: Number(chatId),
-                              user_id: Number(uid),
-                              reject_add_request: isReject
-                          })
-                      });
-                      const d = await r.json();
-                      if (d.status === 'ok' || d.retcode === 0) {
-                          successCount++;
-                      }
-                  } catch (_) {}
-              }
-          }
-
-          const msg = `批量移出完成：成功 ${successCount}/${uniqueTargets.length} 人 | 拒绝再次加群：${isReject ? '是' : '否'}`;
-          return msg;
-      }
-
-    // ==========================================
-    // 禁言
-    // ==========================================
-    if (cmd.startsWith('禁言')) {
-        if (!targetQQ) return '⚠️ 用法：禁言@成员 [秒数/分钟/小时/天数]，例：禁言@成员 5m 或 1天';
-        if (!hasPermission) return '❌ 权限不足：此命令仅限群主、管理员或配置文件中的主人使用。';
-
-        let duration = 600; // 默认10分钟
-        let cmdClean = cmd;
-        if (targetQQ) {
-            cmdClean = cmd.replace(targetQQ, "");
-        }
-
-        const durationMatch = cmdClean.match(/(\d+)\s*(s|秒|m|分钟|min|h|小时|d|天|日)?/i);
-        if (durationMatch) {
-            const value = parseInt(durationMatch[1]);
-            const unit = (durationMatch[2] || 'm').toLowerCase();
-
-            switch (unit) {
-                case 's':
-                case '秒':
-                    duration = value;
-                    break;
-                case 'm':
-                case '分钟':
-                case 'min':
-                    duration = value * 60;
-                    break;
-                case 'h':
-                case '小时':
-                    duration = value * 60 * 60;
-                    break;
-                case 'd':
-                case '天':
-                case '日':
-                    duration = value * 60 * 60 * 24;
-                    break;
-                default:
-                    duration = value * 60; 
-            }
-        }
-
-        try {
-            const res = await fetch(`${API}/set_group_ban`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    group_id: Number(chatId),
-                    user_id: Number(targetQQ),
-                    duration: duration
-                })
-            });
-            const result = await res.json();
-            if (result.status === 'ok') {
-                return `✅ 已禁言 @${targetQQ} ${duration}秒`;
-            } else {
-                return `❌ 禁言失败：${result.msg || result.message}`;
-            }
-        } catch (e) {
-            return `❌ 禁言失败：${e.message}`;
-        }
-    }
-
-    // ==========================================
-    // 解禁
-    // ==========================================
-    if (cmd.startsWith('解禁')) {
-      if (!targetQQ) return '⚠️ 用法：解禁@成员';
-      if (!hasPermission) return '❌ 权限不足：此命令仅限群主、管理员或配置文件中的主人使用。';
-
-      try {
-        const res = await fetch(`${API}/set_group_ban`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            group_id: Number(chatId),
-            user_id: Number(targetQQ),
-            duration: 0
-          })
-        });
-        const result = await res.json();
-        if (result.status === 'ok') {
-          return `✅ 已成功解除 @${targetQQ} 的禁言`;
-        } else {
-          return `❌ 解禁失败：${result.msg || result.message}`;
-        }
-      } catch (err) {
-        return `❌ 请求失败：${err.message}`;
-      }
-    }
-
-    // ==========================================
-    // 改头衔
+    // 改头衔 / 申请头衔
     // ==========================================
     if (cmd.startsWith('改头衔')) {
-        if (!targetQQ) {
-            return '❌ 格式错误：改头衔 @成员 新头衔（改自己直接：改头衔 新头衔）';
-        }
-
-        let newTitle = '';
-        if (Array.isArray(text)) {
-            newTitle = text
-                .filter(item => item?.type === 'text')
-                .map(item => item?.data?.text || '')
-                .join('')
-                .trim()
-                .replace(/^改头衔\s*/, '') 
-                .trim();
-        } else {
-            newTitle = textStr.replace(/^改头衔/, '').trim();
-            const bracketIndex = newTitle.indexOf(']');
-            if (bracketIndex !== -1) {
-                newTitle = newTitle.substring(bracketIndex + 1).trim();
-            } else {
-                newTitle = newTitle.replace(/^@\S+\s*/, '').trim();
-            }
-        }
-
-        if (!newTitle) {
-            return '❌ 请输入要设置的头衔';
-        }
-        if (newTitle.length > 18) {
-            return '❌ 头衔过长：最多 18 个字符';
-        }
-
-        const isSelf = targetQQ === String(senderQQ);
+        let targetToChange = targetQQ;
+        let isSelfChange = false;
+        if (!targetToChange) { targetToChange = String(senderQQ); isSelfChange = true; }
+        let newTitle = cmd.replace(/^改头衔\s*/, '').trim().replace(/@\{at:\d+\}/g, '').replace(/@\S+\s*/g, '').trim();
+        if (!newTitle) return '❌ 请输入要设置的头衔内容，例如：改头衔 @某人 大佬';
+        if (newTitle.length > 18) return '❌ 头衔过长：最多 18 个字符';
         let isGroupOwner = false;
-        let isGroupAdmin = false;
-
         try {
             const res = await fetch(`${API}/get_group_member_info?group_id=${chatId}&user_id=${senderQQ}`);
-            const data = await res.json();
-            const rawRole = data?.data?.role;
+            const rawRole = (await res.json())?.data?.role;
             if (rawRole === 'owner') isGroupOwner = true;
-            if (rawRole === 'owner' || rawRole === 'admin') isGroupAdmin = true;
+            if (rawRole === 'admin') isGroupAdmin = true;
         } catch (e) {}
-
-        if (!isSelf) {
-            const highAdmin = ['master', 'owner'].includes(role);
-            if (!isGroupOwner && !isGroupAdmin && !highAdmin) {
-                return '❌ 权限不足：改别人头衔需要群主/群管或主人权限';
-            }
+        if (!isSelfChange && !isGroupOwner && !isGroupAdmin && !['master', 'owner'].includes(role)) return '❌ 权限不足：改别人头衔需要群主、群管或主人权限。';
+        
+        // 🌟 判定 Bot 权限（必须群主才能改别人头衔）
+        const botQQ = (await (await fetch(`${API}/get_login_info`)).json())?.data?.user_id;
+        if (!isSelfChange && (await (await fetch(`${API}/get_group_member_info?group_id=${chatId}&user_id=${botQQ}`)).json())?.data?.role !== 'owner') {
+            return '❌ Bot权限不足：需要是群主才能修改他人头衔。';
         }
 
         try {
-            const res = await fetch(`${API}/set_group_special_title`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    group_id: Number(chatId),
-                    user_id: Number(targetQQ),
-                    special_title: newTitle,
-                    duration: -1 
-                })
-            });
-           const rawText = await res.text();
-           const startIdx = rawText.indexOf('{');
-           const endIdx = rawText.indexOf('}', startIdx);
-           const jsonStr = rawText.substring(startIdx, endIdx + 1);
-           let result;
-           try {
-               result = JSON.parse(jsonStr);
-           } catch (e) {
-               if (res.ok) {
-                   result = { status: 'ok', retcode: 0 };
-               } else {
-                   throw new Error(`HTTP ${res.status}: ${rawText}`);
-               }
-           }
-
-            if (result.status === 'ok') {
-                return `✅ 已将头衔修改为「${newTitle}」`;
-            } else {
-                return `❌ 修改失败：${result.msg || result.message}`;
+            const res = await fetch(`${API}/set_group_special_title`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ group_id: Number(chatId), user_id: Number(targetToChange), special_title: newTitle, duration: -1 }) });
+            const result = await res.json();
+            if (result.status === 'ok' || result.retcode === 0) {
+                if (!targetName && !isSelfChange) {
+                    try {
+                        const memRes = await fetch(`${API}/get_group_member_info?group_id=${chatId}&user_id=${targetToChange}`);
+                        targetName = (await memRes.json())?.data?.card || (await memRes.json())?.data?.nickname;
+                    } catch (e) {}
+                }
+                return `✅ 已将 ${isSelfChange ? '你' : (targetName || `@${targetToChange}`)} 的头衔修改为「${newTitle}」`;
             }
-        } catch (err) {
-            return `❌ 请求失败：${err.message}`;
-        }
+            return `❌ 修改失败：${result.msg || result.message || '未知错误'}`;
+        } catch (err) { return `❌ 请求失败：${err.message}`; }
     }
 
-    // ==========================================
-    // 申请头衔
-    // ==========================================
-    if (cmd.startsWith('头衔') || cmd.startsWith('申请头衔')) {
-      const titleContent = cmd.replace(/^(申请头衔|头衔)\s*/, '').trim();
-      if (!titleContent) return '⚠️ 用法：头衔 头衔内容';
+    if (cmd.startsWith('申请头衔') || cmd.startsWith('头衔')) {
+        const titleContent = cmd.replace(/^(申请头衔|头衔)\s*/, '').trim();
+        if (!titleContent) return '⚠️ 用法：申请头衔 头衔内容';
+        let botQQ = null;
+        try { botQQ = (await (await fetch(`${API}/get_login_info`)).json())?.data?.user_id; } catch (e) { return '❌ 获取机器人信息失败。'; }
+        
+        // 🌟 判定 Bot 权限（必须群主才能给别人设置头衔）
+        try {
+            const botRole = (await (await fetch(`${API}/get_group_member_info?group_id=${chatId}&user_id=${botQQ}`)).json())?.data?.role;
+            if (botRole !== 'owner') return '❌ Bot权限不足：机器人不是群主，无法设置头衔。';
+        } catch (e) { return '❌ 无法查询机器人权限。'; }
 
-      let botQQ = null;
-      try {
-        const loginRes = await fetch(`${API}/get_login_info`);
-        const loginData = await loginRes.json();
-        botQQ = loginData?.data?.user_id;
-      } catch (e) {
-        return '❌ 无法获取机器人信息，请检查API连接。';
-      }
-
-      if (!botQQ) return '❌ 获取机器人QQ号失败。';
-
-      try {
-        const botInfoRes = await fetch(`${API}/get_group_member_info?group_id=${chatId}&user_id=${botQQ}`);
-        botInfoData = await botInfoRes.json();
-        const botRole = botInfoData?.data?.role;
-        if (botRole !== 'owner') {
-          return '❌ 操作失败：机器人当前不是群主，无法设置头衔。';
-        }
-      } catch (e) {
-        return '❌ 无法查询机器人权限状态：' + e.message;
-      }
-
-      try {
-        const res = await fetch(`${API}/set_group_special_title`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            group_id: Number(chatId),
-            user_id: Number(senderQQ),
-            special_title: titleContent
-          })
-        });
-        const result = await res.json();
-        if (result.status === 'ok') {
-          return `✅ 已成功将你的头衔设置为：【${titleContent}】`;
-        } else {
-          return `❌ 设置头衔失败：${result.msg || result.message}`;
-        }
-      } catch (err) {
-        return `❌ 请求失败：${err.message}`;
-      }
+        try {
+            const res = await fetch(`${API}/set_group_special_title`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ group_id: Number(chatId), user_id: Number(senderQQ), special_title: titleContent, duration: -1 }) });
+            const result = await res.json();
+            return (result.status === 'ok' || result.retcode === 0) ? `✅ 已成功将你的头衔设置为：【${titleContent}】` : `❌ 设置头衔失败：${result.msg || result.message}`;
+        } catch (err) { return `❌ 请求失败：${err.message}`; }
     }
 
-    return '⚠️ 用法：\n踢@成员\n禁言@成员 时长\n解禁@成员\n头衔 内容\n设置管理@成员（仅大主人）\n取消管理@成员（仅大主人）\n点赞\n查等级\n查潜水 [天数]\n清理潜水 [天数] -y';
+    return '';
   }
 };

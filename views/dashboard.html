@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>云挂机控制台</title>
+    <style>
+        :root { --primary: #3b82f6; --success: #10b981; --bg: #121212; --card: #1e1e1e; --text: #e0e0e0; --border: #333; }
+        body { font-family: -apple-system, sans-serif; background: var(--bg); color: var(--text); padding: 20px; margin: 0; }
+        
+        .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); padding-bottom: 15px; margin-bottom: 20px; flex-wrap: wrap; gap: 10px; }
+        .owner-box { background: #064e3b; color: #34d399; padding: 6px 12px; border-radius: 6px; font-size: 14px; display: flex; align-items: center; gap: 8px; }
+        .btn-edit { background: rgba(255,255,255,0.1); border: none; color: #fff; border-radius: 4px; cursor: pointer; padding: 2px 8px; font-size: 12px; }
+        .btn-edit:hover { background: rgba(255,255,255,0.2); }
+
+        .tabs { display: flex; gap: 10px; margin-bottom: 20px; }
+        .tab { flex: 1; text-align: center; padding: 12px; background: #2a2a2a; border-radius: 8px; cursor: pointer; transition: 0.2s; font-weight: bold; }
+        .tab.active { background: var(--primary); color: white; box-shadow: 0 4px 12px rgba(59,130,246,0.3); }
+        
+        .panel { display: none; background: var(--card); padding: 20px; border-radius: 12px; margin-bottom: 30px; animation: fadeIn 0.3s; }
+        .panel.active { display: block; }
+        .form-group { margin-bottom: 15px; }
+        .form-group label { display: block; margin-bottom: 8px; color: #aaa; font-size: 14px; }
+        .form-group input { width: 100%; padding: 12px; border-radius: 8px; border: 1px solid var(--border); background: #2a2a2a; color: #fff; box-sizing: border-box; font-size: 15px; }
+        .form-group input:focus { outline: none; border-color: var(--primary); }
+
+        .btn { width: 100%; padding: 14px; border: none; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; transition: 0.2s; display: flex; justify-content: center; align-items: center; gap: 8px; }
+        .btn-primary { background: var(--success); color: white; }
+        .btn-primary:hover:not(:disabled) { background: #059669; }
+        .btn:disabled { background: #444; cursor: not-allowed; opacity: 0.7; }
+        
+        .spinner { width: 18px; height: 18px; border: 3px solid rgba(255,255,255,0.3); border-radius: 50%; border-top-color: #fff; animation: spin 1s linear infinite; display: none; }
+
+        .instances-title { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
+        .instances-title h3 { margin: 0; font-size: 16px; color: #aaa; }
+        .instance-card { background: var(--card); padding: 15px; border-radius: 8px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; border-left: 4px solid #444; }
+        .instance-card.online { border-left-color: var(--success); }
+        
+        .status-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: #555; margin-right: 8px; }
+        .online .status-dot { background: var(--success); box-shadow: 0 0 8px var(--success); animation: pulse 2s infinite; }
+        
+        .btn-stop { background: #ef4444; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+        
+        #toast { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); background: #333; color: #fff; padding: 10px 20px; border-radius: 6px; font-size: 14px; opacity: 0; transition: 0.3s; pointer-events: none; z-index: 1000; }
+        #toast.show { opacity: 1; }
+
+        @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
+    </style>
+</head>
+<body>
+    <div id="toast">提示信息</div>
+
+    <div class="header">
+        <h2>🚀 云挂机控制台</h2>
+        <div class="owner-box">
+            <span>👑 号主: <span id="owner-qq">加载中...</span></span>
+            <button class="btn-edit" onclick="editOwner()">修改</button>
+        </div>
+    </div>
+
+    <div class="tabs">
+        <div class="tab active" onclick="switchTab('qr')">📱 扫码登录</div>
+        <div class="tab" onclick="switchTab('pwd')">🔑 密码登录</div>
+    </div>
+
+    <div class="panel active" id="panel-qr">
+        <p style="color: #aaa; font-size: 14px; margin-top: 0;">点击启动后，页面将跳转至专属扫码页面。</p>
+        <button class="btn btn-primary" id="btn-qr" onclick="startBot('qr')">
+            <span class="spinner" id="spin-qr"></span>
+            <span id="text-qr">启动并跳转扫码</span>
+        </button>
+    </div>
+
+    <div class="panel" id="panel-pwd">
+        <p style="color: #ef4444; font-size: 13px; margin-top: 0;">⚠️ 警告：纯密码登录极易触发风控，建议退回使用扫码。</p>
+        <div class="form-group">
+            <label>Bot QQ 账号</label>
+            <input type="text" id="input-qq" placeholder="输入机器人 QQ 号">
+        </div>
+        <div class="form-group">
+            <label>账号密码</label>
+            <input type="password" id="input-pwd" placeholder="输入 QQ 密码">
+        </div>
+        <button class="btn btn-primary" id="btn-pwd" onclick="startBot('pwd')">
+            <span class="spinner" id="spin-pwd"></span>
+            <span id="text-pwd">执行密码登录</span>
+        </button>
+    </div>
+
+    <div class="instances-title">
+        <h3>当前运行实例</h3>
+        <span style="font-size: 12px; color: #666;">实时自动刷新</span>
+    </div>
+    <div id="instance-list">
+        <p style="color: #666; font-size: 14px; text-align: center; padding: 20px 0;">暂无正在运行的实例</p>
+    </div>
+
+    <script>
+        function showToast(msg, color = '#333') {
+            const t = document.getElementById('toast');
+            t.innerText = msg;
+            t.style.background = color;
+            t.classList.add('show');
+            setTimeout(() => t.classList.remove('show'), 2500);
+        }
+
+        async function editOwner() {
+            const current = document.getElementById('owner-qq').innerText;
+            const newQQ = prompt("请输入新的号主 QQ 账号:", current === '未绑定' ? '' : current);
+            if (newQQ && newQQ.trim() !== '') {
+                const res = await fetch('/api/set-owner', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ownerQQ: newQQ.trim() })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    showToast('✅ 号主修改成功', '#10b981');
+                    fetchState();
+                } else {
+                    showToast('修改失败: ' + data.msg, '#ef4444');
+                }
+            }
+        }
+
+        function switchTab(mode) {
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+            event.target.classList.add('active');
+            document.getElementById('panel-' + mode).classList.add('active');
+        }
+
+        async function startBot(mode) {
+            const qq = document.getElementById('input-qq').value;
+            const pwd = document.getElementById('input-pwd').value;
+            
+            if (mode === 'pwd' && (!qq || !pwd)) return showToast('请输入完整的账号和密码', '#ef4444');
+
+            const btn = document.getElementById(mode === 'qr' ? 'btn-qr' : 'btn-pwd');
+            const spin = document.getElementById(mode === 'qr' ? 'spin-qr' : 'spin-pwd');
+            const text = document.getElementById(mode === 'qr' ? 'text-qr' : 'text-pwd');
+
+            btn.disabled = true;
+            spin.style.display = 'block';
+            text.innerText = '正在拉起进程...';
+
+            try {
+                const res = await fetch('/api/create', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ mode, qq, password: pwd })
+                });
+                const data = await res.json();
+                
+                if (data.success) {
+                    if (mode === 'qr') {
+                        text.innerText = '正在跳转...';
+                        window.location.href = '/qr.html?id=' + data.instanceId;
+                        return;
+                    } else {
+                        text.innerText = '指令已发送，请观察状态';
+                        fetchState(); 
+                    }
+                } else {
+                    showToast('启动失败: ' + data.msg, '#ef4444');
+                    resetBtn(btn, spin, text, mode);
+                }
+            } catch (err) {
+                showToast('网络请求失败', '#ef4444');
+                resetBtn(btn, spin, text, mode);
+            }
+        }
+
+        function resetBtn(btn, spin, text, mode) {
+            btn.disabled = false;
+            spin.style.display = 'none';
+            text.innerText = mode === 'qr' ? '启动并跳转扫码' : '执行密码登录';
+        }
+
+        let lastOnlineState = false;
+        async function fetchState() {
+            try {
+                const res = await fetch('/api/state');
+                const data = await res.json();
+                
+                document.getElementById('owner-qq').innerText = data.ownerQQ || '未绑定';
+
+                const listEl = document.getElementById('instance-list');
+                if (data.instances.length === 0) {
+                    listEl.innerHTML = '<p style="color: #666; font-size: 14px; text-align: center; padding: 20px 0;">暂无正在运行的实例</p>';
+                } else {
+                    listEl.innerHTML = data.instances.map(inst => `
+                        <div class="instance-card ${inst.online ? 'online' : ''}">
+                            <div>
+                                <span class="status-dot"></span>
+                                <b>实例 ${inst.wsPort}</b> 
+                                <span style="color: #666; font-size: 12px; margin-left: 8px;">(${inst.mode === 'qr' ? '扫码' : '密码'})</span>
+                            </div>
+                            <div style="display: flex; align-items: center; gap: 10px;">
+                                <span style="font-size: 12px; color: ${inst.online ? 'var(--success)' : '#888'}">${inst.online ? '运行中' : '启动中/离线'}</span>
+                                ${inst.hasQr && !inst.online ? `<button class="btn btn-primary" style="width: auto; padding: 6px 12px; font-size: 12px;" onclick="window.location.href='/qr.html?id=${inst.id}'">去扫码</button>` : ''}
+                                <button class="btn-stop" onclick="stopInstance('${inst.id}')">停止</button>
+                            </div>
+                        </div>
+                    `).join('');
+
+                    if (document.getElementById('text-pwd').innerText === '指令已发送，请观察状态') {
+                        const offlineWithQr = data.instances.find(i => !i.online && i.hasQr);
+                        if (offlineWithQr) {
+                            showToast('⚠️ 密码登录失败触发风控，已自动转到扫码页面', '#fbbf24');
+                            window.location.href = '/qr.html?id=' + offlineWithQr.id;
+                            return;
+                        }
+                    }
+                }
+
+                const anyOnline = data.instances.some(i => i.online);
+                if (anyOnline && !lastOnlineState) {
+                    showToast('✅ 机器人登录成功并连入主控！', '#10b981');
+                    resetBtn(document.getElementById('btn-pwd'), document.getElementById('spin-pwd'), document.getElementById('text-pwd'), 'pwd');
+                    resetBtn(document.getElementById('btn-qr'), document.getElementById('spin-qr'), document.getElementById('text-qr'), 'qr');
+                }
+                lastOnlineState = anyOnline;
+
+            } catch (e) {}
+        }
+
+        async function stopInstance(id) {
+            if (!confirm('确定要停止并销毁该实例吗？')) return;
+            const res = await fetch('/api/stop/' + id, { method: 'POST' });
+            if (res.ok) {
+                showToast('实例已停止', '#10b981');
+                fetchState();
+            } else {
+                showToast('停止失败', '#ef4444');
+            }
+        }
+
+        setInterval(fetchState, 2000);
+        fetchState();
+    </script>
+</body>
+</html>
