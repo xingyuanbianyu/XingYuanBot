@@ -20,19 +20,41 @@ db.exec(`
 
 console.log('✅ 群管数据库初始化完成 (ESM模式)');
 
+// 🌟 提取公共检查函数，使用 wsCall
+async function checkBotPermission(chatId) {
+    if (typeof globalThis.wsCall !== 'function') return '❌ 框架底层未就绪 (wsCall 缺失)';
+    try {
+        const botData = await globalThis.wsCall('get_login_info');
+        const botQQ = botData?.data?.user_id;
+        if (!botQQ) return '❌ 无法获取 Bot 账号信息';
+
+        const info = await globalThis.wsCall('get_group_member_info', {
+            group_id: Number(chatId),
+            user_id: Number(botQQ),
+            no_cache: true
+        });
+        
+        const role = info?.data?.role;
+        if (role !== 'owner' && role !== 'admin') {
+            return '❌ Bot权限不足：请先将 Bot 设为群管理员或群主';
+        }
+        return true;
+    } catch (e) {
+        return `❌ 权限校验异常：${e.message}`;
+    }
+}
+
 export default {
     name: "群管工具箱",
     description: "支持 撤回、群待办、取消待办",
-    // 明确不带 events，因为这属于普通消息触发
 
     match: function (text) {
         if (typeof text !== 'string') return false;
-        // 兼容带前缀或不带前缀的匹配
         return /撤回|群待办|取消待办/i.test(text);
     },
 
     handle: async function (msg, matchResult) {
-        // 🌟 核心修复：自动剥离 # 或 / 前缀，确保后续判断能命中
+        // 剥离 # 或 / 前缀
         let text = (msg.pureText || "").trim().replace(/^[#\/]+/, '').trim();
         if (!text) return null;
 
@@ -50,23 +72,16 @@ export default {
         // ================= 1. 撤回逻辑 =================
         if (isRecall) {
             if (!refId) return '⚠️ 未找到引用ID，请回复需要撤回的消息后使用 #撤回';
+            if (typeof globalThis.wsCall !== 'function') return '❌ 框架底层未就绪';
 
             try {
                 // 撤回引用的消息
-                await fetch('http://127.0.0.1:3000/delete_msg', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ message_id: refId })
-                });
+                await globalThis.wsCall('delete_msg', { message_id: refId });
                 
                 // 撤回指令本身
                 if (commandMsgId) {
                     await new Promise(r => setTimeout(r, 300));
-                    await fetch('http://127.0.0.1:3000/delete_msg', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ message_id: commandMsgId })
-                    });
+                    await globalThis.wsCall('delete_msg', { message_id: commandMsgId });
                 }
                 return null; // 撤回成功不需要发提示
             } catch (err) {
@@ -74,62 +89,39 @@ export default {
             }
         }
 
-        // ================= 权限检查 =================
-        async function checkBotPermission() {
-            try {
-                const botRes = await fetch('http://127.0.0.1:3000/get_login_info');
-                const botData = await botRes.json();
-                const botQQ = botData?.data?.user_id;
-                if (!botQQ) return '❌ 无法获取 Bot 账号信息';
-
-                const infoRes = await fetch(`http://127.0.0.1:3000/get_group_member_info?group_id=${chatId}&user_id=${botQQ}&no_cache=true`);
-                const info = await infoRes.json();
-                const role = info?.data?.role;
-                if (role !== 'owner' && role !== 'admin') {
-                    return '❌ Bot权限不足：请先将 Bot 设为群管理员或群主';
-                }
-                return true;
-            } catch (e) {
-                return `❌ 权限校验异常：${e.message}`;
-            }
-        }
-
         // ================= 2. 设置群待办 =================
         if (isTodo) {
-            const checkResult = await checkBotPermission();
+            const checkResult = await checkBotPermission(chatId);
             if (checkResult !== true) return checkResult;
 
             const targetMsgId = refId || commandMsgId;
             if (!targetMsgId) return '⚠️ 无法获取消息ID，请引用一条消息或直接发送指令';
 
-            async function tryTodo(actionName) {
-                try {
-                    const res = await fetch(`http://127.0.0.1:3000/${actionName}`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            group_id: Number(chatId),
-                            message_id: String(targetMsgId) 
-                        })
-                    });
-                    return await res.json();
-                } catch (e) {
-                    return { status: 'failed', message: e.message };
-                }
-            }
-
             let success = false;
             let lastError = '';
 
-            let result = await tryTodo('set_group_todo');
-            if (result.status === 'ok' || result.retcode === 0) {
-                success = true;
-            } else {
-                lastError = result.message || result.msg;
-                result = await tryTodo('_set_group_todo');
-                if (result.status === 'ok' || result.retcode === 0) {
-                    success = true;
-                }
+            // 尝试标准 API
+            try {
+                const result = await globalThis.wsCall('set_group_todo', {
+                    group_id: Number(chatId),
+                    message_id: String(targetMsgId) 
+                });
+                if (result.status === 'ok' || result.retcode === 0) success = true;
+                else lastError = result.message || result.msg;
+            } catch (e) {
+                lastError = e.message;
+            }
+
+            // 尝试备用 API (部分协议端兼容)
+            if (!success) {
+                try {
+                    const result = await globalThis.wsCall('_set_group_todo', {
+                        group_id: Number(chatId),
+                        message_id: String(targetMsgId) 
+                    });
+                    if (result.status === 'ok' || result.retcode === 0) success = true;
+                    else lastError = result.message || result.msg;
+                } catch (e) {}
             }
 
             if (success) {
@@ -146,7 +138,7 @@ export default {
 
         // ================= 3. 取消待办 =================
         if (isCancel) {
-            const checkResult = await checkBotPermission();
+            const checkResult = await checkBotPermission(chatId);
             if (checkResult !== true) return checkResult;
 
             try {
@@ -159,34 +151,31 @@ export default {
 
                 const messageId = row.message_id;
 
-                async function tryCancel(actionName) {
-                    try {
-                        const res = await fetch(`http://127.0.0.1:3000/${actionName}`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                group_id: Number(chatId),
-                                message_id: String(messageId)
-                            })
-                        });
-                        return await res.json();
-                    } catch (e) {
-                        return { status: 'failed', message: e.message };
-                    }
-                }
-
                 let success = false;
                 let lastError = '';
 
-                let result = await tryCancel('cancel_group_todo');
-                if (result.status === 'ok' || result.retcode === 0) {
-                    success = true;
-                } else {
-                    lastError = result.message || result.msg;
-                    result = await tryCancel('_cancel_group_todo');
-                    if (result.status === 'ok' || result.retcode === 0) {
-                        success = true;
-                    }
+                // 尝试标准 API
+                try {
+                    const result = await globalThis.wsCall('cancel_group_todo', {
+                        group_id: Number(chatId),
+                        message_id: String(messageId)
+                    });
+                    if (result.status === 'ok' || result.retcode === 0) success = true;
+                    else lastError = result.message || result.msg;
+                } catch (e) {
+                    lastError = e.message;
+                }
+
+                // 尝试备用 API
+                if (!success) {
+                    try {
+                        const result = await globalThis.wsCall('_cancel_group_todo', {
+                            group_id: Number(chatId),
+                            message_id: String(messageId)
+                        });
+                        if (result.status === 'ok' || result.retcode === 0) success = true;
+                        else lastError = result.message || result.msg;
+                    } catch (e) {}
                 }
 
                 // 清空记录

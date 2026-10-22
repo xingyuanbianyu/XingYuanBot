@@ -12,12 +12,3 @@ plugins:
     entry: index.js
     type: command     # 这里的配置会覆盖全局的 type
     timeout: 3500     # 这里的超时(3.5s)会覆盖全局的 1000ms
-    keywords: ['群打卡']
-    prefiex: '#'
-
-  - name: plugin-welcome        # ← 新增
-    enabled: false
-    path: ./plugin
-    entry: inde.js
-    type: event
-    timeout: 3000

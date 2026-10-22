@@ -14,6 +14,9 @@ import { getRole } from './xy-config/config/permissions.js';
 
 import { startWebPanel } from './web-panel.js';
 
+// 🌟 全局日志兜底
+globalThis.print = globalThis.print || console.log;
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const dataDir = join(__dirname, 'xy-data');
 const configPath = join(__dirname, 'xy-config', 'config.yaml');
@@ -48,6 +51,8 @@ let cmdConfig = { enable: true, prefixes: ['#', '/'] };
 let whitelistConfig = { enable: false, list: [] };
 let priorityPlugins = new Set(); 
 
+// ==================== 1. 消息发送 ====================
+// 底层安全发送函数
 function safeSend(ws, data) {
     if (ws && ws.readyState === 1) {
         try {
@@ -61,65 +66,28 @@ function safeSend(ws, data) {
     return false;
 }
 
-function loadCmdConfig() {
-  try {
-    if (fs.existsSync(configPath)) {
-      const content = yaml.parse(fs.readFileSync(configPath, 'utf8')) || {};
-      if (content.command_prefix) {
-        cmdConfig.enable = content.command_prefix.enable !== false;
-        if (Array.isArray(content.command_prefix.prefixes)) {
-          cmdConfig.prefixes = content.command_prefix.prefixes;
-        }
-      }
-      if (content.whitelist) {
-        whitelistConfig.enable = content.whitelist.enable === true;
-        if (Array.isArray(content.whitelist.list)) {
-          whitelistConfig.list = content.whitelist.list.map(String);
-        }
-      }
-    }
-    
-    if (fs.existsSync(priorityPath)) {
-        const pContent = yaml.parse(fs.readFileSync(priorityPath, 'utf8')) || {};
-        if (Array.isArray(pContent.priority_plugins)) {
-            priorityPlugins = new Set(pContent.priority_plugins.map(String));
-        }
-    } else {
-        priorityPlugins = new Set();
-    }
-  } catch (e) {
-    globalThis.print(`⚠️ [配置加载失败] ${e.message}`);
-  }
-}
-
-function watchConfig() {
-  try {
-    if (fs.existsSync(configPath)) {
-        fs.watch(configPath, (eventType) => {
-          if (eventType === 'change') setTimeout(() => { loadCmdConfig(); }, 150);
-        });
-    }
-    if (fs.existsSync(priorityPath)) {
-        fs.watch(priorityPath, (eventType) => {
-          if (eventType === 'change') setTimeout(() => { loadCmdConfig(); }, 150);
-        });
-    }
-  } catch (e) {}
-}
-
+// 挂载全局 Bot 发送器
 globalThis.bot = {
   send: async (msg) => {
     let targetWs = null;
+    
+    // 优先通过 botId 找对应的连接
     if (msg.botId) targetWs = sharedState.botIdToWs.get(String(msg.botId));
+    // 其次使用消息自带的 ws
     if (!targetWs && msg._ws) targetWs = msg._ws;
-    if (!targetWs) targetWs = globalThis._ws;
+    // 🌟 兜底：使用全局当前活跃的 ws (配合 network.js 新增的 globalThis.activeWs)
+    if (!targetWs) targetWs = globalThis.activeWs || globalThis._ws;
 
-    if (!targetWs || targetWs.readyState !== 1) return;
+    if (!targetWs || targetWs.readyState !== 1) {
+        globalThis.print('⚠️ [发送失败] WebSocket 未连接');
+        return;
+    }
 
     const target = msg.isGroup
       ? { message_type: 'group', group_id: msg.chatId }
       : { message_type: 'private', user_id: msg.chatId };
 
+    // 发送图片
     if (msg.file) {
       const base64 = msg.file.toString('base64');
       safeSend(targetWs, {
@@ -130,6 +98,7 @@ globalThis.bot = {
       return;
     }
 
+    // 发送文本
     if (msg.content) {
       safeSend(targetWs, {
           action: 'send_msg', 
@@ -140,6 +109,7 @@ globalThis.bot = {
   }
 };
 
+// ==================== 2. 插件执行逻辑 ====================
 async function runPlugin(plugin, msg) {
   const raw = plugin.handler;
   if (!raw) return false;
@@ -158,6 +128,7 @@ async function runPlugin(plugin, msg) {
   const pluginName = raw.name || plugin.name || '未知';
   const isPriority = priorityPlugins.has(pluginName);
 
+  // 处理交互式会话拦截
   const session = interactiveSessions.get(msg.senderQQ);
   if (session && session.expireAt > Date.now() && !isPriority) {
       if (session.pluginName === pluginName) {
@@ -182,6 +153,7 @@ async function runPlugin(plugin, msg) {
   let matchText = (msg.pureText || "").trim();
   let finalPureText = matchText; 
 
+  // 处理指令前缀和白名单
   if (!isPriority) {
       let hasValidPrefix = false;
 
@@ -253,18 +225,23 @@ async function runPlugin(plugin, msg) {
   }
 }
 
+// ==================== 3. 核心消息处理 ====================
 async function handleIncomingMessage(rawData, ws, registry, plugins) {
     if (!ws || ws.readyState !== 1) return;
 
     if (!sharedState.wsPool.has(ws)) {
       sharedState.wsPool.set(ws, { connectedAt: Date.now() });
       globalThis._ws = ws; 
+      globalThis.activeWs = ws; // 确保给 wsCall 兜底
     }
 
     try {
         const parsed = JSON.parse(rawData);
+        
+        // 过滤心跳包和 API 回执 (network.js 已经拦截了 API 回执，这里再兜底一次)
         if (parsed.post_type === 'meta_event' || parsed.echo !== undefined) return;
 
+        // 动态绑定 Bot ID 和 WS 连接
         if (parsed.self_id) {
             const botId = String(parsed.self_id);
             globalThis.botInfo.qq = botId; 
@@ -282,6 +259,7 @@ async function handleIncomingMessage(rawData, ws, registry, plugins) {
             }
         }
 
+        // 交给适配器转换为标准格式
         let stdMsg = null;
         for (const adapter of registry.list.values()) {
           if (typeof adapter.match === 'function' && adapter.match(parsed)) {
@@ -292,6 +270,7 @@ async function handleIncomingMessage(rawData, ws, registry, plugins) {
         
         if (!stdMsg) return;
 
+        // 处理消息事件
         if (parsed.post_type === 'message') {
           const senderQQ = stdMsg.senderId;
           const chatId = stdMsg.chatId;
@@ -302,12 +281,13 @@ async function handleIncomingMessage(rawData, ws, registry, plugins) {
              userRole = getRole(senderQQ);
           } catch(e) {}
 
-          // 号主直接放行，不受白名单限制
+          // 号主直接放行，不受黑白名单限制
           if (userRole !== 'master' && userRole !== 'owner' && senderQQ !== sharedState.ownerQQ) {
               if (isGroup && !isGroupAllowed(chatId)) return;
               if (!isQQAllowed(senderQQ)) return;
           }
 
+          // 消息去重
           if (parsed.message_id) {
             const msgId = `${stdMsg.selfId}_${parsed.message_id}_${stdMsg.senderId}`;
             if (processedMessages.includes(msgId)) return;
@@ -315,6 +295,7 @@ async function handleIncomingMessage(rawData, ws, registry, plugins) {
             if (processedMessages.length > MAX_CACHE_SIZE) processedMessages.shift();
           }
 
+          // 构建标准统一消息对象
           const msg = {
             type: 'receive',
             post_type: parsed.post_type,
@@ -334,6 +315,7 @@ async function handleIncomingMessage(rawData, ws, registry, plugins) {
             _ws: ws 
           };
 
+          // 分发给所有插件
           for (const plugin of plugins) {
             if (plugin && plugin.handler) {
               const handled = await runPlugin(plugin, msg);
@@ -346,6 +328,54 @@ async function handleIncomingMessage(rawData, ws, registry, plugins) {
     } catch (e) { globalThis.print(`[处理异常] ${e.message}`); }
 }
 
+// ==================== 4. 配置加载 ====================
+function loadCmdConfig() {
+  try {
+    if (fs.existsSync(configPath)) {
+      const content = yaml.parse(fs.readFileSync(configPath, 'utf8')) || {};
+      if (content.command_prefix) {
+        cmdConfig.enable = content.command_prefix.enable !== false;
+        if (Array.isArray(content.command_prefix.prefixes)) {
+          cmdConfig.prefixes = content.command_prefix.prefixes;
+        }
+      }
+      if (content.whitelist) {
+        whitelistConfig.enable = content.whitelist.enable === true;
+        if (Array.isArray(content.whitelist.list)) {
+          whitelistConfig.list = content.whitelist.list.map(String);
+        }
+      }
+    }
+    
+    if (fs.existsSync(priorityPath)) {
+        const pContent = yaml.parse(fs.readFileSync(priorityPath, 'utf8')) || {};
+        if (Array.isArray(pContent.priority_plugins)) {
+            priorityPlugins = new Set(pContent.priority_plugins.map(String));
+        }
+    } else {
+        priorityPlugins = new Set();
+    }
+  } catch (e) {
+    globalThis.print(`⚠️ [配置加载失败] ${e.message}`);
+  }
+}
+
+function watchConfig() {
+  try {
+    if (fs.existsSync(configPath)) {
+        fs.watch(configPath, (eventType) => {
+          if (eventType === 'change') setTimeout(() => { loadCmdConfig(); }, 150);
+        });
+    }
+    if (fs.existsSync(priorityPath)) {
+        fs.watch(priorityPath, (eventType) => {
+          if (eventType === 'change') setTimeout(() => { loadCmdConfig(); }, 150);
+        });
+    }
+  } catch (e) {}
+}
+
+// ==================== 5. 启动主流程 ====================
 async function main() {
   await lib(); 
   console.log('🚀 XingYuanBot 启动中...\n');
@@ -353,6 +383,7 @@ async function main() {
   loadCmdConfig();
   watchConfig();
 
+  // 定时清理过期的交互会话
   setInterval(() => {
       const now = Date.now();
       for (const [qq, sess] of interactiveSessions) {
@@ -360,17 +391,26 @@ async function main() {
       }
   }, 60000);
 
+  // 1. 初始化网络配置
   const netConfigs = loadNetworkConfig(dataDir);
+  
+  // 2. 初始化适配器
   const registry = new AdapterRegistry();
   await registry.scan(join(__dirname, 'adapter', 'adapters'));
 
+  // 3. 加载所有插件
   const { plugins, errors } = await loadPlugins(registry);
   globalThis.print(`\n✅ 已成功加载 ${plugins.length} 个插件\n`);
+  if (errors && errors.length > 0) {
+      globalThis.print(`⚠️ 插件加载时产生 ${errors.length} 个错误，请检查。`);
+  }
 
+  // 4. 暴露给全局，供插件和定时器使用
   globalThis.handleIncomingMessage = handleIncomingMessage;
   globalThis._registry = registry;
   globalThis._plugins = plugins;
 
+  // 5. 启动网络监听/连接
   if (netConfigs.length > 0) {
       const connections = await startNetwork(
         netConfigs,
@@ -378,8 +418,11 @@ async function main() {
         (err) => globalThis.print(`⚠ [网络错误] ${err.message}`)
       );
       registry.mountNetwork(connections);
+  } else {
+      globalThis.print('⚠️ 未找到网络配置文件，跳过网络启动。');
   }
 
+  // 6. 启动 Web 面板
   startWebPanel({
       registry,
       plugins,
@@ -389,14 +432,18 @@ async function main() {
   });
 
   globalThis.print('\n✅ 主控与网页面板均启动完成。\n');
+  
+  // 7. 启动终端保活 CLI
   startBot();
 }
 
+// 启动！
 main().catch(e => {
   globalThis.print(`💥 启动失败: ${e.message}`);
   process.exit(1);
 });
 
+// 退出清理
 function cleanupAllInstances() {
     globalThis.print('⚠️ 接收到退出信号，正在清理所有子进程...');
     for (const [id, inst] of sharedState.instances) {

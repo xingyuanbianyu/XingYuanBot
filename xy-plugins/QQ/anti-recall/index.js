@@ -5,10 +5,11 @@ import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CONFIG_PATH = path.join(__dirname, 'config.yaml');
-const GLOBAL_CONFIG_PATH = path.join(process.cwd(), 'xy-config/config/config.yaml');
+// 🌟 优化路径解析，增加容错
+const GLOBAL_CONFIG_PATH = path.resolve(process.cwd(), 'xy-config', 'config', 'config.yaml');
 
 const backupCache = new Map();
-const CACHE_TIME = 5 * 60 * 1000;
+const CACHE_TIME = 5 * 60 * 1000; // 5分钟
 
 export default {
   name: '防撤回',
@@ -50,11 +51,12 @@ export default {
             name: msg.senderName || '未知',
             senderId: String(msg.senderQQ),
             groupId: msg.isGroup ? msg.chatId : null,
-            groupName: msg.isGroup ? (msg.rawData?.group_name || null) : null, // 尽量提前缓存群名（部分协议端会带）
+            groupName: msg.isGroup ? (msg.rawData?.group_name || null) : null,
             content: msg.message || [] 
         });
         
-        setTimeout(() => backupCache.delete(msg.message_id), CACHE_TIME);
+        // 🌟 增加 unref()，防止这个定时器阻止 Node.js 进程正常退出
+        setTimeout(() => backupCache.delete(msg.message_id), CACHE_TIME).unref();
     }
     return false; 
   },
@@ -75,26 +77,23 @@ export default {
 
             let locationStr = '私聊';
             
-            // 🌟 核心修改：如果是群聊，去请求 API 获取真实群名
+            // 🌟 核心升级：如果是群聊，使用 wsCall 获取真实群名，彻底告别 HTTP
             if (backup.groupId) {
                 let gName = backup.groupName;
-                if (!gName) {
+                if (!gName && typeof globalThis.wsCall === 'function') {
                     try {
-                        // 调用 NapCat HTTP API 获取群信息
-                        const res = await fetch(`http://127.0.0.1:3000/get_group_info?group_id=${backup.groupId}`);
-                        const data = await res.json();
+                        const data = await globalThis.wsCall('get_group_info', { group_id: backup.groupId });
                         if (data.data && data.data.group_name) {
                             gName = data.data.group_name;
                         }
                     } catch (e) {
-                        console.log(`[防撤回] 获取群名 API 请求失败，将使用群号代替`);
+                        // wsCall 超时或报错时忽略
                     }
                 }
                 locationStr = gName ? `${gName}(${backup.groupId})` : `群聊(${backup.groupId})`;
             }
 
             const alertText = config.alert_text || '🛑 【防撤回拦截】\n';
-            // 格式化最终文本：显示名字 + 括号内的号码
             const sendMsg = [
                 { type: 'text', data: { text: `${alertText}来源：${locationStr}\n发送者：${backup.name}(${backup.senderId})\n内容：\n` } },
                 ...backup.content
@@ -103,16 +102,16 @@ export default {
             for (const owner of owners) {
                 if (owner === backup.senderId) continue; 
 
-                if (globalThis._ws && globalThis._ws.readyState === 1) {
-                    globalThis._ws.send(JSON.stringify({
-                        action: 'send_msg',
-                        params: {
-                            message_type: 'private',
+                // 🌟 核心升级：使用 wsCall 统一发送私聊消息
+                if (typeof globalThis.wsCall === 'function') {
+                    try {
+                        await globalThis.wsCall('send_private_msg', {
                             user_id: Number(owner), 
                             message: sendMsg
-                        },
-                        echo: Date.now()
-                    }));
+                        });
+                    } catch (e) {
+                        console.log(`[防撤回] 向主人 ${owner} 发送通知失败: ${e.message}`);
+                    }
                 }
             }
             backupCache.delete(raw.message_id);

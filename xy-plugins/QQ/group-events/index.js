@@ -43,7 +43,7 @@ function getGroupSettings(groupId) {
             params: [gid], 
             all: false
         });
-        if (res.success && res.data) {
+        if (res && res.success && res.data) {
             settings = { welcome: res.data.welcome, decrease: res.data.decrease, kick: res.data.kick };
         }
     }
@@ -87,16 +87,19 @@ function parseMessage(cqString) {
   return result.length > 0 ? result : [{ type: 'text', data: { text: cqString } }];
 }
 
+// 🌟 核心升级：使用 wsCall 获取群成员信息
 async function getGroupName(groupId, userId) {
+  if (typeof globalThis.wsCall !== 'function') return null;
   try {
-    const res = await fetch('http://127.0.0.1:3000/get_group_member_info', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ group_id: groupId, user_id: userId, no_cache: false }),
+    const data = await globalThis.wsCall('get_group_member_info', {
+      group_id: Number(groupId),
+      user_id: Number(userId),
+      no_cache: false
     });
-    const data = await res.json();
     return data.data?.card || data.data?.nickname || null;
-  } catch (e) { return null; }
+  } catch (e) { 
+    return null; 
+  }
 }
 
 export default {
@@ -137,18 +140,20 @@ export default {
     const msg = render(key, { qq: qqValue, operator: opValue });
     if (!msg) return;
 
-    const payload = {
-      action: 'send_msg',
-      params: {
-        message_type: 'group',
-        group_id: e.groupId,
-        message: parseMessage(msg),
-      },
-    };
-
-    if (conn?.ws) {
-      conn.ws.send(JSON.stringify(payload));
-      console.log(`✅ [${key}] → 群 ${e.groupId}: ${msg}`);
+    // 🌟 核心升级：抛弃 conn.ws.send，全部走统一的 wsCall，自带超时和错误捕获
+    if (typeof globalThis.wsCall === 'function') {
+        try {
+            await globalThis.wsCall('send_msg', {
+                message_type: 'group',
+                group_id: Number(e.groupId),
+                message: parseMessage(msg),
+            });
+            console.log(`✅ [${key}] → 群 ${e.groupId}: ${msg}`);
+        } catch (err) {
+            console.error(`❌ [群事件] 发送消息到群 ${e.groupId} 失败: ${err.message}`);
+        }
+    } else {
+        console.error('❌ [群事件] wsCall 未就绪，无法发送消息');
     }
   },
 };

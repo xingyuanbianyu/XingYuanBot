@@ -19,3 +19,32 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+================================================================================
+附加条款 (Addendum) - 署名与品牌保护
+
+1. 衍生作品署名要求：
+任何基于本项目的修改、二次开发（Fork）或衍生作品，必须在项目说明文档（如 README.md）的显著位置，保留原作者 "XingYuan" 的名字以及原项目 "XingYuanBot" 的链接。
+你可以在自己的衍生作品中加入自己的名字，但不能抹除原作者的信息。
+
+2. 项目名称保护：
+本项目名称 "XingYuanBot"（星缘机器人）为原作者专属标识。
+未经原作者书面许可，任何人不得使用 "XingYuanBot" 或 "星缘机器人" 作为衍生作品/二次开发版本的主名称进行发布或商业推广。
+（你可以叫 "XXX-Bot"、"XingYuanBot-Plus"、"星缘二开版" 等，但必须加以区分，不得引起混淆）。
+
+3. 商业使用：
+允许将本项目用于商业目的（如付费代挂、商业群管等），但需自行承担一切合规与安全风险。
+
+================================================================================
+Addendum - Attribution & Brand Protection (English)
+
+1. Attribution for Derivative Works:
+Any modified versions, forks, or derivative works based on this project must prominently retain the original author's name "XingYuan" and a link to the original "XingYuanBot" repository in the README.md or equivalent documentation. You may add your own name, but you must not remove the original attribution.
+
+2. Brand Protection:
+The name "XingYuanBot" (and its Chinese equivalent "星缘机器人") is the exclusive identifier of the original author. 
+Without prior written permission, you may not use "XingYuanBot" or "星缘机器人" as the primary name for your derivative works or secondary development releases. (Derivative names like "XingYuanBot-Plus" or "XingYuanBot-Extended" are acceptable as long as they do not cause confusion).
+
+3. Commercial Use:
+Commercial use is permitted (e.g., paid hosting, commercial group management), but you assume all compliance and security risks.
+================================================================================

@@ -27,31 +27,49 @@ db.exec(`
 try { db.exec(`ALTER TABLE scheduler_tasks ADD COLUMN is_loop INTEGER DEFAULT 0`); } catch (e) {}
 
 let tickCount = 0;
+let configCache = {};
+
+// 🌟 优化4：使用文件监听替代 10 秒一次的无脑读盘
+try {
+    if (fs.existsSync(CONFIG_PATH)) {
+        configCache = yaml.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) || {};
+        fs.watch(CONFIG_PATH, () => {
+            try {
+                configCache = yaml.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) || {};
+                globalThis.print('[定时调度] 👀 配置文件已热更新');
+            } catch (e) {}
+        });
+    }
+} catch (e) {}
 
 // ================= 核心轮询器 =================
 setInterval(async () => {
     try {
-        const config = (() => {
-            try { return yaml.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) || {}; } catch (e) { return {}; }
-        })();
-        if (config.enabled === false) return;
+        if (configCache.enabled === false) return;
 
         tickCount++;
         if (tickCount % 6 === 0) {
             const count = db.prepare('SELECT COUNT(*) as c FROM scheduler_tasks').get().c;
-            globalThis.print(`[定时调度] 轮询器运行中... 共 ${count} 个任务`);
+            if (count > 0) globalThis.print(`[定时调度] 轮询运行中... 共 ${count} 个任务`);
         }
 
         const now = new Date();
         const todayStr = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
         
-        const tasks = db.prepare('SELECT * FROM scheduler_tasks').all();
+        // 🌟 优化1：只查询今天还没跑过的任务，减少 JS 运算
+        const tasks = db.prepare('SELECT * FROM scheduler_tasks WHERE last_run_date IS NULL OR last_run_date != ?').all(todayStr);
         if (tasks.length === 0) return;
 
-        for (const task of tasks) {
-            // 如果今天已经跑过了（不管是循环还是单次，只要跑过就跳过）
-            if (task.last_run_date === todayStr) continue;
+        // 🌟 优化2：智能获取当前活跃的 WS（兼容 server 和 client 模式）
+        const activeWs = globalThis._ws || 
+                         (globalThis._registry?.list?.values()?.next()?.value?.ws) || 
+                         null;
+                         
+        if (!activeWs || activeWs.readyState !== 1) {
+            return; 
+        }
 
+        for (const task of tasks) {
             const [th, tm] = task.trigger_time.split(':').map(Number);
             const taskDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), th, tm, 0);
             
@@ -61,20 +79,19 @@ setInterval(async () => {
             // 过了时间且在 3 小时内就触发
             if (diffMinutes >= 0 && diffMinutes <= 180) {
                 
-                if (!globalThis._ws || globalThis._ws.readyState !== 1) {
-                    globalThis.print(`[定时调度] ⏳ 准备触发，但 WS 未连接，等待 10 秒后重试...`);
-                    continue; 
-                }
-
                 globalThis.print(`\n========================================`);
-                globalThis.print(`[定时调度] 🎯 触发任务! 群:${task.group_id} 指令:${task.command} (循环:${task.is_loop === 1 ? '开' : '关'})`);
+                globalThis.print(`[定时调度] 🎯 触发任务! 群:${task.group_id} 指令:${task.command}`);
                 globalThis.print(`========================================\n`);
                 
                 let userRole = 'member';
                 let userNick = '定时任务';
                 
                 try {
-                    const memberRes = await fetch(`http://127.0.0.1:3000/get_group_member_info?group_id=${task.group_id}&user_id=${task.creator_id}`);
+                    // 获取群成员信息（加了超时防止卡死）
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), 3000);
+                    const memberRes = await fetch(`http://127.0.0.1:3000/get_group_member_info?group_id=${task.group_id}&user_id=${task.creator_id}`, { signal: controller.signal });
+                    clearTimeout(timeoutId);
                     const memberData = await memberRes.json();
                     if (memberData && memberData.data) {
                         if (memberData.data.role) userRole = memberData.data.role; 
@@ -105,26 +122,23 @@ setInterval(async () => {
                 };
 
                 if (typeof globalThis.handleIncomingMessage === 'function') {
-                    globalThis.print(`[定时调度] 🚀 正在注入伪消息给框架...`);
                     try {
-                        globalThis.handleIncomingMessage(JSON.stringify(fakeMsgData), globalThis._ws, globalThis._registry, globalThis._plugins);
+                        // 注入
+                        globalThis.handleIncomingMessage(JSON.stringify(fakeMsgData), activeWs, globalThis._registry, globalThis._plugins);
                         
-                        // 🌟 执行后处理：
+                        // 🌟 优化3：无论成功与否，标记为已跑，防止报错导致无限重试
                         if (task.is_loop === 1) {
-                            // 循环任务：更新最后执行时间，明天继续
                             db.prepare('UPDATE scheduler_tasks SET last_run_date = ? WHERE id = ?').run(todayStr, task.id);
-                            globalThis.print(`[定时调度] ✅ 注入完成 (循环任务已保留)`);
                         } else {
-                            // 单次任务：直接删除
                             db.prepare('DELETE FROM scheduler_tasks WHERE id = ?').run(task.id);
-                            globalThis.print(`[定时调度] ✅ 注入完成 (单次任务已自动销毁)`);
                         }
+                        globalThis.print(`[定时调度] ✅ 注入完成`);
                         
                     } catch (e) {
                         globalThis.print(`[定时调度] ❌ 注入伪消息失败: ${e.message}`);
+                        // 即使失败，也标记今天跑过了，防止 10 秒后疯狂刷屏报错
+                        db.prepare('UPDATE scheduler_tasks SET last_run_date = ? WHERE id = ?').run(todayStr, task.id);
                     }
-                } else {
-                    globalThis.print(`[定时调度] ❌ 致命错误: 找不到 handleIncomingMessage 回调!`);
                 }
             }
         }
