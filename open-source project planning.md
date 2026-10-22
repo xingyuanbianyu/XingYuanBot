@@ -37,7 +37,7 @@ XingYuanBot 项目根目录
    │       │              ├─index.js 子插件启动器
    │       │              ├─config.yaml 子插件配置文件
    │       │              └─plugin 子插件目录
-   │       │                  └─index.jsl 群打卡插件
+   │       │                  └─index.js 群打卡插件
    │       └─QQ QQ专属功能插件
    │            ├─group-plugin (原qroup-plugin) 群管插件
    │            │      ├─rule.json 规则文件

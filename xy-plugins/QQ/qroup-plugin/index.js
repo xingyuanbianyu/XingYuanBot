@@ -39,7 +39,6 @@ try {
     botConfig = parseYaml(fs.readFileSync(yamlPath, 'utf8')) || {};
 } catch (e) {}
 
-// 🌟 辅助函数：检查 Bot 自身是否是管理员或群主 (全部使用 wsCall)
 async function checkBotRole(chatId) {
     if (typeof globalThis.wsCall !== 'function') return false;
     try {
@@ -76,25 +75,54 @@ const myCommands = [
   { cmd: '清理潜水 [天数] -y', desc: '清理潜水成员' }
 ];
 
+// 🌟 重写帮助注入逻辑：增量更新，防止重复和报错
 function injectHelp() {
-  if (!fs.existsSync(MENU_PATH)) return;
+  if (!fs.existsSync(MENU_PATH)) {
+      console.error(`❌ [群管] 找不到 menu.json，路径: ${MENU_PATH}`);
+      return;
+  }
   try {
     let menu = JSON.parse(fs.readFileSync(MENU_PATH, 'utf-8'));
-    const existingCmds = Object.values(menu.commands || {}).map(v => v.cmd);
-    if (myCommands.every(c => existingCmds.includes(c.cmd))) return;
-    let maxId = Math.max(0, ...Object.keys(menu.commands || {}).map(k => parseInt(k) || 0));
-    const myIds = [];
-    for (const item of myCommands) {
-      maxId++;
-      if (!menu.commands) menu.commands = {};
-      menu.commands[maxId] = { cmd: item.cmd, desc: item.desc };
-      myIds.push(maxId);
-    }
+    if (!menu.commands) menu.commands = {};
     if (!menu.categories) menu.categories = [];
-    menu.categories.push({ name: '群管', description: '群管理', color: '#459c5f', items: myIds });
+
+    let maxId = Math.max(0, ...Object.keys(menu.commands).map(k => parseInt(k) || 0));
+    const existingCmds = Object.values(menu.commands).map(v => v.cmd);
+    const newAddedIds = [];
+
+    // 1. 逐个检查并添加指令
+    for (const item of myCommands) {
+        if (!existingCmds.includes(item.cmd)) {
+            maxId++;
+            menu.commands[maxId] = { cmd: item.cmd, desc: item.desc };
+            newAddedIds.push(maxId);
+        }
+    }
+
+    // 2. 如果没有新指令，直接跳过
+    if (newAddedIds.length === 0) return;
+
+    // 3. 找到或创建“群管”分类
+    let groupManageCategory = menu.categories.find(c => c.name === '群管');
+    if (groupManageCategory) {
+        // 存在则追加
+        groupManageCategory.items = [...new Set([...groupManageCategory.items, ...newAddedIds])];
+    } else {
+        // 不存在则新建
+        menu.categories.push({
+            name: '群管',
+            description: '群管理（管理员及以上可用）',
+            color: '#459c5f',
+            items: newAddedIds
+        });
+    }
+
     menu.version = (menu.version || 0) + 1;
     fs.writeFileSync(MENU_PATH, JSON.stringify(menu, null, 4), 'utf-8');
-  } catch (e) {}
+    console.log(`✅ [群管] 帮助信息已更新，新增 ${newAddedIds.length} 条指令，版本: ${menu.version}`);
+  } catch (e) {
+    console.error(`❌ [群管] 注入帮助信息失败: ${e.message}`);
+  }
 }
 injectHelp();
 
@@ -104,7 +132,6 @@ function parseText(text) {
   return String(text || '');
 }
 
-// 🌟 核心升级：使用 wsCall 发送合并转发
 async function sendForwardMsg(chatId, isGroup, title, msgList) {
     if (typeof globalThis.wsCall !== 'function') return false;
     const nodes = msgList.map(m => ({
@@ -185,7 +212,6 @@ export default {
     if (!cmd) return false;
     let textStr = parseText(text).trim();
 
-    // 提取发送者权限 (使用 wsCall)
     let isGroupAdmin = false;
     if (typeof globalThis.wsCall === 'function') {
         try {
@@ -200,7 +226,7 @@ export default {
     const isMaster = (role === 'master' || (typeof getRole === 'function' && getRole(senderQQ) === 'master'));
 
     // ==========================================
-    // 🌟 撤回指令
+    // 撤回指令
     // ==========================================
     if (cmd.startsWith('撤回')) {
         if (!isGroup) return '❌ 该指令仅限群聊使用';
@@ -446,7 +472,6 @@ export default {
                             successCount++;
                         }
                     } catch (e) {}
-                    // 安全兜底 sleep
                     const sleepFn = globalThis.sleep || ((ms) => new Promise(r => setTimeout(r, ms)));
                     if (i < winners.length - 1) await sleepFn(1200); 
                 }

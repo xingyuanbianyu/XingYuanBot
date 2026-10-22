@@ -74,6 +74,10 @@ export default {
             if (!refId) return '⚠️ 未找到引用ID，请回复需要撤回的消息后使用 #撤回';
             if (typeof globalThis.wsCall !== 'function') return '❌ 框架底层未就绪';
 
+            // 🌟 核心新增：撤回前先检查 Bot 是否有管理员权限
+            const checkResult = await checkBotPermission(chatId);
+            if (checkResult !== true) return checkResult;
+
             try {
                 // 撤回引用的消息
                 await globalThis.wsCall('delete_msg', { message_id: refId });
