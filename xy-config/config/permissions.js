@@ -9,24 +9,19 @@ const CONFIG_PATH = path.join(__dirname, './config.yaml');
 // 模板文件路径
 const EXAMPLE_PATH = path.join(__dirname, './config.yaml.example');
 
-// 定义一个安全的默认配置结构
-const DEFAULT_CONFIG = {
-    permissions: {
-        owners: {},
-        admins: {},
-        permission_switch: {}
-    }
-};
-
-// 初始化缓存，防止 loadConfig 第一次执行前报错
-let cache = JSON.parse(JSON.stringify(DEFAULT_CONFIG));
+let cache = null;
+let lastMtime = 0; // 记录文件最后修改时间，用于判断是否需要热更新
 
 /**
  * 初始化配置文件
+ * 逻辑：如果 config.yaml 不存在，尝试复制 example，否则创建默认配置
  */
 function initConfigFile() {
+    // 1. 检查主配置文件是否存在
     if (!fs.existsSync(CONFIG_PATH)) {
         console.log('检测到配置文件缺失，正在尝试初始化...');
+
+        // 2. 尝试寻找 example 模板
         if (fs.existsSync(EXAMPLE_PATH)) {
             try {
                 const content = fs.readFileSync(EXAMPLE_PATH, 'utf-8');
@@ -36,96 +31,90 @@ function initConfigFile() {
                 console.error('复制模板文件失败:', e);
             }
         } else {
-            fs.writeFileSync(CONFIG_PATH, yaml.stringify(DEFAULT_CONFIG), 'utf-8');
+            // 3. 如果没有模板，创建一个最基础的默认配置
+            const defaultConfig = {
+                permissions: {
+                    owners: {},
+                    admins: {},
+                    owner_permission: {} // 修正了这里的键名以匹配下面getRole的逻辑
+                }
+            };
+            fs.writeFileSync(CONFIG_PATH, yaml.stringify(defaultConfig), 'utf-8');
             console.log('未找到模板，已创建默认 config.yaml');
         }
     }
 }
 
 /**
- * 重新加载配置（只在初始化或文件变动时调用）
+ * 加载配置 (支持热更新)
  */
-function reloadConfig() {
-    initConfigFile(); // 确保文件存在
+function loadConfig() {
+    // 每次加载前，确保文件存在（防止报错）
+    initConfigFile();
+
     try {
-        const content = fs.readFileSync(CONFIG_PATH, 'utf-8');
-        const parsed = yaml.parse(content);
-        
-        // 防空兜底：如果解析为空，或者没有 permissions 节点，给予默认结构
-        if (parsed && typeof parsed === 'object') {
-            cache = parsed;
-            if (!cache.permissions) {
-                cache.permissions = { owners: {}, admins: {}, permission_switch: {} };
-            } else {
-                // 确保内部的三个子节点也存在
-                if (!cache.permissions.owners) cache.permissions.owners = {};
-                if (!cache.permissions.admins) cache.permissions.admins = {};
-                if (!cache.permissions.permission_switch) cache.permissions.permission_switch = {};
-            }
+        // 获取文件状态信息
+        const stats = fs.statSync(CONFIG_PATH);
+        const currentMtime = stats.mtimeMs;
+
+        // 【核心优化】：如果缓存存在，且文件最后修改时间没变，直接用缓存，不再读盘
+        if (cache && currentMtime === lastMtime) {
+            return cache;
         }
+
+        // 如果文件被修改过，或者第一次加载，重新读取内容
+        const content = fs.readFileSync(CONFIG_PATH, 'utf-8');
+        cache = yaml.parse(content);
+        lastMtime = currentMtime; // 更新记录的最后修改时间
+
+        // 可选：在控制台打印提示，让你知道热更新生效了
+        // console.log('🔄 配置文件已重新加载！');
+        
+        return cache;
     } catch (e) {
-        console.error('❌ 配置文件解析失败，请检查YAML格式:', e);
-        // 解析失败时，保留旧的 cache，不覆盖，防止机器人直接崩溃
+        console.error('配置文件解析失败，请检查格式:', e);
+        return cache || {}; // 返回旧的缓存或空对象防止后续报错
     }
 }
 
-// ================= 初始加载与热更新监听 =================
-
-// 1. 启动时先执行一次初始加载
-reloadConfig();
-
-// 2. 监听文件变化，实现热更新（不需要重启机器人）
-fs.watch(CONFIG_PATH, (eventType) => {
-    if (eventType === 'change') {
-        // 延迟 100 毫秒执行，防止记事本/编辑器保存瞬间出现空文件导致读取失败
-        setTimeout(() => {
-            console.log('🔄 检测到 config.yaml 变动，已自动重新加载配置...');
-            reloadConfig();
-        }, 100);
-    }
-});
-
-// ================= 对外暴露的权限接口 =================
-
 // 获取某人的实际可用角色（考虑权限开关）
 export function getRole(qq) {
-    const qqStr = String(qq);
-    const config = cache; // 直接使用内存中的 cache，性能极高
+  const qqStr = String(qq);
+  const config = loadConfig();
+  const owners = config.permissions?.owners || {};
+  const permStatus = config.permissions?.owner_permission || {};
 
-    const owners = config.permissions.owners || {};
-    const permStatus = config.permissions.permission_switch || {};
 
-    // 检查是否是主人
-    if (owners[qqStr] !== undefined) {
-        if (owners[qqStr] === true || owners[qqStr] === 'true') {
-            return 'master'; // 大主人，永远可用
-        } else {
-            // 小主人：检查权限状态，0=不可用，1或未配置=可用
-            // 【修复】使用 Number() 转换，兼容 0 和 "0" 两种写法
-            if (Number(permStatus[qqStr]) === 0) {
-                return 'member'; // 权限关闭，当作普通成员
-            }
-            return 'owner'; // 权限开启，小主人
-        }
+  // 检查是否是主人
+  if (owners[qqStr] !== undefined) {
+    if (owners[qqStr] === true || owners[qqStr] === 'true') {
+      return 'master'; // 大主人，永远可用
+    } else {
+      // 小主人：检查权限状态，0=不可用，1或未配置=可用
+      if (permStatus[qqStr] === 0) {
+        return 'member'; // 权限关闭，当作普通成员
+      }
+      return 'owner'; // 权限开启，小主人
     }
+  }
 
-    // 检查是否是管理员
-    if (config.permissions.admins && config.permissions.admins[qqStr] !== undefined) {
-        return 'admin';
-    }
+  // 检查是否是管理员
+  if (config.permissions?.admins && config.permissions.admins[qqStr] !== undefined) {
+    return 'admin';
+  }
 
-    // 默认普通成员
-    return 'member';
+  // 默认普通成员
+  return 'member';
 }
 
 // 检查是否有权限（true=有权限，false=无权限）
 export function hasPermission(qq, requiredRole) {
-    const role = getRole(qq);
-    const roleLevel = {
-        'member': 0,
-        'admin': 1,
-        'owner': 2,
-        'master': 3
-    };
-    return roleLevel[role] >= roleLevel[requiredRole];
+  const role = getRole(qq);
+  const roleLevel = {
+    'member': 0,
+    'admin': 1,
+    'owner': 2,
+    'master': 3
+  };
+  return roleLevel[role] >= roleLevel[requiredRole];
 }
