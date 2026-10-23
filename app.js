@@ -6,7 +6,8 @@ import yaml from 'yaml';
 
 import { loadNetworkConfig, startNetwork } from './xy-bot/network.js';
 import { AdapterRegistry } from './xy-bot/adapter-registry.js';
-import { loadPlugins } from './xy-bot/plugin-loader.js';
+// 🌟 引入 clearPluginCache 和 hotReloadPlugin
+import { loadPlugins, clearPluginCache, hotReloadPlugin } from './xy-bot/plugin-loader.js';
 import { startBot } from './xy-bot/bot.js';
 
 import { isQQAllowed, isGroupAllowed } from './xy-bot/config.js';
@@ -46,6 +47,8 @@ globalThis.botInfo = { qq: '10000' };
 let processedMessages = [];
 const MAX_CACHE_SIZE = 2000;
 const interactiveSessions = new Map();
+// 🌟 核心修复：暴露给全局，让验证插件能往里面塞人！
+globalThis._interactiveSessions = interactiveSessions; 
 
 let cmdConfig = { enable: true, prefixes: ['#', '/'] };
 let whitelistConfig = { enable: false, list: [] };
@@ -410,7 +413,28 @@ async function main() {
   globalThis._registry = registry;
   globalThis._plugins = plugins;
 
-  // 5. 启动网络监听/连接
+  // 🌟 5. 核心挂载：让指令插件的“重载”功能生效
+  globalThis._xyReloadPlugins = async (pluginName) => {
+      try {
+          if (pluginName && typeof hotReloadPlugin === 'function') {
+              // 单插件热重载
+              await hotReloadPlugin(pluginName, registry);
+              return [pluginName];
+          } else {
+              // 全量重载
+              if (typeof clearPluginCache === 'function') clearPluginCache();
+              const result = await loadPlugins(registry);
+              // 必须更新全局的插件数组，否则主分发逻辑用的还是旧数组
+              globalThis._plugins = result.plugins;
+              return result.plugins;
+          }
+      } catch (e) {
+          globalThis.print(`[重载失败] ${e.message}`);
+          return [];
+      }
+  };
+
+  // 6. 启动网络监听/连接
   if (netConfigs.length > 0) {
       const connections = await startNetwork(
         netConfigs,
@@ -422,7 +446,7 @@ async function main() {
       globalThis.print('⚠️ 未找到网络配置文件，跳过网络启动。');
   }
 
-  // 6. 启动 Web 面板
+  // 7. 启动 Web 面板
   startWebPanel({
       registry,
       plugins,
@@ -433,7 +457,7 @@ async function main() {
 
   globalThis.print('\n✅ 主控与网页面板均启动完成。\n');
   
-  // 7. 启动终端保活 CLI
+  // 8. 启动终端保活 CLI
   startBot();
 }
 

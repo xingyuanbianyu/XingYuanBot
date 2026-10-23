@@ -90,7 +90,6 @@ function injectHelp() {
     const existingCmds = Object.values(menu.commands).map(v => v.cmd);
     const newAddedIds = [];
 
-    // 1. 逐个检查并添加指令
     for (const item of myCommands) {
         if (!existingCmds.includes(item.cmd)) {
             maxId++;
@@ -99,16 +98,12 @@ function injectHelp() {
         }
     }
 
-    // 2. 如果没有新指令，直接跳过
     if (newAddedIds.length === 0) return;
 
-    // 3. 找到或创建“群管”分类
     let groupManageCategory = menu.categories.find(c => c.name === '群管');
     if (groupManageCategory) {
-        // 存在则追加
         groupManageCategory.items = [...new Set([...groupManageCategory.items, ...newAddedIds])];
     } else {
-        // 不存在则新建
         menu.categories.push({
             name: '群管',
             description: '群管理（管理员及以上可用）',
@@ -212,6 +207,7 @@ export default {
     if (!cmd) return false;
     let textStr = parseText(text).trim();
 
+    // 🌟 核心：计算用户真实权限
     let isGroupAdmin = false;
     if (typeof globalThis.wsCall === 'function') {
         try {
@@ -222,8 +218,13 @@ export default {
     }
     
     const configAdmin = ['master', 'owner', 'admin'];
-    let hasPermission = isGroupAdmin || configAdmin.includes(role) || (typeof getRole === 'function' && configAdmin.includes(getRole(senderQQ)));
-    const isMaster = (role === 'master' || (typeof getRole === 'function' && getRole(senderQQ) === 'master'));
+    
+    // 这里的 realRole 就是读取配置文件得到的大主人身份！
+    const realRole = (typeof getRole === 'function') ? getRole(senderQQ) : role;
+    
+    // 只要有群管理权限，或者全局身份是 admin/owner/master，就有权限
+    let hasPermission = isGroupAdmin || configAdmin.includes(realRole);
+    const isMaster = (realRole === 'master');
 
     // ==========================================
     // 撤回指令
@@ -650,6 +651,7 @@ export default {
       } catch (err) { return `❌ 请求失败：${err.message}`; }
     }
 
+
      // ==========================================
     // 群公告相关
     // ==========================================
@@ -714,35 +716,42 @@ export default {
     }
 
     // ==========================================
-    // 改头衔 / 申请头衔
+    // 改头衔 (给别人改)
     // ==========================================
     if (cmd.startsWith('改头衔')) {
         let targetToChange = targetQQ;
         let isSelfChange = false;
         if (!targetToChange) { targetToChange = String(senderQQ); isSelfChange = true; }
+    
         let newTitle = cmd.replace(/^改头衔\s*/, '').trim().replace(/@\{at:\d+\}/g, '').replace(/@\S+\s*/g, '').trim();
         if (!newTitle) return '❌ 请输入要设置的头衔内容，例如：改头衔 @某人 大佬';
         if (newTitle.length > 18) return '❌ 头衔过长：最多 18 个字符';
         
         let isGroupOwner = false;
+        let isGroupAdmin = false;
         try {
             const res = await globalThis.wsCall('get_group_member_info', { group_id: Number(chatId), user_id: Number(senderQQ) });
             const rawRole = res?.data?.role;
             if (rawRole === 'owner') isGroupOwner = true;
             if (rawRole === 'admin') isGroupAdmin = true;
         } catch (e) {}
-        if (!isSelfChange && !isGroupOwner && !isGroupAdmin && !['master', 'owner'].includes(role)) return '❌ 权限不足：改别人头衔需要群主、群管或主人权限。';
-        
+
+        // 权限判断：大主人、群主、群管都可以用
+        let checkRole = (typeof getRole === 'function') ? getRole(senderQQ) : 'member';
+        if (!isSelfChange && !isGroupOwner && !isGroupAdmin && !['master', 'owner', 'admin'].includes(checkRole)) {
+            return `❌ 权限不足！系统识别你的身份为: ${checkRole}，QQ: ${senderQQ}`;
+        }
+    
         if (!isSelfChange) {
             const loginData = await globalThis.wsCall('get_login_info');
             const botQQ = loginData?.data?.user_id;
             const botInfoData = await globalThis.wsCall('get_group_member_info', { group_id: Number(chatId), user_id: Number(botQQ) });
-            if (botInfoData?.data?.role !== 'owner') return '❌ Bot权限不足：需要是群主才能修改他人头衔。';
+            if (botInfoData?.data?.role !== 'owner') return '❌ Bot权限不足：机器人需要是群主才能修改他人头衔。';
         }
 
         try {
             const res = await globalThis.wsCall('set_group_special_title', { group_id: Number(chatId), user_id: Number(targetToChange), special_title: newTitle, duration: -1 });
-            if (res.status === 'ok' || res.retcode === 0) {
+            if (res?.status === 'ok' || res?.retcode === 0) {
                 if (!targetName && !isSelfChange) {
                     try {
                         const memData = await globalThis.wsCall('get_group_member_info', { group_id: Number(chatId), user_id: Number(targetToChange) });
@@ -751,25 +760,46 @@ export default {
                 }
                 return `✅ 已将 ${isSelfChange ? '你' : (targetName || `@${targetToChange}`)} 的头衔修改为「${newTitle}」`;
             }
-            return `❌ 修改失败：${res.msg || res.message || '未知错误'}`;
+            return `❌ 修改失败：${res?.msg || res?.message || '未知错误'}`;
         } catch (err) { return `❌ 请求失败：${err.message}`; }
     }
 
+    // ==========================================
+    // 申请头衔 (给自己改)
+    // ==========================================
     if (cmd.startsWith('申请头衔') || cmd.startsWith('头衔')) {
         const titleContent = cmd.replace(/^(申请头衔|头衔)\s*/, '').trim();
         if (!titleContent) return '⚠️ 用法：申请头衔 头衔内容';
-        
-        const loginData = await globalThis.wsCall('get_login_info');
-        const botQQ = loginData?.data?.user_id;
+    
         try {
-            const botInfoData = await globalThis.wsCall('get_group_member_info', { group_id: Number(chatId), user_id: Number(botQQ) });
-            if (botInfoData?.data?.role !== 'owner') return '❌ Bot权限不足：机器人不是群主，无法设置头衔。';
-        } catch (e) { return '❌ 无法查询机器人权限。'; }
+            const loginData = await globalThis.wsCall('get_login_info');
+            const botQQ = loginData?.data?.user_id;
+            if (!botQQ) return '❌ 无法获取 Bot 账号信息';
 
-        try {
-            const res = await globalThis.wsCall('set_group_special_title', { group_id: Number(chatId), user_id: Number(senderQQ), special_title: titleContent, duration: -1 });
-            return (res.status === 'ok' || res.retcode === 0) ? `✅ 已成功将你的头衔设置为：【${titleContent}】` : `❌ 设置头衔失败：${res.msg || res.message}`;
-        } catch (err) { return `❌ 请求失败：${err.message}`; }
+            const botInfoData = await globalThis.wsCall('get_group_member_info', { group_id: Number(chatId), user_id: Number(botQQ) });
+            if (botInfoData?.data?.role !== 'owner') {
+                return '❌ 操作失败：Bot 当前不是群主，无法设置头衔。';
+           }
+
+           const res = await globalThis.wsCall('set_group_special_title', { 
+               group_id: Number(chatId), 
+                user_id: Number(senderQQ), 
+                special_title: titleContent, 
+                duration: -1 
+           });
+        
+           console.log(`[申请头衔] 接口返回:`, JSON.stringify(res));
+
+           if (res && (res.status === 'ok' || res.retcode === 0)) {
+               return `✅ 已成功将你的头衔设置为：【${titleContent}】`;
+           } else {
+               const errMsg = res?.msg || res?.message || res?.wording || JSON.stringify(res) || '未知错误（接口返回为空）';
+               return `❌ 设置头衔失败：${errMsg}`;
+           }
+        } catch (err) {
+            console.error(`[申请头衔] 异常崩溃:`, err);
+            return `❌ 请求异常：${err.message}`;
+        }
     }
 
     return '';

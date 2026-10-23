@@ -18,10 +18,16 @@ export default class OneBotAdapter {
 
   /** 平台 → 通用（OneBot 原始包转标准消息） */
   toStandard(raw) {
-    // 事件通知 → 走事件链路，不进消息链路
+    // 1. 事件通知 → 走事件链路，不进消息链路
     if (raw.post_type === 'notice') {
       this.handleNotice(raw);
-      return null; // 触发完事件后直接返回 null，交给 app.js 丢弃
+      return null; 
+    }
+
+    // 🌟 核心新增：处理 request 事件（加好友、加群）
+    if (raw.post_type === 'request') {
+      this.handleRequest(raw);
+      return null; 
     }
 
     if (raw.post_type !== 'message' && raw.post_type !== 'message_sent') return null;
@@ -125,11 +131,24 @@ export default class OneBotAdapter {
     return null;
   }
 
+  /** 订阅事件 */
   onEvent(event, handler) {
     if (!this.eventHandlers.has(event)) this.eventHandlers.set(event, new Set());
     this.eventHandlers.get(event).add(handler);
   }
+  
+  /** 解绑事件 */
+  offEvent(event, handler = null) {
+    const handlers = this.eventHandlers.get(event);
+    if (!handlers) return;
+    if (handler) {
+        handlers.delete(handler);
+    } else {
+        handlers.clear();
+    }
+  }
 
+  /** 触发事件 */
   emitEvent(event, payload) {
     const handlers = this.eventHandlers.get(event);
     if (!handlers) return;
@@ -138,6 +157,7 @@ export default class OneBotAdapter {
     }
   }
 
+  /** 处理 notice 事件 */
   handleNotice(raw) {
     if (raw.post_type !== 'notice') return;
 
@@ -156,11 +176,31 @@ export default class OneBotAdapter {
       const ev = raw.sub_type === 'kick' ? 'group.kick' : 'group.decrease';
       this.emitEvent(ev, basePayload);
     } 
-    // 🌟 核心：补全撤回事件的发射
     else if (raw.notice_type === 'group_recall') {
       this.emitEvent('group.recall', basePayload);
     } else if (raw.notice_type === 'friend_recall') {
       this.emitEvent('friend.recall', basePayload);
+    }
+  }
+
+  /** 🌟 核心新增：处理 request 事件（加群/加好友） */
+  handleRequest(raw) {
+    if (raw.post_type !== 'request') return;
+
+    const basePayload = {
+      groupId: raw.group_id, // 如果是加好友，group_id 是 undefined
+      userId: raw.user_id,
+      comment: raw.comment || '',
+      flag: raw.flag,
+      subType: raw.sub_type, // add 或 invite
+      selfId: String(raw.self_id || ''),
+      raw: raw 
+    };
+
+    if (raw.request_type === 'group') {
+      this.emitEvent('group.request', basePayload);
+    } else if (raw.request_type === 'friend') {
+      this.emitEvent('friend.request', basePayload);
     }
   }
 }

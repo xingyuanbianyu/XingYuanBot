@@ -1,0 +1,35 @@
+# 是否开启
+enabled: true
+
+# 验证超时时间（秒）
+timeout: 300
+
+# 验证方式默认值：math (算术题) / code (随机数字)
+verify_type: "math"
+
+# 验证码长度 (仅当 verify_type 为 code 时生效)
+code_length: 8
+
+# ==========================================
+# 提示语自定义配置 (支持 {变量} 动态替换)
+# ==========================================
+messages:
+  # 提问前缀
+  question_prompt: "请在 {timeout} 秒内回答下面的问题："
+  # 答题期间的警告提示
+  warning: "(答题期间发送其他内容会被撤回，连续答错或超时将被踢出)"
+  
+  # 验证成功
+  verify_success: " 验证成功！欢迎加入本群。"
+  # 答错时的警告 (变量: {wrongCount})
+  wrong_answer: " ⚠️ 验证码错误，请直接发送数字答案！(警告 {wrongCount}/3)"
+  
+  # 超时踢出提示 (变量: {nickname}, {userId})
+  timeout_kick: "⏰ 用户 {nickname}({userId}) 未在规定时间内完成验证，已自动踢出。"
+  # 连续答错踢出提示 (变量: {nickname}, {userId})
+  max_wrong_kick: "❌ 用户 {nickname}({userId}) 连续验证失败，已自动踢出。"
+  
+  # 强制跳过提示 (变量: {nickname}, {userId})
+  skip_success: "✅ 已强制跳过用户 {nickname}({userId}) 的验证。"
+  # 重新验证提示 (变量: {nickname}, {userId})
+  reverify_success: "✅ 已重新对 {nickname}({userId}) 发起验证。"

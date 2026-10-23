@@ -1,0 +1,9 @@
+{
+  "name": "入群申请",
+  "version": "1.0.0",
+  "author": "Bot",
+  "description": "拦截并通知入群申请，支持引用同意/拒绝",
+  "type": "event",
+  "priority": 1,
+  "enable": true
+}

@@ -443,7 +443,7 @@ export default {
             return '❌ 权限不足：仅主人可执行重载操作。';
           }
           try {
-            const loaderURL = new URL('../../xy-bot/plugin-loader.js', import.meta.url).href;
+            const loaderURL = new URL('../../../xy-bot/plugin-loader.js', import.meta.url).href;
             const { loadPlugins } = await import(loaderURL);
             if (typeof globalThis._xyReloadPlugins === 'function') {
               const reloaded = await globalThis._xyReloadPlugins();

@@ -1,0 +1,9 @@
+{
+  "name": "入群验证",
+  "version": "1.0.0",
+  "author": "Bot",
+  "description": "新人进群自动禁言并回答问题验证，防广告机",
+  "type": "event",
+  "priority": 1,
+  "enable": true
+}
