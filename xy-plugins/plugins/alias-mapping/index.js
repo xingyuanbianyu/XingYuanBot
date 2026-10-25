@@ -1,4 +1,3 @@
-// xy-plugins/plugins/alias-mapping/index.js
 import fs from 'fs';
 import path from 'path';
 import yaml from 'yaml';
@@ -8,7 +7,7 @@ import { getRole } from '../../../xy-config/config/permissions.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DB_PATH = path.join(__dirname, 'alias.db');
-const GLOBAL_CONFIG_PATH = path.join(process.cwd(), 'xy-config/config/config.yaml');
+const GLOBAL_CONFIG_PATH = path.resolve(__dirname, '../../../xy-config/config.yaml');
 
 const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
@@ -43,7 +42,6 @@ function cleanPrefix(str) {
 export default {
     name: '指令映射',
     
-    // 🌟 统一指令入口
     match(text) {
         if (!text || typeof text !== 'string') return false;
         const cmd = text.trim();
@@ -54,29 +52,26 @@ export default {
         if (!msg.isGroup) return false;
 
         let cmd = (msg.pureText || "").trim();
-        const dynamicPrefixes = ['/', '$', '#', '!', '。'];
-        for (const p of dynamicPrefixes) {
-            if (cmd.startsWith(p)) { cmd = cmd.slice(p.length).trim(); break; }
-        }
-
         const groupId = String(msg.chatId);
         const senderQQ = String(msg.senderQQ);
+        const ws = msg._ws; 
         
-        // ==========================================
-        // 🌟 核心：动态判断发送者权限
-        // ==========================================
-        let isMaster = false;      // 大主人（全局权限）
-        let isLocalAdmin = false;  // 群管/小主人（局部权限）
+        let isMaster = false;      
+        let isLocalAdmin = false;  
         
         if (typeof getRole === 'function') {
-            const role = getRole(senderQQ);
+            // 🌟 补上 botId
+            const role = getRole(senderQQ, msg.botId);
             if (['master', 'owner'].includes(role)) isMaster = true;
             if (['admin'].includes(role)) isLocalAdmin = true;
         }
 
         if (!isMaster && !isLocalAdmin) {
             try {
-                const res = await globalThis.wsCall('get_group_member_info', { group_id: Number(groupId), user_id: Number(senderQQ) });
+                const res = await globalThis.wsCall('get_group_member_info', { 
+                    group_id: Number(groupId), 
+                    user_id: Number(senderQQ) 
+                }, 3000, ws);
                 if (['owner', 'admin'].includes(res?.data?.role)) isLocalAdmin = true;
             } catch (e) {}
         }
@@ -86,11 +81,11 @@ export default {
         }
 
         // ==========================================
-        // 1. 添加映射 (自动判断存全局还是局部)
+        // 1. 添加映射
         // ==========================================
         if (cmd.startsWith('指令映射')) {
             const rawArgs = cmd.replace('指令映射', '').trim();
-            if (!rawArgs) return '⚠️ 用法：指令映射 [原指令] [新指令]\n例如：指令映射 随机抽人 抽人';
+            if (!rawArgs) return '⚠️ 用法：指令映射 [原指令] [新指令]';
 
             let original, alias;
             const quoteMatch = rawArgs.match(/^(.*?)\s*["'](.*?)["']$/);
@@ -99,7 +94,7 @@ export default {
                 alias = quoteMatch[2].trim();
             } else {
                 const args = rawArgs.split(/\s+/);
-                if (args.length < 2) return '⚠️ 格式错误！至少需要两个词。\n例如：指令映射 随机抽人 抽人';
+                if (args.length < 2) return '⚠️ 格式错误！至少需要两个词。';
                 alias = args[args.length - 1];
                 original = args.slice(0, args.length - 1).join(' ');
             }
@@ -110,15 +105,23 @@ export default {
             if (!original || !alias) return '❌ 参数不能为空。';
             if (original === alias) return '❌ 原指令和新指令不能一样。';
 
-            // 🌟 自动分配作用域
+            const existingGlobal = db.prepare('SELECT original_cmd FROM group_aliases WHERE group_id = ? AND alias_cmd = ?').get('global', alias);
+            const existingLocal = db.prepare('SELECT original_cmd FROM group_aliases WHERE group_id = ? AND alias_cmd = ?').get(groupId, alias);
+
             if (isMaster) {
                 db.prepare('INSERT OR REPLACE INTO group_aliases (group_id, alias_cmd, original_cmd) VALUES (?, ?, ?)').run('global', alias, original);
-                if (globalThis._commandAliases) globalThis._commandAliases.set(`global_${alias}`, original);
-                return `✅ 【全局映射】成功！\n(您是大主人) 任何群发送【${alias}】都会执行【${original}】。`;
+                // 🌟 呼叫主框架重新读取数据库
+                if (typeof globalThis._loadCommandAliases === 'function') await globalThis._loadCommandAliases();
+                
+                const overridden = existingGlobal ? `（覆盖了旧全局映射 ${existingGlobal.original_cmd}）` : '';
+                return `✅ 【全局映射】成功！${overridden}\n(您是大主人) 任何群发送【${alias}】都会执行【${original}】。`;
             } else if (isLocalAdmin) {
                 db.prepare('INSERT OR REPLACE INTO group_aliases (group_id, alias_cmd, original_cmd) VALUES (?, ?, ?)').run(groupId, alias, original);
-                if (globalThis._commandAliases) globalThis._commandAliases.set(`${groupId}_${alias}`, original);
-                return `✅ 【局部映射】成功！\n(您是群管) 本群发送【${alias}】将执行【${original}】。`;
+                // 🌟 呼叫主框架重新读取数据库
+                if (typeof globalThis._loadCommandAliases === 'function') await globalThis._loadCommandAliases();
+                
+                const overridden = existingLocal ? `（覆盖了旧局部映射 ${existingLocal.original_cmd}）` : '';
+                return `✅ 【局部映射】成功！${overridden}\n(您是群管) 本群发送【${alias}】将执行【${original}】。`;
             }
         }
 
@@ -133,27 +136,22 @@ export default {
             let deleted = false;
             let delType = '';
 
-            // 大主人尝试删全局
             if (isMaster) {
                 const info = db.prepare('DELETE FROM group_aliases WHERE group_id = ? AND alias_cmd = ?').run('global', alias);
-                if (info.changes > 0) {
-                    if (globalThis._commandAliases) globalThis._commandAliases.delete(`global_${alias}`);
-                    deleted = true;
-                    delType = '全局';
-                }
+                if (info.changes > 0) { deleted = true; delType = '全局'; }
             }
 
-            // 如果没删到全局（或者不是大主人），尝试删局部
             if (!deleted) {
                 const info = db.prepare('DELETE FROM group_aliases WHERE group_id = ? AND alias_cmd = ?').run(groupId, alias);
-                if (info.changes > 0) {
-                    if (globalThis._commandAliases) globalThis._commandAliases.delete(`${groupId}_${alias}`);
-                    deleted = true;
-                    delType = '局部';
-                }
+                if (info.changes > 0) { deleted = true; delType = '局部'; }
             }
 
-            return deleted ? `✅ 已删除【${delType}】映射【${alias}】。` : `⚠️ 找不到名为【${alias}】的映射。`;
+            if (deleted) {
+                // 🌟 呼叫主框架重新读取数据库
+                if (typeof globalThis._loadCommandAliases === 'function') await globalThis._loadCommandAliases();
+                return `✅ 已删除【${delType}】映射【${alias}】。`;
+            }
+            return `⚠️ 找不到名为【${alias}】的映射。`;
         }
 
         // ==========================================
@@ -165,21 +163,13 @@ export default {
 
             if (globalRows.length === 0 && localRows.length === 0) return '📭 暂无任何映射规则。';
 
-            let reply = `📊 指令映射列表：\n\n`;
-            
-            reply += `🌐 【全局映射】(大主人专属)\n`;
-            if (globalRows.length > 0) {
-                globalRows.forEach((r, i) => { reply += `  ${i + 1}. 【${r.alias_cmd}】 ➡️ 【${r.original_cmd}】\n`; });
-            } else {
-                reply += `  暂无\n`;
-            }
+            let reply = `📊 指令映射列表：\n\n🌐 【全局映射】\n`;
+            if (globalRows.length > 0) globalRows.forEach((r, i) => reply += `  ${i + 1}. 【${r.alias_cmd}】 ➡️ 【${r.original_cmd}】\n`);
+            else reply += `  暂无\n`;
 
             reply += `\n📍 【本群局部映射】\n`;
-            if (localRows.length > 0) {
-                localRows.forEach((r, i) => { reply += `  ${i + 1}. 【${r.alias_cmd}】 ➡️ 【${r.original_cmd}】\n`; });
-            } else {
-                reply += `  暂无\n`;
-            }
+            if (localRows.length > 0) localRows.forEach((r, i) => reply += `  ${i + 1}. 【${r.alias_cmd}】 ➡️ 【${r.original_cmd}】\n`);
+            else reply += `  暂无\n`;
 
             reply += `\n💡 发送指令时，优先匹配本群局部映射。`;
             return reply.trim();

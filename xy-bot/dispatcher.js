@@ -1,89 +1,158 @@
 // xy-bot/dispatcher.js
-// ✅ 插件分发器
-// 职责：遍历插件 → 调用 handler → 处理返回值 → 触发发送
-
-import { sendMessage } from './sender.js';
 
 export class PluginDispatcher {
   constructor(plugins) {
-    this.plugins = Array.isArray(plugins) ? plugins : [];
+    this._getPlugins = typeof plugins === 'function' ? plugins : () => plugins;
   }
 
-  // ========================
-  // 分发一条消息给所有插件
-  // ========================
-  async dispatch(msg) {
-    for (const plugin of this.plugins) {
+  get plugins() {
+    return this._getPlugins() ?? [];
+  }
+
+  async dispatch(msg, activePlugins, context = {}) {
+    const priorityPlugins = context.priorityPlugins || globalThis._priorityPlugins || new Set();
+    const interactiveSessions = context.interactiveSessions || globalThis._interactiveSessions || new Map();
+
+    const session = interactiveSessions.get(msg.senderQQ);
+    if (session && session.expireAt > Date.now()) {
+        const targetPlugin = activePlugins.find(p => (p.handler?.name || p.name) === session.pluginName);
+        if (targetPlugin) {
+            await this.runPlugin(targetPlugin, msg, context, true); 
+            return; 
+        }
+    }
+
+    for (const plugin of activePlugins) {
       if (!plugin || !plugin.handler) continue;
 
-      try {
-        const result = await this.runPlugin(plugin, msg);
+      const pluginName = plugin.handler.name || plugin.name || '未知';
+      const isPriority = priorityPlugins.has(pluginName);
 
-        // 插件返回空值 → 视为“不处理”，继续下一个插件
-        if (result === null || result === undefined || result === false || result === '') {
-          continue;
-        }
+      const handled = await this.runPlugin(plugin, msg, context, false);
 
-        // 有返回值 → 发送，然后结束（不再传给后续插件）
-        this.handleResult(msg, result);
-        return;
-
-      } catch (e) {
-        print(`[插件报错] ${plugin.name}: ${e.message}`);
-        // 单个插件报错不影响其他插件
-        continue;
+      if (handled && !isPriority) {
+        break; 
       }
     }
   }
 
-  // ========================
-  // 执行一个插件的 handler
-  // ========================
-  async runPlugin(plugin, msg) {
+  async runPlugin(plugin, msg, context = {}, forceExecute = false) {
     const raw = plugin.handler;
+    if (!raw) return false;
+
+    let matchFn = null;
     let handleFn = null;
 
     if (typeof raw === 'function') {
       handleFn = raw;
-    } else if (raw && typeof raw.handle === 'function') {
-      handleFn = raw.handle.bind(raw);
+    } else if (typeof raw === 'object' && raw !== null) {
+      if (typeof raw.match === 'function') matchFn = raw.match.bind(raw);
+      if (typeof raw.handle === 'function') handleFn = raw.handle.bind(raw);
     }
 
-    if (!handleFn) return undefined;
+    if (!handleFn) return false;
 
-    // 构造传给插件的 msg（只补必要的兼容字段）
+    const pluginName = raw.name || plugin.name || '未知';
+    const priorityPlugins = context.priorityPlugins || globalThis._priorityPlugins || new Set();
+    const cmdConfig = context.cmdConfig || globalThis._cmdConfig || { enable: true, prefixes: ['/', '#'] };
+    const whitelistConfig = context.whitelistConfig || globalThis._whitelistConfig || { enable: false, list: [] };
+    const interactiveSessions = context.interactiveSessions || globalThis._interactiveSessions || new Map();
+
+    let finalPureText = (msg.pureText || "").trim();
+
+    if (!forceExecute) {
+        const isPriority = priorityPlugins.has(pluginName);
+        let hasValidPrefix = false;
+        let isAdminCmd = false;
+        let isWhitelisted = false;
+
+        // ============================================================
+        // 🌟 阶段 1：统一剥离前缀（不管是普通插件、priority 还是 ignorePrefix，全都要剥！）
+        // ============================================================
+        if (!msg._isMapped) {
+            for (const p of cmdConfig.prefixes) {
+              if (finalPureText.startsWith(p)) {
+                hasValidPrefix = true;
+                finalPureText = finalPureText.slice(p.length).trim(); 
+                break;
+              }
+            }
+            
+            isAdminCmd = /^(启用前缀|禁用前缀|查询前缀|添加前缀|删除前缀|启用指令白名单|禁用指令白名单|查询指令白名单|添加指令白名单|删除指令白名单|重启|重载)/.test(finalPureText);
+
+            if (!hasValidPrefix && !isAdminCmd && whitelistConfig.enable && whitelistConfig.list.length > 0) {
+              for (const word of whitelistConfig.list) {
+                if (finalPureText === word) {
+                  isWhitelisted = true;
+                  break;
+                }
+              }
+            }
+        }
+
+        // ============================================================
+        // 🌟 阶段 2：拦截判断（只针对普通插件，priority 和 ignorePrefix 免死，映射过的也免死）
+        // ============================================================
+        if (!isPriority && !raw.ignorePrefix) {
+            // 🌟 核心修复：加入 !msg._isMapped 判断，防止映射指令被误杀！
+            if (cmdConfig.enable && !hasValidPrefix && !isAdminCmd && !isWhitelisted && !msg._isMapped && finalPureText) {
+                return false;
+            }
+        }
+
+        // ============================================================
+        // 🌟 阶段 3：执行 match 校验（如果插件写了 match，无论是不是 priority 都要过）
+        // ============================================================
+        if (matchFn) {
+          try {
+            if (!matchFn(finalPureText, msg)) return false; 
+          } catch (e) { return false; }
+        }
+    } else {
+        // 强制劫持模式（如入群验证），保留原始未剥离文本（如果插件内部需要）
+        finalPureText = (msg.pureText || "").trim();
+    }
+
+    // 构造发送给插件的消息体并执行
     const pluginMsg = {
-      ...msg,
-      isGroup: msg.isGroup === true || msg.chatType === 'group',
-      text: msg.text ?? msg.content,
+      ...msg,               
+      ...msg.rawData,       
+      content: msg.content,               
+      text: msg.message || [],            
+      pureText: finalPureText, 
+      raw_message: msg.raw_message,
+      botId: msg.botId, 
+      _ws: msg._ws
     };
 
-    return await handleFn(pluginMsg);
-  }
+    try {
+      const result = await handleFn(pluginMsg);
+      
+      if (!result) return false;
 
-  // ========================
-  // 处理插件返回值 → 发送
-  // ========================
-  handleResult(msg, result) {
-    const isGroup = msg.isGroup === true;
-    const chatId = msg.chatId;
+      if (result && typeof result === 'object' && result.__interceptNext === true) {
+          interactiveSessions.set(msg.senderQQ, { 
+              pluginName: pluginName, 
+              expireAt: Date.now() + 3 * 60 * 1000 
+          });
+      }
 
-    // 1. 纯字符串
-    if (typeof result === 'string') {
-      sendMessage({ chatId, isGroup, content: result });
-      return;
-    }
-
-    // 2. 对象 { content: '...' }
-    if (result.content) {
-      sendMessage({ chatId, isGroup, content: result.content });
-      return;
-    }
-
-    // 3. 对象 { file: Buffer }
-    if (result.file) {
-      sendMessage({ chatId, isGroup, file: result.file });
-      return;
+      if (typeof result === 'string') {
+        globalThis.bot.send({ chatId: msg.chatId, isGroup: msg.isGroup, content: result, botId: msg.botId, _ws: msg._ws });
+        return true; 
+      } else if (result.file) {
+        globalThis.bot.send({ chatId: msg.chatId, isGroup: msg.isGroup, file: result.file, botId: msg.botId, _ws: msg._ws });
+        return true;
+      } else if (result.content || result.message) {
+        globalThis.bot.send({ chatId: msg.chatId, isGroup: msg.isGroup, content: result.content || result.message, botId: msg.botId, _ws: msg._ws });
+        return true;
+      }
+      
+      if (result === true) return true;
+      return false;
+    } catch (e) {
+      globalThis.print(`[插件报错] ${pluginName}: ${e.message}`);
+      return false;
     }
   }
 }

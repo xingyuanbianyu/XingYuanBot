@@ -6,6 +6,10 @@ import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import YAML from 'yaml';
 
+// 统一日志
+const log = (msg) => (globalThis.print || console.log)(msg);
+const logErr = (msg) => (globalThis.print || console.error)(msg);
+
 // ========================
 // 路径定位（基于项目根目录，不依赖当前文件位置）
 // ========================
@@ -17,7 +21,14 @@ const CONFIG_PATH = join(PROJECT_ROOT, 'xy-data', 'config.yaml');
 // 内部状态
 // ========================
 let configData = null;
+// 🌟 内部使用 Set 加速 O(1) 查找
+let _qqBlackSet = new Set();
+let _qqWhiteSet = new Set();
+let _groupBlackSet = new Set();
+let _groupWhiteSet = new Set();
+
 let watchTimer = null; // 防抖定时器
+let watcherInstance = null; // 保存 watcher 引用，防止 GC
 
 // ========================
 // 默认配置
@@ -47,7 +58,7 @@ export function loadConfig() {
   try {
     // 1. 文件不存在 → 创建
     if (!fs.existsSync(CONFIG_PATH)) {
-      console.warn(`⚠️ [配置] 不存在，自动创建: ${CONFIG_PATH}`);
+      log(`⚠️ [配置] 不存在，自动创建: ${CONFIG_PATH}`);
       const dir = dirname(CONFIG_PATH);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
       fs.writeFileSync(CONFIG_PATH, YAML.stringify(getDefaultConfig()), 'utf8');
@@ -65,15 +76,24 @@ export function loadConfig() {
       whitelist_group: toArray(parsed.whitelist_group),
     };
 
-    console.log(
+    // 🌟 4. 同步更新内部 Set，提升查询性能
+    _qqBlackSet = new Set(configData.blacklist_qq);
+    _qqWhiteSet = new Set(configData.whitelist_qq);
+    _groupBlackSet = new Set(configData.blacklist_group);
+    _groupWhiteSet = new Set(configData.whitelist_group);
+
+    log(
       `✅ [配置] 加载成功 ` +
-      `(黑名单 QQ:${configData.blacklist_qq.length} 群:${configData.blacklist_group.length} | ` +
-      `白名单 QQ:${configData.whitelist_qq.length} 群:${configData.whitelist_group.length})`
+      `(黑名单 QQ:${_qqBlackSet.size} 群:${_groupBlackSet.size} | ` +
+      `白名单 QQ:${_qqWhiteSet.size} 群:${_groupWhiteSet.size})`
     );
     return configData;
   } catch (e) {
-    console.error('❌ [配置] 加载失败:', e.message);
+    logErr('❌ [配置] 加载失败:', e.message);
     configData = getDefaultConfig();
+    // 清空 Set 防止残留旧数据
+    _qqBlackSet.clear(); _qqWhiteSet.clear();
+    _groupBlackSet.clear(); _groupWhiteSet.clear();
     return configData;
   }
 }
@@ -90,35 +110,35 @@ export function getConfig() {
 // 判定：指定 QQ 是否被屏蔽
 // ========================
 export function isQQAllowed(qq) {
-  const cfg = getConfig();
+  if (!configData) loadConfig();
   const qqStr = String(qq);
 
-  // 白名单优先
-  if (cfg.whitelist_qq.length > 0) {
-    return cfg.whitelist_qq.includes(qqStr);
+  // 白名单优先 (利用 Set 查询 O(1))
+  if (_qqWhiteSet.size > 0) {
+    return _qqWhiteSet.has(qqStr);
   }
   // 无白名单时，用黑名单
-  return !cfg.blacklist_qq.includes(qqStr);
+  return !_qqBlackSet.has(qqStr);
 }
 
 // ========================
 // 判定：指定群是否被屏蔽
 // ========================
 export function isGroupAllowed(groupId) {
-  const cfg = getConfig();
+  if (!configData) loadConfig();
   const idStr = String(groupId);
 
-  if (cfg.whitelist_group.length > 0) {
-    return cfg.whitelist_group.includes(idStr);
+  if (_groupWhiteSet.size > 0) {
+    return _groupWhiteSet.has(idStr);
   }
-  return !cfg.blacklist_group.includes(idStr);
+  return !_groupBlackSet.has(idStr);
 }
 
 // ========================
 // 手动重载
 // ========================
 export function reloadConfig() {
-  console.log('🔄 [配置] 正在重载...');
+  log('🔄 [配置] 正在重载...');
   return loadConfig();
 }
 
@@ -130,18 +150,21 @@ function initWatcher() {
   loadConfig();
 
   try {
-    // 监听文件变化
-    fs.watch(CONFIG_PATH, (eventType) => {
-      // 加入防抖机制，防止编辑器保存时触发多次导致频繁重载
-      if (watchTimer) clearTimeout(watchTimer);
-      watchTimer = setTimeout(() => {
-        console.log(`👀 [配置] 检测到文件变化，正在热更新...`);
-        reloadConfig();
-      }, 200); // 延迟 200ms 执行
+    // 🌟 修复：传入 { persistent: false } 防止 Node 进程因为监听文件而无法退出
+    watcherInstance = fs.watch(CONFIG_PATH, { persistent: false }, (eventType) => {
+      // 🌟 兼容部分编辑器：有些保存会触发 rename 事件
+      if (eventType === 'change' || eventType === 'rename') {
+        if (watchTimer) clearTimeout(watchTimer);
+        watchTimer = setTimeout(() => {
+          log(`👀 [配置] 检测到文件变化，正在热更新...`);
+          reloadConfig();
+        }, 200); // 延迟 200ms 执行防抖
+      }
     });
-    console.log(`👀 [配置] 已开启热监听: ${CONFIG_PATH}`);
+    
+    log(`👀 [配置] 已开启热监听: ${CONFIG_PATH}`);
   } catch (e) {
-    console.error(`❌ [配置] 监听文件失败: ${e.message}`);
+    logErr(`❌ [配置] 监听文件失败: ${e.message}`);
   }
 }
 

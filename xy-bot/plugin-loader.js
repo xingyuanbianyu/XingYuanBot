@@ -1,182 +1,353 @@
 import { readdirSync, statSync, readFileSync, existsSync } from 'fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'url';
+import { createHash } from 'crypto'; // 🌟 引入加密库计算内容指纹
 
 const PLUGINS_DIR = resolve(process.cwd(), 'xy-plugins');
 const log = (msg) => (globalThis.print || console.log)(msg);
 
 let _loaded = false;
 let _pluginsCache = null;
-// 记录已经挂载的事件监听器，用于热重载时清理旧监听器
-const activeListeners = new Map(); // key: adapter, value: [{ event, listener }]
 
-export async function loadPlugins(adapterRegistry = null) {
-  if (_loaded) return _pluginsCache;
+const pluginHandlers = new Map();     
+const eventRegistrations = new Map(); 
+const pluginCacheMap = new Map();
 
+let globalCodeCounter = 0; 
+let isFirstLoad = true; 
+
+const pluginKeyOf = (category, name) => `${category}/${name}`;
+
+// ============================================================
+// 🌟 新增：计算文件内容的 SHA256 指纹
+// ============================================================
+function getFileHash(filePath) {
+    try {
+        const buffer = readFileSync(filePath);
+        return createHash('sha256').update(buffer).digest('hex');
+    } catch (e) {
+        return null;
+    }
+}
+
+// ============================================================
+// 事件监听器
+// ============================================================
+function makeListener(pluginKey, eventName) {
+  return async (payload) => {
+    const current = pluginHandlers.get(pluginKey);
+    if (!current || typeof current.onEvent !== 'function') return;
+    try {
+      await current.onEvent({ event: eventName, ...payload }, { ws: null });
+    } catch (err) {
+      console.error(`❌ [事件插件报错] ${pluginKey} -> ${eventName}:`, err.message);
+    }
+  };
+}
+
+function bindHandler(pluginKey, handler) {
+  pluginHandlers.set(pluginKey, handler);
+}
+
+function syncEventListeners(pluginKey, handler, adapterRegistry) {
+  pluginHandlers.set(pluginKey, handler);
+  if (!adapterRegistry) return;
+
+  if (!Array.isArray(handler?.events) || typeof handler.onEvent !== 'function') {
+    if (eventRegistrations.has(pluginKey)) detachPlugin(pluginKey, true);
+    return;
+  }
+
+  const newEvents = new Set(handler.events);
+  const regs = eventRegistrations.get(pluginKey) ?? new Map();
+
+  for (const adapter of adapterRegistry.list.values()) {
+    if (typeof adapter.onEvent !== 'function') continue;
+    const adapterRegs = regs.get(adapter) ?? new Map();
+
+    for (const [ev, listener] of adapterRegs) {
+      if (!newEvents.has(ev)) {
+        try { adapter.offEvent?.(ev, listener); } catch {}
+        adapterRegs.delete(ev);
+      }
+    }
+    for (const ev of newEvents) {
+      if (adapterRegs.has(ev)) continue;
+      const listener = makeListener(pluginKey, ev);
+      adapter.onEvent(ev, listener);
+      adapterRegs.set(ev, listener);
+    }
+    regs.set(adapter, adapterRegs);
+  }
+  eventRegistrations.set(pluginKey, regs);
+}
+
+function detachPlugin(pluginKey, keepHandler = false) {
+  const regs = eventRegistrations.get(pluginKey);
+  if (regs) {
+    for (const [adapter, adapterRegs] of regs) {
+      for (const [ev, listener] of adapterRegs) {
+        try { adapter.offEvent?.(ev, listener); } catch {}
+      }
+    }
+    eventRegistrations.delete(pluginKey);
+  }
+  if (!keepHandler) {
+    pluginHandlers.delete(pluginKey);
+    pluginCacheMap.delete(pluginKey);
+  }
+}
+
+async function importPluginModule(entryPath) {
+  const moduleURL = pathToFileURL(entryPath).href;
+  const cacheBustURL = moduleURL + '?t=' + Date.now(); 
+  const mod = await import(cacheBustURL);
+  return mod.default ?? mod;
+}
+
+// ============================================================
+// 扫描目录 + 增量加载
+// ============================================================
+async function scanAndLoadAll(adapterRegistry) {
   const plugins = [];
   const errors = [];
   const loadLog = [];
 
   if (!existsSync(PLUGINS_DIR)) {
-    _loaded = true;
-    _pluginsCache = { plugins: [], errors: ['插件总目录不存在'], log: [] };
-    return _pluginsCache;
+    return { plugins, errors: ['插件总目录不存在'], log: [] };
   }
 
-  const categoryDirs = readdirSync(PLUGINS_DIR).filter(n => statSync(join(PLUGINS_DIR, n)).isDirectory());
+  const categoryDirs = readdirSync(PLUGINS_DIR)
+    .filter(n => statSync(join(PLUGINS_DIR, n)).isDirectory())
+    .sort();
+
+  const currentPluginKeys = new Set(); 
 
   for (const catName of categoryDirs) {
     const catDir = join(PLUGINS_DIR, catName);
-    const pluginDirs = readdirSync(catDir).filter(n => statSync(join(catDir, n)).isDirectory());
+    const pluginDirs = readdirSync(catDir)
+      .filter(n => statSync(join(catDir, n)).isDirectory())
+      .sort();
 
-    loadLog.push({ category: catName, total: pluginDirs.length, loaded: 0, skipped: 0, failed: 0 });
+    const stat = { category: catName, total: pluginDirs.length, loaded: 0, updated: 0, skipped: 0, failed: 0, reused: 0 };
+    loadLog.push(stat);
 
     for (const dirName of pluginDirs) {
       const pluginPath = join(catDir, dirName);
       const rulePath = join(pluginPath, 'rule.json');
       const entryPath = join(pluginPath, 'index.js');
+      const pluginKey = pluginKeyOf(catName, dirName);
+
+      currentPluginKeys.add(pluginKey);
 
       if (!existsSync(rulePath) || !existsSync(entryPath)) {
-        loadLog[loadLog.length - 1].skipped++;
+        stat.skipped++;
         continue;
       }
 
       try {
+        // 🌟 核心替换：使用 Hash 比对代替时间戳
+        const entryHash = getFileHash(entryPath);
+        const ruleHash = getFileHash(rulePath);
+        
         const rule = JSON.parse(readFileSync(rulePath, 'utf-8'));
         if (rule.enabled === false) {
-            loadLog[loadLog.length - 1].skipped++;
-            continue;
+          stat.skipped++;
+          detachPlugin(pluginKey); 
+          currentPluginKeys.delete(pluginKey);
+          continue;
         }
 
-        const handler = await loadSinglePlugin(entryPath, adapterRegistry);
+        const cached = pluginCacheMap.get(pluginKey);
+        
+        // 🌟 如果 Hash 完全一致，说明内容根本没变，直接复用，绝对不消耗代号
+        if (cached && cached.entryHash === entryHash && cached.ruleHash === ruleHash) {
+          plugins.push({ category: catName, name: dirName, rule, handler: cached.handler, code: cached.code });
+          bindHandler(pluginKey, cached.handler);
+          stat.reused++; 
+          continue; 
+        }
 
-        plugins.push({ category: catName, name: dirName, rule, handler });
-        loadLog[loadLog.length - 1].loaded++;
-        log(`✅ 插件 [${catName}/${dirName}] 加载成功`);
+        // 内容发生变化或全新插件
+        const isNew = !cached;
+        const handler = await importPluginModule(entryPath);
+
+        let currentCode = 0;
+        if (isFirstLoad) {
+            currentCode = 0;
+        } else {
+            if (globalCodeCounter === 0) globalCodeCounter = 1;
+            currentCode = globalCodeCounter++;
+        }
+
+        pluginCacheMap.set(pluginKey, {
+          code: currentCode,
+          entryHash: entryHash, // 🌟 存入 Hash
+          ruleHash: ruleHash,
+          handler: handler,
+          rule: rule
+        });
+
+        bindHandler(pluginKey, handler);
+        plugins.push({ category: catName, name: dirName, rule, handler, code: currentCode });
+        
+        if (isNew) {
+          stat.loaded++;
+          log(`✅ 插件 [${catName}/${dirName}] 首次加载成功 (代号: ${currentCode})`);
+        } else {
+          stat.updated++;
+          log(`🔄 插件 [${catName}/${dirName}] 发现内容变更，已增量更新 (新代号: ${currentCode})`);
+        }
       } catch (e) {
         log(`❌ 插件 [${catName}/${dirName}] 加载失败: ${e.message}`);
-        loadLog[loadLog.length - 1].failed++;
+        errors.push(`${catName}/${dirName}: ${e.message}`);
+        stat.failed++;
       }
     }
   }
 
+  for (const oldKey of Array.from(pluginCacheMap.keys())) {
+    if (!currentPluginKeys.has(oldKey)) {
+      log(`🗑️ 插件 [${oldKey}] 已被物理删除，正在卸载...`);
+      detachPlugin(oldKey);
+    }
+  }
+
+  isFirstLoad = false;
+  return { plugins, errors, log: loadLog };
+}
+
+export async function loadPlugins(adapterRegistry = null) {
+  if (_loaded) return _pluginsCache;
+  const cache = await scanAndLoadAll(adapterRegistry);
+  for (const p of cache.plugins) {
+    syncEventListeners(pluginKeyOf(p.category, p.name), p.handler, adapterRegistry);
+  }
+  _pluginsCache = cache;
   _loaded = true;
-  _pluginsCache = { plugins, errors, log: loadLog };
   return _pluginsCache;
 }
 
-// 🌟 单独加载某个插件，并处理事件订阅
-async function loadSinglePlugin(entryPath, adapterRegistry) {
-    // 1. 加上时间戳破除 ESM 缓存，加载一个全新的实例
-    const moduleURL = pathToFileURL(entryPath).href;
-    const cacheBustURL = moduleURL + '?t=' + Date.now();
-    const mod = await import(cacheBustURL);
-    const handler = mod.default ?? mod;
+// ============================================================
+// 单插件热重载
+// ============================================================
+export async function hotReloadPlugin(pluginNames, adapterRegistry) {
+  if (!_pluginsCache) return;
+  const plugins = _pluginsCache.plugins;
+  const targets = Array.isArray(pluginNames) ? pluginNames : [pluginNames];
 
-    // 2. 处理事件订阅 (如果插件声明了 events 和 onEvent)
-    if (adapterRegistry && handler.events && typeof handler.onEvent === 'function') {
-        const adapterList = Array.from(adapterRegistry.list.values());
-        
-        for (const eventName of handler.events) {
-            for (const adapter of adapterList) {
-                if (typeof adapter.onEvent === 'function') {
-                    // 创建监听器
-                    const listener = async (payload) => {
-                        try {
-                            const eventData = { event: eventName, ...payload };
-                            await handler.onEvent(eventData, { ws: null });
-                        } catch (err) {
-                            console.error(`❌ [事件插件报错] ${entryPath} -> ${eventName}:`, err.message);
-                        }
-                    };
+  log(`🔄 开始强制热重载插件: [${targets.join(', ')}]`);
 
-                    // 记录下这个监听器，方便以后删除
-                    if (!activeListeners.has(adapter)) activeListeners.set(adapter, []);
-                    activeListeners.get(adapter).push({ event: eventName, listener });
-
-                    // 注册
-                    adapter.onEvent(eventName, listener);
-                }
-            }
-        }
+  for (const name of targets) {
+    const p = plugins.find(x => x.name === name);
+    if (!p) {
+      log(`⚠️ 未找到名为 ${name} 的插件，跳过重载。`);
+      continue;
     }
-    return handler;
+
+    const entryPath = join(PLUGINS_DIR, p.category, p.name, 'index.js');
+    const rulePath = join(PLUGINS_DIR, p.category, p.name, 'rule.json');
+    const pluginKey = pluginKeyOf(p.category, p.name);
+
+    try {
+      // 🌟 同样进行 Hash 校验
+      const entryHash = getFileHash(entryPath);
+      const ruleHash = getFileHash(rulePath);
+      const cached = pluginCacheMap.get(pluginKey);
+      
+      // 如果你没改代码，手动触发热重载，直接跳过
+      if (cached && cached.entryHash === entryHash && cached.ruleHash === ruleHash) {
+          log(`♻️ 插件 ${name} 内容未发生修改，跳过强制编译，保持原代号: ${cached.code}`);
+          continue;
+      }
+
+      log(`⏳ 正在编译新代码: ${name}...`);
+      const handler = await importPluginModule(entryPath);
+
+      if (typeof p.handler?.destroy === 'function') {
+        try { await p.handler.destroy(); } catch (e) {}
+      }
+
+      const oldEvents = new Set(p.handler?.events ?? []);
+      const newEvents = new Set(handler?.events ?? []);
+      const eventsChanged = oldEvents.size !== newEvents.size || [...newEvents].some(ev => !oldEvents.has(ev));
+
+      if (globalCodeCounter === 0) globalCodeCounter = 1;
+      const currentCode = globalCodeCounter++;
+
+      p.handler = handler;
+      p.code = currentCode;
+      pluginCacheMap.set(pluginKey, {
+        code: currentCode,
+        entryHash: entryHash,
+        ruleHash: ruleHash,
+        handler: handler,
+        rule: p.rule
+      });
+
+      if (eventsChanged) {
+        syncEventListeners(pluginKey, handler, adapterRegistry);
+      } else {
+        bindHandler(pluginKey, handler);
+      }
+
+      log(`✅ 插件 ${name} 热重载成功！(新代号: ${currentCode})`);
+    } catch (e) {
+      log(`❌ 插件 ${name} 热重载失败，已保留旧版本: ${e.message}`);
+    }
+  }
 }
 
-/**
- * 🌟 终极原子热重载方法
- * 不重启整个机器人，只安全地替换指定的一个或多个插件
- */
-export async function hotReloadPlugin(pluginNames, adapterRegistry) {
-    if (!_pluginsCache) return;
-    const oldPlugins = _pluginsCache.plugins;
-    const targetNames = Array.isArray(pluginNames) ? pluginNames : [pluginNames];
+// ============================================================
+// 全量热重载
+// ============================================================
+export async function reloadAllPlugins(adapterRegistry = null) {
+  log('🔄 开始全量增量热重载...');
 
-    log(`🔄 开始热重载插件: [${targetNames.join(', ')}]`);
-
-    for (const targetName of targetNames) {
-        // 1. 找到旧插件的索引
-        const index = oldPlugins.findIndex(p => p.name === targetName);
-        if (index === -1) {
-            log(`⚠️ 未找到名为 ${targetName} 的插件，跳过重载。`);
-            continue;
-        }
-
-        const oldPlugin = oldPlugins[index];
-        const entryPath = join(PLUGINS_DIR, oldPlugin.category, oldPlugin.name, 'index.js');
-
-        try {
-            // 2. 先尝试加载新版本（原子性：如果不成功，直接抛错，不影响旧的）
-            log(`⏳ 正在编译新代码: ${targetName}...`);
-            const newHandler = await loadSinglePlugin(entryPath, adapterRegistry);
-
-            // 3. 销毁旧插件
-            log(`🧹 清理旧实例: ${targetName}...`);
-            
-            // 3.1 如果旧插件有自定义的清理逻辑（比如清理定时器），调用它
-            if (typeof oldPlugin.handler.destroy === 'function') {
-                await oldPlugin.handler.destroy();
-            }
-
-            // 3.2 从适配器中拔除旧插件的事件监听
-            if (adapterRegistry) {
-                const adapterList = Array.from(adapterRegistry.list.values());
-                for (const adapter of adapterList) {
-                    if (activeListeners.has(adapter)) {
-                        const listeners = activeListeners.get(adapter);
-                        // 过滤掉属于这个旧插件的监听器
-                        // （注意：这里为了简单，清空该适配器下所有属于此插件的事件，实际工程中可以给 listener 打标签）
-                        // 为了安全，我们直接清空这个插件注册过的所有事件
-                        if (typeof adapter.offEvent === 'function') {
-                            // 如果 Adapter 有 offEvent
-                            for (const evName of (oldPlugin.handler.events || [])) {
-                                adapter.offEvent(evName); // 需要你在 adapter 里实现
-                            }
-                        } else {
-                            // 如果没有 offEvent，只能通过内部 Map 覆写，但这会导致旧的依然残留。
-                            // 这就是为什么我们要自己管理 activeListeners
-                            for (const item of listeners) {
-                                if (item.listener.toString().includes(entryPath) && adapter.eventHandlers) {
-                                    adapter.eventHandlers.get(item.event)?.delete(item.listener);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // 4. 替换缓存中的对象
-            oldPlugins[index].handler = newHandler;
-            log(`✅ 插件 ${targetName} 热重载成功！`);
-
-        } catch (e) {
-            // 如果加载新模块时抛错，直接捕获。旧模块依然在正常运作（原子性保证）
-            log(`❌ 插件 ${targetName} 热重载失败，已保留旧版本: ${e.message}`);
-        }
+  const oldPlugins = _pluginsCache?.plugins ?? [];
+  for (const p of oldPlugins) {
+    if (typeof p.handler?.destroy === 'function') {
+      try { await p.handler.destroy(); } catch (e) {}
     }
+  }
+
+  const newCache = await scanAndLoadAll(adapterRegistry);
+
+  for (const p of newCache.plugins) {
+    const pluginKey = pluginKeyOf(p.category, p.name);
+    const oldP = oldPlugins.find(x => x.category === p.category && x.name === p.name);
+    
+    if (!oldP) {
+      syncEventListeners(pluginKey, p.handler, adapterRegistry);
+    } else {
+      const oldEvents = new Set(oldP.handler?.events ?? []);
+      const newEvents = new Set(p.handler?.events ?? []);
+      const eventsChanged = oldEvents.size !== newEvents.size || [...newEvents].some(ev => !oldEvents.has(ev));
+      if (eventsChanged) {
+        syncEventListeners(pluginKey, p.handler, adapterRegistry);
+      } else {
+        bindHandler(pluginKey, p.handler);
+      }
+    }
+  }
+
+  if (_pluginsCache) {
+    _pluginsCache.plugins = newCache.plugins;
+    _pluginsCache.log = newCache.log;
+    _pluginsCache.errors = newCache.errors;
+  } else {
+    _pluginsCache = newCache;
+  }
+  _loaded = true;
+
+  log(`✅ 全量增量热重载完成，当前共 ${newCache.plugins.length} 个插件`);
+  return _pluginsCache;
 }
 
 export function clearPluginCache() {
+  for (const key of Array.from(eventRegistrations.keys())) detachPlugin(key);
+  pluginHandlers.clear();
+  pluginCacheMap.clear();
   _loaded = false;
   _pluginsCache = null;
 }

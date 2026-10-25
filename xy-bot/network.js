@@ -7,18 +7,17 @@ import yaml from 'yaml';
 const log = (msg) => (globalThis.print || console.log)(msg);
 
 // ==================== 新增：API 调用管理器 ====================
-// 存储等待响应的 Promise
 const pendingRequests = new Map();
-// 生成唯一 Echo ID
 const genEcho = () => `api_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
 
 /**
  * 🌟 全局 WS 调用 API 方法
  * 插件里直接调用：await globalThis.wsCall('get_group_list', {})
+ * 支持传第4个参数指定 ws 对象：await globalThis.wsCall('action', {}, 15000, msg._ws)
  */
-globalThis.wsCall = (action, params = {}, timeoutMs = 15000) => {
+globalThis.wsCall = (action, params = {}, timeoutMs = 15000, targetWs = null) => {
   return new Promise((resolve, reject) => {
-    const ws = globalThis.activeWs;
+    const ws = targetWs || globalThis.activeWs;
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       return reject(new Error('WebSocket 未连接，无法调用 API'));
     }
@@ -31,8 +30,9 @@ globalThis.wsCall = (action, params = {}, timeoutMs = 15000) => {
       reject(new Error(`API [${action}] 调用超时 (${timeoutMs}ms)`));
     }, timeoutMs);
 
-    // 存入 Map 等待响应
+    // 存入 Map 等待响应，同时记录所属的 ws，方便断线清理
     pendingRequests.set(echo, {
+      ws,
       resolve: (data) => {
         clearTimeout(timer);
         resolve(data);
@@ -53,6 +53,16 @@ globalThis.wsCall = (action, params = {}, timeoutMs = 15000) => {
     }
   });
 };
+
+// 🌟 清理特定 ws 上所有挂起的请求
+function cleanupPendingRequests(ws) {
+  for (const [echo, req] of pendingRequests.entries()) {
+    if (req.ws === ws) {
+      req.reject(new Error('WebSocket 连接已断开，API 调用取消'));
+      pendingRequests.delete(echo);
+    }
+  }
+}
 
 // ==================== 1. 配置加载 ====================
 export function loadNetworkConfig(dataDir) {
@@ -105,26 +115,27 @@ export function startNetwork(configs, onMessage, onError) {
   const serverConfig = configs.find(c => c.role === 'server');
   const clientConfig = configs.find(c => c.role === 'client');
 
-  // 🌟 统一的 WS 消息处理中心 (拦截 API 响应 vs 处理普通消息)
+  // 🌟 统一的 WS 消息处理中心
   const processIncoming = (dataStr, ws) => {
-    // 1. 更新全局活跃 WS
     globalThis.activeWs = ws;
 
     let parsedData = null;
     try { parsedData = JSON.parse(dataStr); } catch (_) {}
 
-    // 2. 拦截：如果是 API 调用响应 (带 echo 且在等待列表中)
+    // 拦截：如果是 API 调用响应
     if (parsedData && parsedData.echo && pendingRequests.has(parsedData.echo)) {
       const { resolve } = pendingRequests.get(parsedData.echo);
       pendingRequests.delete(parsedData.echo);
-      
-      // 判断是否有错误码，如果有可以在这里统一 reject，但 OneBot 习惯返回 retcode，交给插件自己判断
       resolve(parsedData);
-      return; // 拦截成功，不再往下传递
+      return;
     }
 
-    // 3. 普通事件消息，交还给外部框架处理
-    onMessage(dataStr, ws);
+    // 普通事件消息，交还给外部框架处理（加上异常捕获，防止崩溃）
+    try {
+      onMessage(dataStr, ws);
+    } catch (e) {
+      log(`❌ [网络] 处理消息时发生未捕获异常: ${e.message}`);
+    }
   };
 
   // ==================== 3. 竞争切换逻辑 ====================
@@ -133,7 +144,6 @@ export function startNetwork(configs, onMessage, onError) {
     log(`\n🔄 [网络切换] 激活模式: ${mode === 'server' ? '服务端监听' : '客户端主动连接'}`);
     activeMode = mode;
 
-    // 变成 Server：如果 Client 还在连，立刻掐断
     if (mode === 'server' && clientWs) {
       log('👉 触发竞争: 服务端被连上，关闭客户端主动连接...');
       clearInterval(clientPingTimer);
@@ -141,7 +151,6 @@ export function startNetwork(configs, onMessage, onError) {
       try { clientWs.close(); } catch (_) {}
       clientWs = null;
     }
-    // 变成 Client：如果 Server 还在监听，立刻停止监听释放端口
     else if (mode === 'client' && serverInstance) {
       log('👉 触发竞争: 客户端连上了，服务端停止监听...');
       try { serverInstance.close(); } catch (_) {}
@@ -174,45 +183,58 @@ export function startNetwork(configs, onMessage, onError) {
 
   const tryListen = (port) => {
     if (!port) return;
-    if (serverInstance) { try { serverInstance.close(); } catch(_) {} }
-    serverInstance = new WebSocketServer({ port, host: '0.0.0.0' });
-
-    serverInstance.on('listening', () => log(`💡 [网络] 服务端开始监听端口: ${port}`));
-    serverInstance.on('error', (e) => log(`❌ [网络] 服务端监听错误: ${e.message}`));
-
-    serverInstance.on('connection', (ws) => {
-      log(`✅ [网络] 服务端成功接入 NapCat 连接！`);
-      setActive('server'); 
-      serverWs = ws;
-      globalThis.activeWs = ws; // 挂载全局
-
-      ws.on('error', (err) => {
-        log(`❌ [网络] 服务端连接发生错误: ${err.message}`);
-      });
-
-      // 🌟 使用统一的 processIncoming
-      ws.on('message', (data) => processIncoming(data.toString(), ws));
-      
-      ws.on('pong', () => clearTimeout(serverPongTimer)); 
-
-      ws.on('close', () => {
-        log('⚠ [网络] 服务端连接已断开');
-        clearServerHB();
-        if (serverWs === ws) {
-          serverWs = null;
-          if (globalThis.activeWs === ws) globalThis.activeWs = null;
+    
+    // 确保旧实例彻底关闭
+    if (serverInstance) { 
+        try { serverInstance.close(); } catch(_) {} 
+        serverInstance = null;
+    }
+    
+    // 稍微延迟，防止端口 TIME_WAIT 导致 EADDRINUSE
+    setTimeout(() => {
+        try {
+            serverInstance = new WebSocketServer({ port, host: '0.0.0.0' });
+        } catch (e) {
+            log(`❌ [网络] 服务端启动失败: ${e.message}`);
+            return;
         }
-        
-        if (activeMode === 'server') {
-          activeMode = null;
-          log('👉 触发竞争: 服务端断开，启动客户端主动连接 & 重新监听...');
-          tryListen(serverConfig?.port); 
-          startClientReconnect();       
-        }
-      });
 
-      startServerHeartbeat(ws); 
-    });
+        serverInstance.on('listening', () => log(`💡 [网络] 服务端开始监听端口: ${port}`));
+        serverInstance.on('error', (e) => log(`❌ [网络] 服务端监听错误: ${e.message}`));
+
+        serverInstance.on('connection', (ws) => {
+          log(`✅ [网络] 服务端成功接入 NapCat 连接！`);
+          setActive('server'); 
+          serverWs = ws;
+          globalThis.activeWs = ws;
+
+          ws.on('error', (err) => log(`❌ [网络] 服务端连接发生错误: ${err.message}`));
+          ws.on('message', (data) => processIncoming(data.toString(), ws));
+          ws.on('pong', () => clearTimeout(serverPongTimer)); 
+
+          ws.on('close', () => {
+            log('⚠ [网络] 服务端连接已断开');
+            clearServerHB();
+            
+            // 🌟 释放挂起的请求
+            cleanupPendingRequests(ws);
+
+            if (serverWs === ws) {
+              serverWs = null;
+              if (globalThis.activeWs === ws) globalThis.activeWs = null;
+            }
+            
+            if (activeMode === 'server') {
+              activeMode = null;
+              log('👉 触发竞争: 服务端断开，启动客户端主动连接 & 重新监听...');
+              tryListen(serverConfig?.port); 
+              startClientReconnect();       
+            }
+          });
+
+          startServerHeartbeat(ws); 
+        });
+    }, 500); // 延迟 500ms 启动，避免端口占用
   };
 
   if (serverConfig) tryListen(serverConfig.port);
@@ -240,27 +262,26 @@ export function startNetwork(configs, onMessage, onError) {
       return startClientReconnect();
     }
 
-    clientWs.on('error', (err) => {
-      log(`❌ [网络] 客户端发生错误: ${err.message}`);
-    });
+    clientWs.on('error', (err) => log(`❌ [网络] 客户端发生错误: ${err.message}`));
 
     clientWs.on('open', () => {
       log(`✅ [网络] 客户端成功连接到 NapCat！`);
       clientAttempt = 0;
       setActive('client'); 
-      globalThis.activeWs = clientWs; // 挂载全局
+      globalThis.activeWs = clientWs; 
       startClientHeartbeat();
     });
 
-    // 🌟 使用统一的 processIncoming
     clientWs.on('message', (data) => processIncoming(data.toString(), clientWs));
-    
     clientWs.on('pong', () => {}); 
 
     clientWs.on('close', () => {
       log('⚠ [网络] 客户端连接已断开');
       clearInterval(clientPingTimer);
+      
       if (clientWs) {
+        // 🌟 释放挂起的请求
+        cleanupPendingRequests(clientWs);
         if (globalThis.activeWs === clientWs) globalThis.activeWs = null;
         clientWs = null;
       }

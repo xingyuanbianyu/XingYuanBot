@@ -3,6 +3,7 @@ import path from 'path';
 import yaml from 'yaml';
 import Database from 'better-sqlite3';
 import { fileURLToPath } from 'url';
+import { getRole } from '../../../xy-config/config/permissions.js'; // 🌟 引入权限校验
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CONFIG_PATH = path.join(__dirname, 'config.yaml');
@@ -23,13 +24,12 @@ db.exec(`
   )
 `);
 
-// 兼容旧表，增加 is_loop 字段
 try { db.exec(`ALTER TABLE scheduler_tasks ADD COLUMN is_loop INTEGER DEFAULT 0`); } catch (e) {}
 
 let tickCount = 0;
 let configCache = {};
 
-// 🌟 优化4：使用文件监听替代 10 秒一次的无脑读盘
+// 热更新配置
 try {
     if (fs.existsSync(CONFIG_PATH)) {
         configCache = yaml.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) || {};
@@ -56,14 +56,11 @@ setInterval(async () => {
         const now = new Date();
         const todayStr = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
         
-        // 🌟 优化1：只查询今天还没跑过的任务，减少 JS 运算
         const tasks = db.prepare('SELECT * FROM scheduler_tasks WHERE last_run_date IS NULL OR last_run_date != ?').all(todayStr);
         if (tasks.length === 0) return;
 
-        // 🌟 优化2：智能获取当前活跃的 WS（兼容 server 和 client 模式）
-        const activeWs = globalThis._ws || 
-                         (globalThis._registry?.list?.values()?.next()?.value?.ws) || 
-                         null;
+        // 🌟 修复 1：使用框架暴露的 activeWs，绝对不瞎猜
+        const activeWs = globalThis.activeWs || globalThis._ws;
                          
         if (!activeWs || activeWs.readyState !== 1) {
             return; 
@@ -86,20 +83,22 @@ setInterval(async () => {
                 let userRole = 'member';
                 let userNick = '定时任务';
                 
+                // 🌟 修复 2：干掉 HTTP 请求，改用 wsCall，并指定使用 activeWs
                 try {
-                    // 获取群成员信息（加了超时防止卡死）
-                    const controller = new AbortController();
-                    const timeoutId = setTimeout(() => controller.abort(), 3000);
-                    const memberRes = await fetch(`http://127.0.0.1:3000/get_group_member_info?group_id=${task.group_id}&user_id=${task.creator_id}`, { signal: controller.signal });
-                    clearTimeout(timeoutId);
-                    const memberData = await memberRes.json();
-                    if (memberData && memberData.data) {
-                        if (memberData.data.role) userRole = memberData.data.role; 
-                        if (memberData.data.card || memberData.data.nickname) {
-                            userNick = memberData.data.card || memberData.data.nickname;
+                    const res = await globalThis.wsCall('get_group_member_info', { 
+                        group_id: Number(task.group_id), 
+                        user_id: Number(task.creator_id) 
+                    }, 5000, activeWs);
+                    
+                    if (res && res.data) {
+                        if (res.data.role) userRole = res.data.role; 
+                        if (res.data.card || res.data.nickname) {
+                            userNick = res.data.card || res.data.nickname;
                         }
                     }
-                } catch (e) {}
+                } catch (e) {
+                    globalThis.print(`[定时调度] ⚠️ 获取成员信息失败: ${e.message}`);
+                }
 
                 const fakeMsgData = {
                     time: Math.floor(Date.now() / 1000),
@@ -107,7 +106,7 @@ setInterval(async () => {
                     post_type: "message",
                     message_type: "group",
                     sub_type: "normal",
-                    message_id: Math.floor(Math.random() * 10000000),
+                    message_id: Date.now() + Math.floor(Math.random() * 1000), // 🌟 修复 3：用时间戳防止撞车
                     group_id: Number(task.group_id),
                     user_id: Number(task.creator_id),
                     raw_message: task.command,
@@ -123,10 +122,10 @@ setInterval(async () => {
 
                 if (typeof globalThis.handleIncomingMessage === 'function') {
                     try {
-                        // 注入
+                        // 注入伪消息，触发主框架逻辑
                         globalThis.handleIncomingMessage(JSON.stringify(fakeMsgData), activeWs, globalThis._registry, globalThis._plugins);
                         
-                        // 🌟 优化3：无论成功与否，标记为已跑，防止报错导致无限重试
+                        // 标记执行
                         if (task.is_loop === 1) {
                             db.prepare('UPDATE scheduler_tasks SET last_run_date = ? WHERE id = ?').run(todayStr, task.id);
                         } else {
@@ -136,7 +135,6 @@ setInterval(async () => {
                         
                     } catch (e) {
                         globalThis.print(`[定时调度] ❌ 注入伪消息失败: ${e.message}`);
-                        // 即使失败，也标记今天跑过了，防止 10 秒后疯狂刷屏报错
                         db.prepare('UPDATE scheduler_tasks SET last_run_date = ? WHERE id = ?').run(todayStr, task.id);
                     }
                 }
@@ -151,9 +149,10 @@ setInterval(async () => {
 export default {
     name: '定时调度',
 
+    // 🌟 修复 4：严格匹配，防止“添加定时器”之类误触
     match(text) {
         if (typeof text !== 'string') return false;
-        return text.startsWith('添加定时') || text.startsWith('查看定时') || text.startsWith('删除定时');
+        return /^(添加定时|查看定时|删除定时)(\s+|$)/.test(text.trim());
     },
 
     async handle(msg) {
@@ -161,22 +160,28 @@ export default {
         const chatId = msg.chatId;
         const senderQQ = msg.senderQQ;
 
+        // 🌟 修复 5：权限校验（仅群管及以上）
+        const isMaster = getRole(senderQQ) === 'master' || getRole(senderQQ) === 'owner';
+        const isGroupAdmin = msg.sender?.role === 'admin' || msg.sender?.role === 'owner';
+        
+        if (!isMaster && !isGroupAdmin) {
+            return '❌ 权限不足：仅群主/管理员/机器人主人可使用定时指令。';
+        }
+
         // ================= 添加定时 =================
         if (pureText.startsWith('添加定时')) {
-            // 🌟 正则更新：支持末尾带参数
             const match = pureText.match(/^添加定时\s+(\d{1,2}:\d{1,2})\s*(?:\/|\s)\s*(.+)$/);
             if (!match) return '⚠️ 格式错误！\n用法：#添加定时 08:30 / #打卡 [开/关]';
 
             let timeStr = match[1];
             let rest = match[2].trim();
-            let isLoop = 0; // 默认关
+            let isLoop = 0; 
 
-            // 解析末尾开关：开、循环、关、一次
             const loopMatch = rest.match(/(.+?)\s+(开|循环|关|一次)$/);
             if (loopMatch) {
                 const mode = loopMatch[2];
                 if (mode === '开' || mode === '循环') isLoop = 1;
-                rest = loopMatch[1].trim(); // 提取出真正的指令
+                rest = loopMatch[1].trim(); 
             }
 
             const [h, m] = timeStr.split(':');

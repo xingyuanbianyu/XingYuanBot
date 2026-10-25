@@ -1,9 +1,10 @@
 // xy-bot/sender.js
-// ✅ 统一消息发送器
-// 对外暴露：initSender / bindWs / sendMessage
-// 保持 globalThis.bot.send 兼容，旧插件不受影响
+// ✅ 统一消息发送器 (支持多账号精准路由)
 
 let _currentWs = null;
+
+// 日志兼容
+const log = (msg) => (globalThis.print || console.log)(msg);
 
 // ========================
 // 初始化
@@ -14,7 +15,7 @@ export function initSender() {
 }
 
 // ========================
-// 绑定 WS 连接（收到任何包时刷新）
+// 绑定 WS 连接（全局兜底）
 // ========================
 export function bindWs(ws) {
   if (!ws) return;
@@ -24,12 +25,22 @@ export function bindWs(ws) {
 
 // ========================
 // 统一发送入口
-// msg: { chatId, isGroup, content?, file? }
+// msg: { chatId, isGroup, content?, file?, botId?, _ws? }
 // ========================
 export function sendMessage(msg) {
-  const ws = _currentWs;
+  // 🌟 核心修复：优先使用消息自带的 _ws，其次通过 botId 查表，最后才用全局兜底
+  let ws = msg._ws;
+  
+  if (!ws && msg.botId && globalThis.sharedState?.botIdToWs) {
+    ws = globalThis.sharedState.botIdToWs.get(String(msg.botId));
+  }
+  
+  if (!ws) {
+    ws = _currentWs || globalThis.activeWs || globalThis._ws;
+  }
+
   if (!ws || ws.readyState !== 1) {
-    print('⚠ [Sender] 无可用连接，消息未发送');
+    log('⚠ [Sender] 无可用连接，消息未发送');
     return false;
   }
 
@@ -46,8 +57,8 @@ export function sendMessage(msg) {
       message: [{ type: 'image', data: { file: `base64://${msg.file.toString('base64')}` } }],
     };
   }
-  // 文本
-  else if (msg.content) {
+  // 文本 (兼容有的插件传数字或对象)
+  else if (msg.content !== undefined && msg.content !== null) {
     params = {
       ...target,
       message: [{ type: 'text', data: { text: String(msg.content) } }],
@@ -60,11 +71,12 @@ export function sendMessage(msg) {
 
   try {
     ws.send(JSON.stringify({ action: 'send_msg', params, echo: Date.now() }));
-    const kind = msg.file ? '图片' : '文本';
-    print(`[发送${kind}] -> ${msg.chatId}`);
+    // 如果日志太吵，可以注释掉这行
+    // const kind = msg.file ? '图片' : '文本';
+    // log(`[发送${kind}] -> ${msg.chatId}`);
     return true;
   } catch (e) {
-    print(`⚠ [Sender] 发送失败: ${e.message}`);
+    log(`⚠ [Sender] 发送失败: ${e.message}`);
     return false;
   }
 }

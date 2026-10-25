@@ -1,4 +1,3 @@
-// xy-plugins/QQ/group-events/index.js
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 import path from 'path';
@@ -12,6 +11,46 @@ const SHARED_DB_PATH = path.resolve(__dirname, '../../plugins/event-settings/gro
 
 let eventBrowser = null;
 let browserLaunching = null;
+
+// 🌟 优化 1：群配置缓存 (防止高频连接外部数据库)
+const groupSettingsCache = new Map();
+function getGroupSettings(groupId) {
+    const gid = String(groupId);
+    
+    // 检查缓存 (有效期 5 秒)
+    const cached = groupSettingsCache.get(gid);
+    if (cached && Date.now() - cached.time < 5000) {
+        return cached.data;
+    }
+
+    if (!fs.existsSync(SHARED_DB_PATH)) return null;
+    
+    let db = null;
+    try {
+        db = new Database(SHARED_DB_PATH, { readonly: true, fileMustExist: true });
+        const tableExists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='group_event_settings'`).get();
+        if (!tableExists) {
+            db.close();
+            return null;
+        }
+        const row = db.prepare('SELECT welcome, decrease, kick FROM group_event_settings WHERE group_id = ?').get(gid);
+        db.close();
+
+        if (row) {
+            const data = { 
+                welcome: Number(row.welcome), 
+                decrease: Number(row.decrease), 
+                kick: Number(row.kick) 
+            };
+            groupSettingsCache.set(gid, { data, time: Date.now() });
+            return data;
+        }
+    } catch (e) {
+        console.error(`❌ [群事件] 读取直连数据库异常: ${e.message}`);
+        if (db && db.open) db.close();
+    }
+    return null;
+}
 
 function getTemplateConfig() {
   try {
@@ -33,37 +72,6 @@ function getBotConfig() {
   }
 }
 
-// 🌟 直连数据库读取配置（加入强类型转换，防止 "0" 变成 true）
-function getGroupSettings(groupId) {
-    const gid = String(groupId);
-    if (!fs.existsSync(SHARED_DB_PATH)) return null;
-    
-    let db = null;
-    try {
-        db = new Database(SHARED_DB_PATH, { readonly: true });
-        const tableExists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='group_event_settings'`).get();
-        if (!tableExists) {
-            db.close();
-            return null;
-        }
-        const row = db.prepare('SELECT welcome, decrease, kick FROM group_event_settings WHERE group_id = ?').get(gid);
-        db.close();
-
-        if (row) {
-            // 🌟 核心修复：全部转成 Number，确保判断时类型绝对一致
-            return { 
-                welcome: Number(row.welcome), 
-                decrease: Number(row.decrease), 
-                kick: Number(row.kick) 
-            };
-        }
-    } catch (e) {
-        console.error(`❌ [群事件] 读取直连数据库异常: ${e.message}`);
-        if (db && db.open) db.close();
-    }
-    return null;
-}
-
 function render(key, vars) {
   const tpl = getTemplateConfig()[key];
   if (!tpl) return null;
@@ -77,8 +85,17 @@ function escapeHtml(str) {
     return String(str).replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));
 }
 
+// 🌟 渲染并发锁
+let isRendering = false;
+
 async function generateEventImage(eventType, textMsg, qq) {
+    if (isRendering) {
+        console.warn('⚠️ [群事件] 渲染任务并发过高，跳过本次图片渲染，降级为文本。');
+        return null;
+    }
+    isRendering = true;
     let context = null;
+    
     try {
         let chromium = null;
         try { chromium = (await import('playwright')).chromium; } catch (e) {
@@ -131,76 +148,24 @@ async function generateEventImage(eventType, textMsg, qq) {
             <style>
                 * { box-sizing: border-box; margin: 0; padding: 0; }
                 body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: transparent; display: inline-block; }
-                .card { 
-                    background: ${bgGradient}; 
-                    border-radius: 20px; 
-                    width: 480px; 
-                    padding: 24px; 
-                    border: 1px solid rgba(255, 255, 255, 0.08); 
-                    box-shadow: 0 15px 35px rgba(0, 0, 0, 0.4); 
-                    position: relative;
-                    overflow: hidden;
-                }
-                .card::before {
-                    content: ''; position: absolute; top: -50px; left: -50px; width: 150px; height: 150px;
-                    background: ${themeColor}; filter: blur(80px); opacity: 0.3; z-index: 0;
-                }
-                .content { 
-                    position: relative; z-index: 1; 
-                    display: flex; align-items: center; gap: 20px; 
-                }
-                .avatar-box {
-                    flex-shrink: 0;
-                    width: 76px; height: 76px;
-                    border-radius: 50%;
-                    padding: 3px;
-                    background: rgba(255, 255, 255, 0.05);
-                    border: 2px solid ${themeColor};
-                    box-shadow: 0 0 15px ${themeColor}40;
-                    position: relative;
-                }
-                .avatar-box img {
-                    width: 100%; height: 100%;
-                    border-radius: 50%;
-                    object-fit: cover;
-                    display: block;
-                }
-                .badge {
-                    position: absolute; bottom: -5px; right: -5px;
-                    background: #1e1e24;
-                    border-radius: 50%; width: 28px; height: 28px;
-                    display: flex; justify-content: center; align-items: center;
-                    font-size: 16px; border: 1px solid rgba(255,255,255,0.1);
-                }
+                .card { background: ${bgGradient}; border-radius: 20px; width: 480px; padding: 24px; border: 1px solid rgba(255, 255, 255, 0.08); box-shadow: 0 15px 35px rgba(0, 0, 0, 0.4); position: relative; overflow: hidden; }
+                .card::before { content: ''; position: absolute; top: -50px; left: -50px; width: 150px; height: 150px; background: ${themeColor}; filter: blur(80px); opacity: 0.3; z-index: 0; }
+                .content { position: relative; z-index: 1; display: flex; align-items: center; gap: 20px; }
+                .avatar-box { flex-shrink: 0; width: 76px; height: 76px; border-radius: 50%; padding: 3px; background: rgba(255, 255, 255, 0.05); border: 2px solid ${themeColor}; box-shadow: 0 0 15px ${themeColor}40; position: relative; }
+                .avatar-box img { width: 100%; height: 100%; border-radius: 50%; object-fit: cover; display: block; }
+                .badge { position: absolute; bottom: -5px; right: -5px; background: #1e1e24; border-radius: 50%; width: 28px; height: 28px; display: flex; justify-content: center; align-items: center; font-size: 16px; border: 1px solid rgba(255,255,255,0.1); }
                 .text-box { flex: 1; display: flex; flex-direction: column; gap: 8px; }
-                .title { 
-                    font-size: 15px; color: #888; font-weight: 600; 
-                    letter-spacing: 1px; display: flex; align-items: center; gap: 6px;
-                }
+                .title { font-size: 15px; color: #888; font-weight: 600; letter-spacing: 1px; display: flex; align-items: center; gap: 6px; }
                 .title::before { content: ''; width: 4px; height: 14px; background: ${themeColor}; border-radius: 2px; }
-                .message { 
-                    font-size: 16px; color: #eee; line-height: 1.5; 
-                    word-break: break-all; font-weight: 500;
-                }
-                .footer {
-                    position: relative; z-index: 1;
-                    margin-top: 20px; padding-top: 12px;
-                    border-top: 1px dashed rgba(255, 255, 255, 0.1);
-                    font-size: 12px; color: #666; text-align: right;
-                }
+                .message { font-size: 16px; color: #eee; line-height: 1.5; word-break: break-all; font-weight: 500; }
+                .footer { position: relative; z-index: 1; margin-top: 20px; padding-top: 12px; border-top: 1px dashed rgba(255, 255, 255, 0.1); font-size: 12px; color: #666; text-align: right; }
             </style>
         </head>
         <body>
             <div class="card">
                 <div class="content">
-                    <div class="avatar-box">
-                        <img src="${avatarUrl}" alt="avatar">
-                        <div class="badge">${icon}</div>
-                    </div>
-                    <div class="text-box">
-                        <div class="title">群事件提示</div>
-                        <div class="message">${htmlText}</div>
-                    </div>
+                    <div class="avatar-box"><img src="${avatarUrl}" alt="avatar"><div class="badge">${icon}</div></div>
+                    <div class="text-box"><div class="title">群事件提示</div><div class="message">${htmlText}</div></div>
                 </div>
                 <div class="footer">XingYuanBot 自动播报</div>
             </div>
@@ -214,12 +179,10 @@ async function generateEventImage(eventType, textMsg, qq) {
         
         const cardElement = await page.$('.card');
         const buffer = await cardElement.screenshot({ type: 'png', omitBackground: true });
-        
         return buffer;
     } catch (e) {
         console.error('❌ [群事件] 渲染图片失败，将降级为纯文本:', e.message);
         if (e.message.includes('Target page, context or browser has been closed') || e.message.includes('Connection closed')) {
-            console.warn('⚠️ [群事件] 检测到浏览器异常关闭，正在重置实例...');
             if (eventBrowser) {
                 try { await eventBrowser.close(); } catch(err){}
                 eventBrowser = null;
@@ -227,6 +190,7 @@ async function generateEventImage(eventType, textMsg, qq) {
         }
         return null;
     } finally {
+        isRendering = false;
         if (context) {
             try { await context.close(); } catch (err) {}
         }
@@ -261,14 +225,15 @@ function parseMessage(cqString) {
   return result.length > 0 ? result : [{ type: 'text', data: { text: cqString } }];
 }
 
-async function getGroupName(groupId, userId) {
+// 🌟 补充 ws 参数
+async function getGroupName(groupId, userId, ws) {
   if (typeof globalThis.wsCall !== 'function') return null;
   try {
     const data = await globalThis.wsCall('get_group_member_info', {
       group_id: Number(groupId),
       user_id: Number(userId),
       no_cache: false
-    });
+    }, 3000, ws);
     return data.data?.card || data.data?.nickname || null;
   } catch (e) { 
     return null; 
@@ -287,10 +252,16 @@ export default {
     const groupSets = getGroupSettings(e.groupId);
     if (!groupSets) return; 
 
+    // 🌟 核心修复 2：精准获取当前的 ws，多号不串台
     const raw = e.raw || {};
+    const selfId = String(e.selfId || raw.self_id || '');
+    let ws = conn?.ws;
+    if (!ws && selfId && globalThis.sharedState?.botIdToWs) {
+        ws = globalThis.sharedState.botIdToWs.get(selfId);
+    }
+    if (!ws) ws = globalThis.activeWs;
+
     let key = '';
-    
-    // 🌟 核心修复：绝对精准的事件识别
     if (e.event === 'group.increase') {
         key = 'welcome';
     } else if (e.event === 'group.decrease' || e.event === 'group.kick') {
@@ -300,10 +271,9 @@ export default {
             key = 'decrease';
         }
     } else {
-        return; // 不是这三种事件，直接干碎
+        return; 
     }
 
-    // 🌟 核心修复：绝对严格的三项独立拦截（不是 1 就滚蛋）
     if (key === 'welcome' && groupSets.welcome !== 1) return;
     if (key === 'decrease' && groupSets.decrease !== 1) return;
     if (key === 'kick' && groupSets.kick !== 1) return;
@@ -321,7 +291,6 @@ export default {
 
     if (key === 'decrease' || key === 'kick') {
         qqValue = raw.nickname || raw.card || qqValue;
-        
         const cachedUser = cachedMembers.find(m => String(m.user_id) === targetQQ);
         if (cachedUser) qqValue = cachedUser.card || cachedUser.nickname || qqValue;
 
@@ -334,12 +303,12 @@ export default {
         const cachedUser = cachedMembers.find(m => String(m.user_id) === targetQQ);
         const cachedUserCard = cachedUser ? (cachedUser.card || cachedUser.nickname) : null;
         
-        qqValue = raw.nickname || raw.card || cachedUserCard || await getGroupName(e.groupId, targetQQ) || targetQQ;
+        qqValue = raw.nickname || raw.card || cachedUserCard || await getGroupName(e.groupId, targetQQ, ws) || targetQQ;
         
         if (operatorQQ && operatorQQ !== '0') {
             const cachedOp = cachedMembers.find(m => String(m.user_id) === operatorQQ);
             const cachedOpCard = cachedOp ? (cachedOp.card || cachedOp.nickname) : null;
-            opValue = raw.operator_nickname || raw.operator_card || cachedOpCard || await getGroupName(e.groupId, operatorQQ) || operatorQQ;
+            opValue = raw.operator_nickname || raw.operator_card || cachedOpCard || await getGroupName(e.groupId, operatorQQ, ws) || operatorQQ;
         }
     }
 
@@ -355,14 +324,14 @@ export default {
                     message_type: 'group',
                     group_id: Number(e.groupId),
                     message: [{ type: 'image', data: { file: `base64://${imageBuffer.toString('base64')}` } }],
-                });
+                }, 10000, ws); // 🌟 传入 ws
                 console.log(`✅ [${key}] → 群 ${e.groupId}: [图片卡片已发送]`);
             } else {
                 await globalThis.wsCall('send_msg', {
                     message_type: 'group',
                     group_id: Number(e.groupId),
                     message: parseMessage(msg),
-                });
+                }, 10000, ws); // 🌟 传入 ws
                 console.log(`✅ [${key}] → 群 ${e.groupId} (文本降级): ${msg}`);
             }
         } catch (err) {

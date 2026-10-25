@@ -8,7 +8,10 @@ import signal
 
 # 自动获取脚本所在目录
 BOT_DIR = os.path.dirname(os.path.abspath(__file__))
-NODE_CMD = ["node", "--no-warnings", "app.js"]
+
+# 🌟 优化 1：自动探测 node 路径
+NODE_BIN = shutil.which("node") or "node"
+NODE_CMD = [NODE_BIN, "--no-warnings", "app.js"]
 
 def restart_sequence():
     print("*" * 40)
@@ -17,9 +20,7 @@ def restart_sequence():
 
     log_file = os.path.join(BOT_DIR, "restart_log.txt")
     
-    # 检查是否开启后台模式 (-d 或 --daemon)
     DAEMON_MODE = ("-d" in sys.argv or "--daemon" in sys.argv)
-    # 获取旧进程 PID（过滤掉启动参数 -d/--daemon）
     pid_args = [arg for arg in sys.argv[1:] if arg not in ["-d", "--daemon"]]
     old_pid = pid_args[0] if len(pid_args) > 0 else None
 
@@ -28,13 +29,23 @@ def restart_sequence():
     is_macos = current_os == "Darwin"
     is_linux = current_os == "Linux"
 
+    # 🌟 优化 2：如果没有传入 PID，尝试自动寻找占用端口 (以 3001 为例)
+    if not old_pid and is_linux:
+        try:
+            # 尝试通过 lsof 寻找占用 3001 端口的进程
+            out = subprocess.check_output(["lsof", "-t", "-i:3001"], stderr=subprocess.DEVNULL).decode().strip()
+            if out:
+                old_pid = out.split('\n')[0]
+                print(f"  [Python] 未提供 PID，自动检测到占用 3001 端口的旧进程: {old_pid}")
+        except Exception:
+            pass
+
     try:
         with open(log_file, "w", encoding="utf-8") as f:
             f.write("=== 启动重启序列 ===\n")
             f.write(f"旧进程 PID: {old_pid}\n")
             f.write(f"当前系统: {current_os}\n")
-            if DAEMON_MODE:
-                f.write("启动模式: 后台守护模式 (Daemon)\n")
+            f.write(f"Node 执行路径: {NODE_BIN}\n")
 
             # --- 第1步：优雅杀掉旧进程 ---
             if old_pid:
@@ -43,28 +54,29 @@ def restart_sequence():
 
                 try:
                     if is_windows:
-                        # Windows: 先尝试不加 /f 正常关闭 (发送 WM_CLOSE 信号)
                         subprocess.run(["taskkill", "/pid", old_pid], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     else:
-                        # Linux/Mac: 发送 SIGTERM，触发 Node.js 的 process.on('SIGTERM') 清理逻辑
+                        # Linux/Mac 发送 SIGTERM，让 Node.js 触发 cleanupAllInstances
                         subprocess.run(["kill", "-15", old_pid], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 except Exception as e:
                     f.write(f"发送优雅退出信号失败: {e}\n")
 
-                # 等待 3 秒，给 Node.js 时间保存数据库和释放端口
+                # 等待 3 秒
                 for _ in range(3):
                     time.sleep(1)
-                    # 检查进程是否还活着 (kill 0 只是检查进程是否存在，不杀进程)
                     try:
                         if not is_windows:
                             os.kill(int(old_pid), 0) 
-                        # 如果没抛出异常，说明还活着，继续等
+                        else:
+                            # Windows 下简单用 tasklist 查一下
+                            check = subprocess.run(["tasklist", "/FI", f"PID eq {old_pid}"], capture_output=True, text=True)
+                            if old_pid not in check.stdout:
+                                raise OSError("进程已消失")
                     except OSError:
                         print(f"  [Python] 旧进程已优雅退出。")
                         f.write("旧进程已优雅退出。\n")
                         break
                 else:
-                    # 如果 3 秒后还活着，强制击杀
                     print(f"  [Python] 旧进程未响应，执行强制击杀...")
                     f.write("旧进程未响应，执行强制击杀。\n")
                     if is_windows:
@@ -76,87 +88,66 @@ def restart_sequence():
             # --- 第2步：启动新窗口 ---
             print("  [Python] 准备启动新窗口...")
             f.write("正在启动新进程...\n")
+            
+            # 🌟 优化 3：日志防膨胀机制
+            daemon_log = os.path.join(BOT_DIR, "bot_daemon.log")
+            if os.path.exists(daemon_log) and os.path.getsize(daemon_log) > 10 * 1024 * 1024: # 10MB
+                try:
+                    os.rename(daemon_log, daemon_log + ".old")
+                except:
+                    pass
 
             if is_windows:
-                # === Windows 方案 ===
-                subprocess.Popen(
-                    NODE_CMD,
-                    cwd=BOT_DIR,
-                    creationflags=subprocess.CREATE_NEW_CONSOLE
-                )
+                subprocess.Popen(NODE_CMD, cwd=BOT_DIR, creationflags=subprocess.CREATE_NEW_CONSOLE)
 
             elif is_macos:
-                # === macOS 方案 ===
-                script_cmd = f"cd '{BOT_DIR}' && node app.js; echo '进程已结束，按回车退出...'; read"
-                launch_cmd = [
-                    "osascript", "-e",
-                    f'tell application "Terminal" to do script "{script_cmd}"'
-                ]
+                # Mac 下使用 osascript 调起 Terminal
+                script_cmd = f"cd '{BOT_DIR}' && {NODE_BIN} app.js; echo '进程已结束，按回车退出...'; read"
+                launch_cmd = ["osascript", "-e", f'tell application "Terminal" to do script "{script_cmd}"']
                 subprocess.Popen(launch_cmd)
                 print("  [Python] 已呼叫 macOS 终端弹出窗口。")
                 f.write("已呼叫 macOS 终端。\n")
 
             elif is_linux:
-                # === Linux 智能检测方案 ===
-                cmd_to_run = f"cd '{BOT_DIR}' && node app.js; echo '进程已结束，按回车退出...'; read"
+                cmd_to_run = f"cd '{BOT_DIR}' && {NODE_BIN} app.js; echo '进程已结束，按回车退出...'; read"
                 launched = False
 
                 if DAEMON_MODE:
-                    # === 后台守护模式启动 ===
-                    daemon_log = os.path.join(BOT_DIR, "bot_daemon.log")
                     print(f"  [Python] 正在启动后台守护进程 (日志: {daemon_log})...")
                     f.write("启动 Linux 后台守护进程...\n")
-                    
                     with open(daemon_log, "a") as dlog:
-                        subprocess.Popen(
-                            NODE_CMD,
-                            cwd=BOT_DIR,
-                            stdout=dlog,
-                            stderr=subprocess.STDOUT,
-                            start_new_session=True
-                        )
+                        # 🌟 使用 start_new_session 让子进程脱离父进程，防止 SIGHUP 挂断
+                        subprocess.Popen(NODE_CMD, cwd=BOT_DIR, stdout=dlog, stderr=subprocess.STDOUT, start_new_session=True)
                     launched = True
                 else:
-                    # 1. 优先检测 xterm
-                    if shutil.which("xterm"):
-                        print("  [Python] 检测到 xterm，正在启动...")
-                        f.write("检测到 xterm，正在启动。\n")
-                        subprocess.Popen(["xterm", "-e", cmd_to_run])
-                        launched = True
+                    # 🌟 优化 4：增加更多终端兼容
+                    terminals = [
+                        ("xterm", ["xterm", "-e", cmd_to_run]),
+                        ("gnome-terminal", ["gnome-terminal", "--", "bash", "-c", cmd_to_run]),
+                        ("konsole", ["konsole", "-e", "bash", "-c", cmd_to_run]),
+                        ("xfce4-terminal", ["xfce4-terminal", "-e", cmd_to_run])
+                    ]
+                    
+                    for term_name, term_cmd in terminals:
+                        if shutil.which(term_name):
+                            print(f"  [Python] 检测到 {term_name}，正在启动...")
+                            f.write(f"检测到 {term_name}，正在启动。\n")
+                            subprocess.Popen(term_cmd)
+                            launched = True
+                            break
 
-                    # 2. 检测原生 gnome-terminal
-                    elif shutil.which("gnome-terminal"):
-                        print("  [Python] 未检测到 xterm，回退使用原生 gnome-terminal...")
-                        f.write("回退使用原生 gnome-terminal。\n")
-                        subprocess.Popen(["gnome-terminal", "--", "bash", "-c", cmd_to_run])
-                        launched = True
-
-                    # 3. 终极兜底：如果没有图形终端，在后台静默运行
                     if not launched:
                         print("  [Python] 未检测到可用图形终端，将在后台静默运行。")
                         f.write("未检测到图形终端，已启动后台静默运行。\n")
-                        daemon_log = os.path.join(BOT_DIR, "bot_daemon.log")
                         with open(daemon_log, "a") as dlog:
-                            subprocess.Popen(
-                                NODE_CMD,
-                                cwd=BOT_DIR,
-                                stdout=dlog,
-                                stderr=subprocess.STDOUT,
-                                start_new_session=True
-                            )
-                        # 核心逻辑：Python 脚本自杀，让 Node.js 成为独立的后台守护进程
+                            subprocess.Popen(NODE_CMD, cwd=BOT_DIR, stdout=dlog, stderr=subprocess.STDOUT, start_new_session=True)
+                        
+                        # 让 Python 脚本立刻退出，把空间留给 Node.js
                         print("  [Python] 重启指令已发送，本脚本即将退出...")
-                        os.kill(os.getpid(), signal.SIGTERM)
+                        os._exit(0) # 使用 _exit 立刻退出，防止清理逻辑挂断子进程
 
             else:
-                # 其他未知系统，保险起见在后台运行
-                subprocess.Popen(
-                    NODE_CMD,
-                    cwd=BOT_DIR,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    start_new_session=True
-                )
+                subprocess.Popen(NODE_CMD, cwd=BOT_DIR, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
                 f.write("未知系统，已在后台运行。\n")
 
             print("*" * 40)

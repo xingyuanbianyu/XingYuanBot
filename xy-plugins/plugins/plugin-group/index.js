@@ -12,13 +12,19 @@ class PluginGroup {
         this.name = 'plugin-group';
         this.loadedPlugins = [];
         this._ready = false;
+        this._isReloading = false;
         
         this._loadConfig();
+        this._initWatcher(); // 🌟 修复 1：监听配置文件自身变化
         this._loadSubPlugins();
     }
 
     _loadConfig() {
-        if (!fs.existsSync(CONFIG_PATH)) return;
+        if (!fs.existsSync(CONFIG_PATH)) {
+            this.config = { plugins: [] };
+            this.globalConfig = {};
+            return;
+        }
         try {
             this.config = YAML.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) || {};
             this.globalConfig = this.config.global || {};
@@ -39,7 +45,24 @@ class PluginGroup {
         }
     }
 
-    // 提取 path 里的文件夹名作为分组
+    // 🌟 修复 2：自动重载配置，解决修改路径不生效的问题
+    _initWatcher() {
+        if (!fs.existsSync(CONFIG_PATH)) return;
+        try {
+            fs.watch(CONFIG_PATH, (event) => {
+                if (event === 'change' && !this._isReloading) {
+                    this._isReloading = true;
+                    setTimeout(async () => {
+                        console.log(`[PluginGroup] 👀 检测到 config.yaml 修改，正在重新加载子插件...`);
+                        this._loadConfig();
+                        await this._loadSubPlugins();
+                        this._isReloading = false;
+                    }, 200); // 防抖
+                }
+            });
+        } catch (e) {}
+    }
+
     _getGroupFromPath(p) {
         if (!p) return '根目录';
         let cleanPath = p.replace(/^\.\//, '').replace(/^\/+/, '').replace(/\/+$/, '');
@@ -49,7 +72,6 @@ class PluginGroup {
         return cleanPath.split('/')[0];
     }
 
-    // 移动分组时，只替换第一层文件夹名
     _replaceGroupInPath(p, newGroup) {
         if (!p) return `./${newGroup}`;
         let cleanPath = p.replace(/^\.\//, '').replace(/^\/+/, '').replace(/\/+$/, '');
@@ -62,11 +84,19 @@ class PluginGroup {
     }
 
     async _checkAdmin(msg) {
+        // 🌟 修复 3：严格判断群聊环境并传递 _ws
+        if (!msg.isGroup) return false;
+        
         let hasPermission = false;
         try {
-            const res = await globalThis.wsCall('get_group_member_info', { group_id: Number(msg.chatId), user_id: Number(msg.senderQQ) });
-            if (['owner', 'admin'].includes(res?.data?.role)) hasPermission = true;
+            const res = await globalThis.wsCall('get_group_member_info', { 
+                group_id: Number(msg.chatId), 
+                user_id: Number(msg.senderQQ) 
+            }, 3000, msg._ws); // 传入 msg._ws
+
+            if (res?.data && ['owner', 'admin'].includes(res.data.role)) hasPermission = true;
         } catch (e) {}
+        
         if (!hasPermission && typeof getRole === 'function') {
             if (['master', 'owner', 'admin'].includes(getRole(msg.senderQQ))) hasPermission = true;
         }
@@ -74,34 +104,34 @@ class PluginGroup {
     }
     
     match(data) {
-        if (!this._ready && this.loadedPlugins.length === 0) return false;
-        
         const pureText = typeof data === 'string' ? data.trim() : (data.pureText || data.content || '').trim();
         if (!pureText) return false;
 
+        // 匹配管理指令
         if (/^(创建分组|删除分组|查看分组|移动子插件)/.test(pureText)) return true;
 
+        // 匹配子插件
         for (const plugin of this.loadedPlugins) {
             try {
-                if (plugin.match && plugin.match(pureText)) {
-                    return true;
-                }
+                if (plugin.match && plugin.match(pureText)) return true;
             } catch (e) {}
         }
         return false;
     }
 
     async _loadSubPlugins() {
-        console.log(`🚀 [调试] 开始加载子插件...`);
-
         const global = this.config.global || {};
         const plugins = this.config.plugins || [];
+        this.loadedPlugins = []; // 🌟 每次重载前清空旧实例
 
-        if (plugins.length === 0) return;
+        if (plugins.length === 0) {
+            this._ready = true;
+            return;
+        }
 
         for (const item of plugins) {
             const pluginConfig = {
-                name: item.name,
+                name: item.name || item.entry,
                 enabled: item.enabled ?? global.enabled ?? true,
                 path: item.path,
                 entry: item.entry || 'index.js',
@@ -110,14 +140,16 @@ class PluginGroup {
             if (!pluginConfig.enabled) continue;
 
             try {
-                const fullPath = path.join(__dirname, pluginConfig.path, pluginConfig.entry);
-
+                // 🌟 核心修复 4：加入时间戳破除 ESM 缓存，实现真正的动态热重载
+                const fullPath = path.resolve(__dirname, pluginConfig.path, pluginConfig.entry);
+                const fileUrl = pathToFileURL(fullPath).href + `?t=${Date.now()}`;
+                
                 if (!fs.existsSync(fullPath)) {
                     console.log(`❌ [失败] ${pluginConfig.name} 找不到文件: ${fullPath}`);
                     continue;
                 }
 
-                const mod = await import(pathToFileURL(fullPath).href);
+                const mod = await import(fileUrl);
                 const PluginExport = mod.default;
 
                 let instance;
@@ -159,7 +191,6 @@ class PluginGroup {
                 for (const p of this.config.plugins) {
                     const gName = this._getGroupFromPath(p.path);
                     if (!groups[gName]) groups[gName] = [];
-                    // 🌟 核心修改：这里展示 entry，而不是 name
                     groups[gName].push(p.entry || 'index.js');
                 }
 
@@ -200,7 +231,8 @@ class PluginGroup {
 
                 if (movedCount > 0) {
                     this._saveConfig();
-                    return `✅ 已删除分组【${groupName}】，里面的 ${movedCount} 个插件路径已重置为根目录。`;
+                    // 这里不需要手动重载，_initWatcher 会自动检测到文件变化并重载
+                    return `✅ 已删除分组【${groupName}】，里面的 ${movedCount} 个插件路径已重置为根目录。\n🔄 正在自动重载子插件...`;
                 } else {
                     return `⚠️ 找不到分组：${groupName}`;
                 }
@@ -217,7 +249,6 @@ class PluginGroup {
                 let movedCount = 0;
                 for (const p of this.config.plugins) {
                     const currentGroup = this._getGroupFromPath(p.path);
-                    // 🌟 核心修改：支持匹配 name、entry 或 旧分组名
                     if (p.name === target || p.entry === target || currentGroup === target) {
                         p.path = this._replaceGroupInPath(p.path, newGroup);
                         movedCount++;
@@ -226,7 +257,7 @@ class PluginGroup {
 
                 if (movedCount > 0) {
                     this._saveConfig();
-                    return `✅ 成功将 ${movedCount} 个插件指向了【${newGroup}】路径！\n⚠️ 请确保服务器物理目录中已存在该文件夹。`;
+                    return `✅ 成功将 ${movedCount} 个插件指向了【${newGroup}】路径！\n🔄 正在自动重载子插件...\n⚠️ 请确保服务器物理目录中已存在该文件夹。`;
                 } else {
                     return `⚠️ 找不到插件或分组：${target}`;
                 }
@@ -236,7 +267,7 @@ class PluginGroup {
         // ==========================================
         // 向下分发给子插件
         // ==========================================
-        if (!this._ready && this.loadedPlugins.length === 0) return null;
+        if (!this._ready || this.loadedPlugins.length === 0) return null;
 
         for (const plugin of this.loadedPlugins) {
             if (plugin.match && !plugin.match(pureText)) continue;
@@ -245,7 +276,9 @@ class PluginGroup {
                 const result = await plugin.handle(data, context);
                 if (result) return result; 
             } catch (err) {
-                console.error(`[PluginGroup] 子插件 ${plugin.pluginConfig?.name} 执行出错:`, err.message);
+                // 🌟 修复 5：子插件报错不应该中断整个流程，应该打印错误并继续给下一个子插件处理机会
+                console.error(`[PluginGroup] 子插件 [${plugin.pluginConfig?.name}] 执行出错:`, err.message);
+                // return `❌ 内部模块发生错误，请联系管理员。`; // 你可以选择是否向用户抛出错误
             }
         }
         return null;

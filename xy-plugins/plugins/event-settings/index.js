@@ -1,37 +1,37 @@
-// xy-plugins/plugins/event-settings/index.js
-import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import Database from 'better-sqlite3';
 import { getRole } from '../../../xy-config/config/permissions.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DB_NAME = 'group_data'; 
+const DB_PATH = path.join(__dirname, 'group_data.db'); // 建在当前插件目录下
 
-// 初始化数据库（默认建在当前插件目录下）
-if (typeof globalThis.db === 'function') {
-    globalThis.db('exec', {
-        dbName: DB_NAME,
-        sql: `CREATE TABLE IF NOT EXISTS group_event_settings (
-            group_id TEXT PRIMARY KEY,
-            welcome INTEGER DEFAULT 1,
-            decrease INTEGER DEFAULT 1,
-            kick INTEGER DEFAULT 1
-        )`
-    });
-}
+// 🌟 抛弃魔法，直接使用 better-sqlite3
+const db = new Database(DB_PATH);
+db.pragma('journal_mode = WAL');
+db.exec(`
+  CREATE TABLE IF NOT EXISTS group_event_settings (
+    group_id TEXT PRIMARY KEY,
+    welcome INTEGER DEFAULT 1,
+    decrease INTEGER DEFAULT 1,
+    kick INTEGER DEFAULT 1
+  )
+`);
 
+// 🌟 统一获取配置函数
 function getGroupSettings(groupId) {
     const gid = String(groupId);
-    let settings = { welcome: 1, decrease: 1, kick: 1 };
-    if (typeof globalThis.db === 'function') {
-        const res = globalThis.db('find', {
-            dbName: DB_NAME, table: 'group_event_settings', where: 'group_id = ?', params: [gid], all: false
-        });
-        if (res.success && res.data) {
-            settings = { welcome: res.data.welcome, decrease: res.data.decrease, kick: res.data.kick };
+    try {
+        const row = db.prepare('SELECT welcome, decrease, kick FROM group_event_settings WHERE group_id = ?').get(gid);
+        if (row) {
+            return { 
+                welcome: row.welcome, 
+                decrease: row.decrease, 
+                kick: row.kick 
+            };
         }
-    }
-    return settings;
+    } catch (e) {}
+    return { welcome: 1, decrease: 1, kick: 1 };
 }
 
 export default {
@@ -40,35 +40,42 @@ export default {
     // 纯指令匹配
     match(text) {
         if (!text || typeof text !== 'string') return false;
-        return /^(开启|关闭)(入群|退群|踢人)提示$/.test(text.trim()) || text.trim() === '群事件设置';
+        const cmd = text.trim();
+        return /^(开启|关闭)(入群|退群|踢人)提示$/.test(cmd) || cmd === '群事件设置';
     },
 
     async handle(msg) {
+        if (!msg.isGroup) return '❌ 该指令仅限在群聊中使用。';
+
         const cmd = (msg.pureText || "").trim();
         const groupId = String(msg.chatId);
         const senderQQ = String(msg.senderQQ);
+        const ws = msg._ws; // 🌟 获取当前连接的 ws
 
-        if (!msg.isGroup) return '❌ 该指令仅限在群聊中使用。';
-
+        // 权限校验
         let isAdmin = false;
         try {
-            const res = await fetch(`http://127.0.0.1:3000/get_group_member_info?group_id=${groupId}&user_id=${senderQQ}`);
-            const data = await res.json();
-            if (data?.data?.role === 'owner' || data?.data?.role === 'admin') isAdmin = true;
+            // 🌟 核心修复 1：干掉 fetch，改用 wsCall 并精准传递 ws
+            const res = await globalThis.wsCall('get_group_member_info', { 
+                group_id: Number(groupId), 
+                user_id: Number(senderQQ) 
+            }, 3000, ws);
+            
+            if (['owner', 'admin'].includes(res?.data?.role)) isAdmin = true;
         } catch(e) {}
         
-        const configRole = getRole ? getRole(senderQQ) : 'member';
+        const configRole = typeof getRole === 'function' ? getRole(senderQQ) : 'member';
         const hasPermission = isAdmin || ['master', 'owner', 'admin'].includes(configRole);
 
         if (!hasPermission) return '❌ 权限不足：仅群主、管理员或主人可配置。';
 
-        // 1. 查看
+        // 1. 查看配置
         if (cmd === '群事件设置') {
             const sets = getGroupSettings(groupId);
             return `⚙️ 本群事件提示配置：\n👋 入群提示：${sets.welcome ? '✅ 开启' : '❌ 关闭'}\n🚪 退群提示：${sets.decrease ? '✅ 开启' : '❌ 关闭'}\n👢 踢人提示：${sets.kick ? '✅ 开启' : '❌ 关闭'}\n\n💡 发送“开启入群提示”等指令可修改。`;
         }
 
-        // 2. 修改
+        // 2. 修改配置
         const match = cmd.match(/^(开启|关闭)(入群|退群|踢人)提示$/);
         if (match) {
             const action = match[1] === '开启' ? 1 : 0;
@@ -79,29 +86,30 @@ export default {
             if (type === '退群') field = 'decrease';
             if (type === '踢人') field = 'kick';
 
-            if (typeof globalThis.db === 'function') {
-                const current = getGroupSettings(groupId);
-                current[field] = action;
-                
-                const check = globalThis.db('find', { dbName: DB_NAME, table: 'group_event_settings', where: 'group_id = ?', params: [groupId], all: false });
-                if (check.success && check.data) {
-                    globalThis.db('update', {
-                        dbName: DB_NAME, table: 'group_event_settings',
-                        set: { [field]: action }, where: 'group_id = ?', params: [groupId]
-                    });
-                } else {
-                    globalThis.db('insert', {
-                        dbName: DB_NAME, table: 'group_event_settings',
-                        data: {
-                            group_id: groupId,
-                            welcome: field === 'welcome' ? action : current.welcome,
-                            decrease: field === 'decrease' ? action : current.decrease,
-                            kick: field === 'kick' ? action : current.kick
-                        }
-                    });
-                }
+            try {
+                // 🌟 核心修复 2：使用 SQLite 的 UPSERT 语法 (ON CONFLICT)
+                // 如果记录存在，只更新对应的字段；如果不存在，则插入并设置默认值
+                db.prepare(`
+                    INSERT INTO group_event_settings (group_id, welcome, decrease, kick)
+                    VALUES (@gid, @welcome, @decrease, @kick)
+                    ON CONFLICT(group_id) DO UPDATE SET 
+                        welcome = CASE WHEN @field = 'welcome' THEN @action ELSE welcome END,
+                        decrease = CASE WHEN @field = 'decrease' THEN @action ELSE decrease END,
+                        kick = CASE WHEN @field = 'kick' THEN @action ELSE kick END
+                `).run({
+                    gid: groupId,
+                    welcome: field === 'welcome' ? action : 1,
+                    decrease: field === 'decrease' ? action : 1,
+                    kick: field === 'kick' ? action : 1,
+                    field: field,
+                    action: action
+                });
+
+                return `✅ 已成功【${match[1]}】本群的【${type}提示】。`;
+            } catch (e) {
+                globalThis.print(`[群事件配置] 数据库写入失败: ${e.message}`);
+                return `❌ 修改失败，请查看后台日志。`;
             }
-            return `✅ 已成功【${match[1]}】本群的【${type}提示】。`;
         }
         return null;
     }
