@@ -1,6 +1,6 @@
 {
   "name": "XingYuanBot",
-  "version": "2.9.5",
+  "version": "3.0.0",
   "description": "OneBot  QQ",
   "main": "app.js",
   "scripts": {
@@ -28,7 +28,8 @@
     "express": "^4.19.2",
     "fs-extra": "^11.2.0", 
     "http-proxy-middleware": "^2.0.6",
-    "yaml": "^2.8.0"
+    "yaml": "^2.8.0",
+    "playwright": "^1.44.0"
   },
   "engines": {
     "node": ">=18.0.0",

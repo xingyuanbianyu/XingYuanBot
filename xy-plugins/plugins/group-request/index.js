@@ -1,10 +1,22 @@
 import { getRole } from '../../../xy-config/config/permissions.js';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import Database from 'better-sqlite3';
 
-// 缓存发出去的通知消息，用于管理员引用回复
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
 const pendingRequests = new Map();
 const DB_NAME = 'group_request_data';
 
-// 初始化数据库表
+// 🌟 防爆破内存缓存：记录【每个人】在【每个群】的申请时间戳
+// 结构: Map<`${groupId}_${userId}`, number[]>
+const userBlastTracker = new Map();
+
+// 🌟 群预警缓存：记录每个群的总申请时间戳
+const groupBlastTracker = new Map();
+
+// 初始化本插件的数据库表
 if (typeof globalThis.db === 'function') {
     globalThis.db('exec', {
         dbName: DB_NAME,
@@ -12,113 +24,219 @@ if (typeof globalThis.db === 'function') {
             group_id TEXT PRIMARY KEY,
             enabled INTEGER DEFAULT 0,
             auto_process INTEGER DEFAULT 0,
-            auto_answer TEXT DEFAULT ''
+            auto_answer TEXT DEFAULT '',
+            anti_blast_enabled INTEGER DEFAULT 1,
+            blast_max_count INTEGER DEFAULT 5,
+            blast_time_window INTEGER DEFAULT 60
         )`
     });
+    try { globalThis.db('exec', { dbName: DB_NAME, sql: 'ALTER TABLE request_settings ADD COLUMN anti_blast_enabled INTEGER DEFAULT 1' }); } catch(e){}
+    try { globalThis.db('exec', { dbName: DB_NAME, sql: 'ALTER TABLE request_settings ADD COLUMN blast_max_count INTEGER DEFAULT 5' }); } catch(e){}
+    try { globalThis.db('exec', { dbName: DB_NAME, sql: 'ALTER TABLE request_settings ADD COLUMN blast_time_window INTEGER DEFAULT 60' }); } catch(e){}
+}
+
+// 查询群管插件的黑名单数据库
+function checkIsBanned(groupId, userId) {
+    const possiblePaths = [
+        path.resolve(__dirname, '../group-plugin/group_data.db'),
+        path.resolve(__dirname, '../群管/group_data.db'),
+        path.resolve(__dirname, '../../QQ/group-plugin/group_data.db'),
+        path.resolve(__dirname, '../event-settings/group_data.db')
+    ];
+    let targetPath = null;
+    for (const p of possiblePaths) {
+        if (fs.existsSync(p)) { targetPath = p; break; }
+    }
+    if (!targetPath) return false;
+
+    let db = null;
+    try {
+        db = new Database(targetPath, { readonly: true });
+        const tableExists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='group_reject_list'`).get();
+        if (!tableExists) return false;
+        const row = db.prepare('SELECT user_id FROM group_reject_list WHERE group_id = ? AND user_id = ?').get(String(groupId), String(userId));
+        return !!row; 
+    } catch (e) {
+        return false;
+    } finally {
+        if (db && db.open) db.close();
+    }
+}
+
+// 🌟 将恶意用户写入群管黑名单
+function addToBlacklist(groupId, userId, nickname, reason) {
+    const possiblePaths = [
+        path.resolve(__dirname, '../group-plugin/group_data.db'),
+        path.resolve(__dirname, '../群管/group_data.db'),
+        path.resolve(__dirname, '../../QQ/group-plugin/group_data.db'),
+        path.resolve(__dirname, '../event-settings/group_data.db')
+    ];
+    let targetPath = null;
+    for (const p of possiblePaths) {
+        if (fs.existsSync(p)) { targetPath = p; break; }
+    }
+    if (!targetPath) return;
+
+    let db = null;
+    try {
+        db = new Database(targetPath);
+        db.prepare(`CREATE TABLE IF NOT EXISTS group_reject_list (
+            group_id TEXT, user_id TEXT, nickname TEXT, create_time INTEGER, PRIMARY KEY(group_id, user_id)
+        )`).run();
+        db.prepare('INSERT OR REPLACE INTO group_reject_list (group_id, user_id, nickname, create_time) VALUES (?, ?, ?, ?)').run(
+            String(groupId), String(userId), nickname || `爆破者(${reason})`, Math.floor(Date.now() / 1000)
+        );
+    } catch (e) {
+        globalThis.print(`[入群申请] 写入黑名单失败: ${e.message}`);
+    } finally {
+        if (db && db.open) db.close();
+    }
 }
 
 export default {
     name: '入群申请',
     events: ['group.request'],
 
-    // 获取群的配置信息
     getGroupSettings(groupId) {
-        const defaults = { enabled: 0, auto_process: 0, auto_answer: '' };
+        const defaults = { 
+            enabled: 0, auto_process: 0, auto_answer: '',
+            anti_blast_enabled: 1, blast_max_count: 5, blast_time_window: 60
+        };
         if (typeof globalThis.db !== 'function') return defaults;
         
-        const res = globalThis.db('find', {
-            dbName: DB_NAME, table: 'request_settings', where: 'group_id = ?', params: [String(groupId)], all: false
-        });
+        const res = globalThis.db('find', { dbName: DB_NAME, table: 'request_settings', where: 'group_id = ?', params: [String(groupId)], all: false });
         if (res.success && res.data) {
             return {
                 enabled: res.data.enabled,
                 auto_process: res.data.auto_process,
-                auto_answer: res.data.auto_answer || ''
+                auto_answer: res.data.auto_answer || '',
+                anti_blast_enabled: res.data.anti_blast_enabled !== undefined ? res.data.anti_blast_enabled : 1,
+                blast_max_count: res.data.blast_max_count || 5,
+                blast_time_window: res.data.blast_time_window || 60
             };
         }
         return defaults;
     },
 
-    // 保存群的配置信息
     setGroupSetting(groupId, key, value) {
         if (typeof globalThis.db !== 'function') return false;
         const gid = String(groupId);
         const check = globalThis.db('find', { dbName: DB_NAME, table: 'request_settings', where: 'group_id = ?', params: [gid], all: false });
         
         if (check.success && check.data) {
-            globalThis.db('update', {
-                dbName: DB_NAME, table: 'request_settings', set: { [key]: value }, where: 'group_id = ?', params: [gid]
-            });
+            globalThis.db('update', { dbName: DB_NAME, table: 'request_settings', set: { [key]: value }, where: 'group_id = ?', params: [gid] });
         } else {
-            globalThis.db('insert', {
-                dbName: DB_NAME, table: 'request_settings', data: { group_id: gid, [key]: value }
-            });
+            globalThis.db('insert', { dbName: DB_NAME, table: 'request_settings', data: { group_id: gid, [key]: value } });
         }
         return true;
     },
 
-    // 🌟 监听入群申请事件
     async onEvent(e, conn) {
         if (e.event !== 'group.request') return;
         const raw = e.raw;
         if (raw.request_type !== 'group' || raw.sub_type !== 'add') return;
 
-        const groupId = raw.group_id;
-        const userId = raw.user_id;
+        const groupId = String(raw.group_id);
+        const userId = String(raw.user_id);
         const flag = raw.flag;
         const comment = (raw.comment || '').trim();
+        const now = Date.now();
 
         const settings = this.getGroupSettings(groupId);
-        
-        // 1. 如果连“入群申请拦截”都没开启，直接无视（让协议端自己处理）
-        if (settings.enabled !== 1) return;
-
-        // 2. 检查 Bot 自身权限
-        let botRole = 'member';
-        try {
-            const info = await globalThis.wsCall('get_group_member_info', { group_id: groupId, user_id: globalThis.botInfo?.qq });
-            botRole = info?.data?.role;
-        } catch(e) {}
-        if (botRole !== 'owner' && botRole !== 'admin') return;
 
         // 获取申请人昵称
         let nickname = '未知';
         try {
-            const info = await globalThis.wsCall('get_stranger_info', { user_id: userId });
+            const info = await globalThis.wsCall('get_stranger_info', { user_id: Number(userId) });
             nickname = info?.data?.nickname || nickname;
         } catch(e) {}
 
         // ==========================================
-        // 🌟 3. 自动处理逻辑
+        // 🌟 第一道防线：精准防爆破（只抓恶意单号）
         // ==========================================
-        if (settings.auto_process === 1 && settings.auto_answer) {
-            // 判断附言是否包含预设答案（忽略大小写）
-            const isMatch = comment.toLowerCase().includes(settings.auto_answer.toLowerCase());
-            const isApprove = isMatch;
+        if (settings.anti_blast_enabled === 1) {
+            const trackerKey = `${groupId}_${userId}`;
+            let userTimestamps = userBlastTracker.get(trackerKey) || [];
+            
+            // 过滤掉时间窗口之前的记录
+            userTimestamps = userTimestamps.filter(t => now - t < settings.blast_time_window * 1000);
+            userTimestamps.push(now);
+            userBlastTracker.set(trackerKey, userTimestamps);
 
-            try {
-                await globalThis.wsCall('set_group_add_request', {
-                    flag: flag,
-                    sub_type: raw.sub_type,
-                    approve: isApprove,
-                    reason: isApprove ? '' : '入群附言验证错误'
-                });
+            // 判断单个人是否超限
+            if (userTimestamps.length >= settings.blast_max_count) {
+                userBlastTracker.delete(trackerKey); // 清空该人的记录
+                globalThis.print(`[防爆破] 🚨 拦截到 ${nickname}(${userId}) 在 ${settings.blast_time_window}秒 内恶意申请 ${userTimestamps.length} 次！`);
 
-                const tipMsg = isApprove 
-                    ? `🤖 已自动同意 ${nickname}(${userId}) 的入群申请。(附言验证通过)`
-                    : `🤖 已自动拒绝 ${nickname}(${userId}) 的入群申请。(附言错误)`;
+                // 1. 拒绝他
+                try {
+                    await globalThis.wsCall('set_group_add_request', { flag, sub_type: raw.sub_type, approve: false, reason: '申请频率过高，疑似恶意爆破。' });
+                } catch (err) {}
 
-                await globalThis.wsCall('send_group_msg', { group_id: Number(groupId), message: [{ type: 'text', data: { text: tipMsg } }] });
-                return; // 自动处理完，直接 return，不再发人工通知
-            } catch (err) {
-                globalThis.print(`[入群申请] 自动处理失败: ${err.message}`);
-                // 如果自动处理失败，继续往下走，发给管理员人工处理
+                // 2. 自动把他塞进本群的黑名单（永久拉黑）
+                addToBlacklist(groupId, userId, nickname, '申请频率过高');
+
+                // 3. 发群警告
+                const noticeMsg = [{ 
+                    type: 'text', 
+                    data: { text: `🚨 【防爆破拦截】\n发现用户 ${nickname}(${userId}) 在短时间内疯狂申请入群。\n🛡️ 系统已自动拒绝申请，并将其永久拉入本群黑名单。` } 
+                }];
+                try { await globalThis.wsCall('send_group_msg', { group_id: Number(groupId), message: noticeMsg }); } catch(e) {}
+                return;
+            }
+
+            // 🌟 辅助：群流量预警（不拦截，只提醒）
+            let groupTimestamps = groupBlastTracker.get(groupId) || [];
+            groupTimestamps = groupTimestamps.filter(t => now - t < 10 * 1000); // 看10秒内的总流量
+            groupTimestamps.push(now);
+            groupBlastTracker.set(groupId, groupTimestamps);
+
+            // 如果 10 秒内来了超过 10 个不同的人申请，提醒一下管理员（但不做拦截）
+            if (groupTimestamps.length === 10) {
+                const warnMsg = [{ type: 'text', data: { text: `⚠️ 【流量预警】本群在 10 秒内涌入了 10 个不同的入群申请。请管理员注意甄别，防止恶意炸群。` } }];
+                try { await globalThis.wsCall('send_group_msg', { group_id: Number(groupId), message: warnMsg }); } catch(e) {}
             }
         }
 
         // ==========================================
-        // 4. 人工处理逻辑（发通知到群里）
+        // 第二道防线：黑名单自动秒拒
         // ==========================================
+        const isBanned = checkIsBanned(groupId, userId);
+        if (isBanned) {
+            try {
+                await globalThis.wsCall('set_group_add_request', { flag: flag, sub_type: raw.sub_type, approve: false, reason: '您已被本群加入黑名单，拒绝加入。' });
+            } catch(err) {}
+            return; 
+        }
+
+        // ==========================================
+        // 第三道防线：常规入群逻辑
+        // ==========================================
+        if (settings.enabled !== 1) return;
+
+        let botRole = 'member';
+        try {
+            const info = await globalThis.wsCall('get_group_member_info', { group_id: Number(groupId), user_id: globalThis.botInfo?.qq });
+            botRole = info?.data?.role;
+        } catch(e) {}
+        if (botRole !== 'owner' && botRole !== 'admin') return;
+
+        if (settings.auto_process === 1 && settings.auto_answer) {
+            const isMatch = comment.toLowerCase().includes(settings.auto_answer.toLowerCase());
+            try {
+                await globalThis.wsCall('set_group_add_request', {
+                    flag: flag, sub_type: raw.sub_type, approve: isMatch, reason: isMatch ? '' : '入群附言验证错误'
+                });
+
+                const tipMsg = isMatch 
+                    ? `🤖 已自动同意 ${nickname}(${userId}) 的入群申请。(附言验证通过)`
+                    : `🤖 已自动拒绝 ${nickname}(${userId}) 的入群申请。(附言错误)`;
+
+                await globalThis.wsCall('send_group_msg', { group_id: Number(groupId), message: [{ type: 'text', data: { text: tipMsg } }] });
+                return; 
+            } catch (err) {}
+        }
+
         const noticeMsg = [
             { type: 'text', data: { text: `📥 收到新的入群申请：\n` } },
             { type: 'at', data: { qq: String(userId) } },
@@ -131,28 +249,31 @@ export default {
             if (sentMessageId) {
                 pendingRequests.set(String(sentMessageId), { groupId, userId, flag, subType: raw.sub_type });
             }
-        } catch (e) {
-            globalThis.print(`[入群申请] 发送通知失败: ${e.message}`);
-        }
+        } catch (e) {}
     },
 
-    // 🌟 匹配管理指令
     match(text) {
         if (typeof text !== 'string') return false;
         const cmd = text.trim();
         return cmd === '同意' || cmd === '拒绝' || 
                cmd === '开启入群申请' || cmd === '关闭入群申请' ||
                cmd === '开启自动处理' || cmd === '关闭自动处理' ||
+               cmd === '开启防爆破' || cmd === '关闭防爆破' ||
                cmd.startsWith('设置入群答案');
     },
 
     async handle(msg) {
         if (!msg.isGroup) return false;
-        const cmd = (msg.pureText || "").trim();
+        
+        let cmd = (msg.pureText || "").trim();
+        const dynamicPrefixes = ['/', '$', '#', '!', '。'];
+        for (const p of dynamicPrefixes) {
+            if (cmd.startsWith(p)) { cmd = cmd.slice(p.length).trim(); break; }
+        }
+
         const groupId = msg.chatId;
         const senderQQ = msg.senderQQ;
 
-        // 鉴权：群主、管理员或全局主人
         let hasPermission = false;
         try {
             const res = await globalThis.wsCall('get_group_member_info', { group_id: Number(groupId), user_id: Number(senderQQ) });
@@ -165,9 +286,15 @@ export default {
 
         if (!hasPermission) return '❌ 权限不足：仅群主、管理员或主人可操作。';
 
-        // ==========================================
-        // 1. 开关配置类指令
-        // ==========================================
+        if (cmd === '关闭防爆破') {
+            this.setGroupSetting(groupId, 'anti_blast_enabled', 0);
+            return '✅ 已关闭本群防爆破保护。';
+        }
+        if (cmd === '开启防爆破') {
+            this.setGroupSetting(groupId, 'anti_blast_enabled', 1);
+            return '✅ 已开启防爆破保护（针对单人的高频申请进行拦截，多人正常加群不受影响）。';
+        }
+
         if (cmd === '开启入群申请' || cmd === '关闭入群申请') {
             const enable = cmd === '开启入群申请';
             this.setGroupSetting(groupId, 'enabled', enable ? 1 : 0);
@@ -192,9 +319,6 @@ export default {
             return `✅ 已成功设置自动审批答案：【${answer}】。`;
         }
 
-        // ==========================================
-        // 2. 引用回复指令 (同意/拒绝)
-        // ==========================================
         if (cmd === '同意' || cmd === '拒绝') {
             let replyId = null;
             if (Array.isArray(msg.message)) {
@@ -213,10 +337,7 @@ export default {
             const isApprove = cmd === '同意';
             try {
                 const res = await globalThis.wsCall('set_group_add_request', {
-                    flag: requestInfo.flag,
-                    sub_type: requestInfo.subType,
-                    approve: isApprove,
-                    reason: isApprove ? '' : '管理员拒绝了你的入群申请'
+                    flag: requestInfo.flag, sub_type: requestInfo.subType, approve: isApprove, reason: isApprove ? '' : '管理员拒绝了你的入群申请'
                 });
 
                 if (res && (res.status === 'ok' || res.retcode === 0)) {

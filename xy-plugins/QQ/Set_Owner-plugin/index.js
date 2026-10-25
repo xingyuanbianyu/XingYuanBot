@@ -4,7 +4,6 @@ import { fileURLToPath } from 'url';
 import path from 'path';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-// 使用 process.cwd() 确保无论在哪儿启动，都能精准找到根目录的配置
 const CONFIG_PATH = path.join(process.cwd(), 'xy-config', 'config', 'config.yaml');
 
 const verificationCodes = new Map();
@@ -54,7 +53,6 @@ function ensurePermissions(config) {
 }
 
 export default {
-  // 🌟 架构适配：app.js 传进来的 text 已经没有前缀了，直接判断开头即可
   match(text) {
     if (typeof text !== 'string') return false;
     const pureText = text.trim();
@@ -64,15 +62,21 @@ export default {
            pureText.startsWith('权限状态');
   },
 
-  // 🌟 架构适配：直接使用 app.js 标准化后的 msgObj
   async handle(msgObj) {
-    // app.js 已经洗干净了 pureText，如果没有，用 content 兜底并清除可能的前缀
     const text = (msgObj.pureText || msgObj.content || msgObj.text || '').trim();
-    // 强制拿 app.js 处理好的 senderQQ
     const senderQQ = String(msgObj.senderQQ || msgObj.senderId || msgObj.user_id || '');
     const role = msgObj.role || 'member';
 
     if (!text || !senderQQ) return null;
+
+    // 🌟 核心新增：提取 @ 目标
+    let targetQQFromAt = null;
+    if (Array.isArray(msgObj.message)) {
+        const atItem = msgObj.message.find(item => item?.type === 'at');
+        if (atItem && atItem.data && atItem.data.qq) {
+            targetQQFromAt = String(atItem.data.qq);
+        }
+    }
 
     const args = text.split(/\s+/);
     const cmd = args[0];
@@ -81,11 +85,11 @@ export default {
       if (cmd === '设置主人') {
         return await this.handleSetMaster(args, senderQQ, role);
       } else if (cmd === '设置小主人') {
-        return await this.handleSetOwner(args, senderQQ, role);
+        return await this.handleSetOwner(args, senderQQ, role, targetQQFromAt);
       } else if (cmd === '取消主人') {
-        return await this.handleRemoveOwner(args, senderQQ, role);
+        return await this.handleRemoveOwner(args, senderQQ, role, targetQQFromAt);
       } else if (cmd === '权限状态') {
-        return await this.handlePermission(args, senderQQ, role);
+        return await this.handlePermission(args, senderQQ, role, targetQQFromAt);
       }
     } catch (e) {
       console.error('[权限管理插件错误]', e);
@@ -99,11 +103,9 @@ export default {
     if (!config) return '配置文件不存在';
 
     const masterQQ = getMasterQQ(config);
-    // 🌟 核心修复：类型统一转 String 比较
     if (!masterQQ) {
       if (args.length === 1) {
         const code = generateCode();
-        // 统一用 String(senderQQ) 存入
         verificationCodes.set(String(senderQQ), { code, time: Date.now() });
 
         const makedCode = '*'.repeat(code.length);
@@ -121,7 +123,6 @@ export default {
         const targetQQ = String(args[1]);
         const code = args[2].toUpperCase();
         
-        // 🌟 核心修复：必须查发送者自己的验证码，防伪造
         const verify = verificationCodes.get(String(senderQQ));
 
         if (!verify) return '❌ 验证失败，请重新执行"设置主人"指令';
@@ -148,11 +149,12 @@ export default {
       if (String(senderQQ) !== String(masterQQ)) {
         return '❌ 已有大主人，只有大主人才能设置小主人';
       }
-      return '📌 请使用"设置小主人 <QQ号>"指令来设置小主人';
+      return '📌 请使用"设置小主人 <QQ号> 或 @某人"指令来设置小主人';
     }
   },
 
-  async handleSetOwner(args, senderQQ, role) {
+  // 🌟 修改：支持 targetQQFromAt
+  async handleSetOwner(args, senderQQ, role, targetQQFromAt) {
     const config = loadConfig();
     const masterQQ = getMasterQQ(config);
 
@@ -160,12 +162,15 @@ export default {
       return '❌ 只有大主人可以设置小主人';
     }
 
-    if (args.length < 2) {
-      return '📌 指令格式：设置小主人 <QQ号>';
+    // 优先使用 @ 提取的 QQ，其次用参数
+    let targetQQ = targetQQFromAt;
+    if (!targetQQ && args.length >= 2) targetQQ = String(args[1]);
+    
+    if (!targetQQ) {
+      return '📌 指令格式：设置小主人 <QQ号> 或 @某人';
     }
 
-    const targetQQ = String(args[1]);
-    if (!/^\d{5,11}$/.test(targetQQ)) {
+    if (!/^\d{5,12}$/.test(targetQQ)) {
       return '❌ QQ号格式不正确';
     }
 
@@ -177,7 +182,8 @@ export default {
     return `✅ 已将 ${targetQQ} 设置为小主人（默认权限关闭，请使用"权限状态 开 ${targetQQ}"开启）`;
   },
 
-  async handleRemoveOwner(args, senderQQ, role) {
+  // 🌟 修改：支持 targetQQFromAt
+  async handleRemoveOwner(args, senderQQ, role, targetQQFromAt) {
     const config = loadConfig();
     const masterQQ = getMasterQQ(config);
 
@@ -185,11 +191,13 @@ export default {
       return '❌ 只有大主人可以取消主人';
     }
 
-    if (args.length < 2) {
-      return '📌 指令格式：取消主人 <QQ号>';
+    let targetQQ = targetQQFromAt;
+    if (!targetQQ && args.length >= 2) targetQQ = String(args[1]);
+
+    if (!targetQQ) {
+      return '📌 指令格式：取消主人 <QQ号> 或 @某人';
     }
 
-    const targetQQ = String(args[1]);
     if (targetQQ === String(masterQQ)) {
       return '❌ 不能取消大主人的身份';
     }
@@ -206,19 +214,23 @@ export default {
     return `✅ 已取消 ${targetQQ} 的主人身份`;
   },
 
-  async handlePermission(args, senderQQ, role) {
+  // 🌟 修改：支持 targetQQFromAt
+  async handlePermission(args, senderQQ, role, targetQQFromAt) {
     const config = loadConfig();
     const masterQQ = getMasterQQ(config);
 
     if (args.length < 2) {
-      return '📌 指令格式：权限状态 <开/关/查询> [QQ号]';
+      return '📌 指令格式：权限状态 <开/关/查询> <QQ号> 或 @某人';
     }
 
     const action = args[1];
-    const targetQQ = args[2] ? String(args[2]) : null;
+    
+    // 优先使用 @ 提取的 QQ，其次用参数
+    let targetQQ = targetQQFromAt;
+    if (!targetQQ && args.length >= 3) targetQQ = String(args[2]);
 
     if (action === '查询') {
-      if (!targetQQ) return '📌 指令格式：权限状态 查询 <QQ号>';
+      if (!targetQQ) return '📌 指令格式：权限状态 查询 <QQ号> 或 @某人';
 
       const owners = config.permissions?.owners || {};
       const permSwitch = config.permissions?.permission_switch || {};
@@ -239,7 +251,7 @@ export default {
     }
 
     if (!targetQQ) {
-      return `📌 指令格式：权限状态 ${action} <QQ号>`;
+      return `📌 指令格式：权限状态 ${action} <QQ号> 或 @某人`;
     }
 
     const owners = config.permissions?.owners || {};

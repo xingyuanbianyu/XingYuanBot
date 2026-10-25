@@ -4,30 +4,24 @@
 const Database = require('better-sqlite3');
 const fs = require('fs');
 const path = require('path');
-const { fileURLToPath } = require('url'); // 🌟 引入 url 模块
+const { fileURLToPath } = require('url'); 
 
 // ========================
-// 获取调用方的 __dirname
+// 获取调用方的 __dirname (仅作为兜底)
 // ========================
 function getCallerDir() {
   const err = new Error();
   const stack = err.stack || '';
   const lines = stack.split('\n');
 
-  // 从第 3 行开始找，跳过 Error 本身和当前 db.js
   for (let i = 3; i < lines.length; i++) {
     const line = lines[i];
-    
-    // 🌟 跳过内部模块和当前模块
     if (line.includes('db.js') || line.includes('node:internal')) continue;
 
-    // 匹配 file:/// 格式（ESM） 或者 普通绝对路径（CJS）
     const match = line.match(/\(([^)]+):[0-9]+:[0-9]+\)/) || line.match(/at\s+(.+):[0-9]+:[0-9]+/);
     
     if (match) {
       let filePath = match[1];
-      
-      // 处理 file:/// 协议（ESM 环境）
       if (filePath.startsWith('file://')) {
         try {
           filePath = fileURLToPath(filePath);
@@ -35,15 +29,11 @@ function getCallerDir() {
           filePath = filePath.replace(/^file:\/{3}/, '');
         }
       }
-
-      // 确保是合法的绝对路径
       if (/^[A-Za-z]:/.test(filePath) || /^\//.test(filePath)) {
         return path.dirname(filePath);
       }
     }
   }
-  
-  // 🌟 兜底警告：如果在异步栈里丢失了调用方，强制返回根目录并打印警告
   console.warn('⚠️ [DB警告] 无法从调用栈中解析出插件路径，将使用根目录作为数据库存放点！');
   return process.cwd();
 }
@@ -57,7 +47,6 @@ function getDbInstance(dbPath) {
   if (dbCache.has(dbPath)) {
     return dbCache.get(dbPath);
   }
-  // 确保目录存在
   const dir = path.dirname(dbPath);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   
@@ -75,9 +64,20 @@ function getDbPath(callerDir, dbName = 'data') {
 // 全局数据库函数
 // ========================
 globalThis.db = function (action, options = {}) {
-  const callerDir = getCallerDir();
-  const dbName = options.dbName || 'data';
-  const dbPath = getDbPath(callerDir, dbName);
+  // 🌟 核心更新：优先读取外部传入的 dbPath
+  let dbPath = options.dbPath;
+
+  if (!dbPath) {
+    // 如果外部没传路径，才去猜调用栈的目录（兼容老插件）
+    const callerDir = getCallerDir();
+    const dbName = options.dbName || 'data';
+    dbPath = getDbPath(callerDir, dbName);
+  } else {
+    // 如果传的是相对路径，以项目根目录为基准解析为绝对路径
+    if (!path.isAbsolute(dbPath)) {
+        dbPath = path.resolve(__dirname, '..', dbPath);
+    }
+  }
 
   switch (action) {
     // ---- 执行原生 SQL ----
@@ -87,7 +87,6 @@ globalThis.db = function (action, options = {}) {
       try {
         const db = getDbInstance(dbPath);
         if (params.length > 0) {
-          // exec 不支持参数，改用 run
           db.prepare(sql).run(...params); 
         } else {
           db.exec(sql);

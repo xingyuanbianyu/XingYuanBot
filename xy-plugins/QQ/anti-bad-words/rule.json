@@ -1,0 +1,5 @@
+{
+    "name": "anti-bad-words",
+    "enabled": true,
+    "description": "违禁词检测与撤回禁言"
+}

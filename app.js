@@ -3,10 +3,11 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 import yaml from 'yaml';
+import Database from 'better-sqlite3';
+import { execSync } from 'child_process';
 
 import { loadNetworkConfig, startNetwork } from './xy-bot/network.js';
 import { AdapterRegistry } from './xy-bot/adapter-registry.js';
-// 🌟 引入 clearPluginCache 和 hotReloadPlugin
 import { loadPlugins, clearPluginCache, hotReloadPlugin } from './xy-bot/plugin-loader.js';
 import { startBot } from './xy-bot/bot.js';
 
@@ -15,25 +16,147 @@ import { getRole } from './xy-config/config/permissions.js';
 
 import { startWebPanel } from './web-panel.js';
 
-// 🌟 全局日志兜底
 globalThis.print = globalThis.print || console.log;
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const dataDir = join(__dirname, 'xy-data');
 const configPath = join(__dirname, 'xy-config', 'config.yaml');
 const priorityPath = join(__dirname, 'xy-config', 'priority.yaml'); 
-const ownerFilePath = join(__dirname, 'xy-data', 'owner.json'); // 号主记录文件
+const ownerFilePath = join(__dirname, 'xy-data', 'owner.json'); 
 
-// 🌟 共享状态
+function killPort(port) {
+    try {
+        if (process.platform === 'win32') {
+            const output = execSync(`netstat -ano | findstr :${port}`).toString();
+            const lines = output.split('\n');
+            const pids = new Set();
+            for (const line of lines) {
+                if (line.includes('LISTENING')) {
+                    const parts = line.trim().split(/\s+/);
+                    const pid = parts[parts.length - 1];
+                    if (pid && pid !== '0' && !isNaN(pid)) pids.add(pid);
+                }
+            }
+            for (const pid of pids) {
+                execSync(`taskkill /F /PID ${pid}`, { stdio: 'ignore' });
+                globalThis.print(`🔪 [端口清理] Windows: 已结束占用端口 ${port} 的进程 (PID: ${pid})`);
+            }
+        } else {
+            try {
+                execSync(`fuser -k ${port}/tcp`, { stdio: 'ignore' });
+                globalThis.print(`🔪 [端口清理] Linux: 已结束占用端口 ${port} 的进程`);
+            } catch (e) {
+                try {
+                    execSync(`lsof -t -i:${port} | xargs kill -9`, { stdio: 'ignore' });
+                    globalThis.print(`🔪 [端口清理] Unix: 已结束占用端口 ${port} 的进程`);
+                } catch (err) {}
+            }
+        }
+    } catch (e) {}
+}
+
 const sharedState = {
     wsPool: new Map(),
     wsToBotId: new Map(),
     botIdToWs: new Map(),
     instances: new Map(),
-    ownerQQ: null // 全局记录号主
+    ownerQQ: null 
 };
 
-// 读取号主记录
+globalThis._commandAliases = new Map();
+
+// 🌟 终极动态递归寻找 alias.db
+function findAliasDb(dir) {
+    if (!fs.existsSync(dir)) return null;
+    const files = fs.readdirSync(dir);
+    for (const file of files) {
+        const fullPath = join(dir, file);
+        const stat = fs.statSync(fullPath);
+        if (stat.isDirectory()) {
+            const result = findAliasDb(fullPath);
+            if (result) return result;
+        } else if (file === 'alias.db') {
+            return fullPath;
+        }
+    }
+    return null;
+}
+
+async function loadCommandAliases() {
+    const pluginBaseDir = join(__dirname, 'xy-plugins');
+    const aliasDbPath = findAliasDb(pluginBaseDir);
+
+    if (!aliasDbPath) {
+        globalThis.print(`⚠️ [映射缓存] 未在 xy-plugins 目录下找到 alias.db 文件。`);
+        return;
+    }
+
+    try {
+        const db = new Database(aliasDbPath, { readonly: true });
+        const rows = db.prepare('SELECT group_id, alias_cmd, original_cmd FROM group_aliases').all();
+        db.close();
+
+        globalThis._commandAliases.clear();
+        for (const r of rows) {
+            globalThis._commandAliases.set(`${r.group_id}_${r.alias_cmd}`, r.original_cmd);
+        }
+        if (rows.length > 0) {
+            globalThis.print(`✅ [映射缓存] 已成功从 ${aliasDbPath} 加载 ${rows.length} 条指令映射规则`);
+        }
+    } catch (e) {
+        globalThis.print(`⚠️ [映射缓存] 加载失败: ${e.message}`);
+    }
+}
+
+globalThis._groupMembersCache = new Map();
+
+globalThis.getGroupMembers = (groupId) => {
+    return globalThis._groupMembersCache.get(String(groupId)) || [];
+};
+
+async function updateGroupMembersCache(groupId) {
+    if (typeof globalThis.wsCall !== 'function') return;
+    const gid = Number(groupId);
+    try {
+        const res = await globalThis.wsCall('get_group_member_list', { group_id: gid, no_cache: true });
+        if (res && res.status === 'ok' && Array.isArray(res.data)) {
+            await sleep(500);
+            const cleanList = res.data.map(m => ({
+                user_id: m.user_id,
+                nickname: m.nickname,
+                card: m.card || ''
+            }));
+            await sleep(1000);
+            globalThis._groupMembersCache.set(String(gid), cleanList);
+            globalThis.print(`🔄 [缓存更新] 群 ${gid} 成员列表已刷新，共 ${cleanList.length} 人。`);
+        }
+    } catch (e) {
+        globalThis.print(`⚠️ [缓存异常] 更新群 ${gid} 成员失败: ${e.message}`);
+    }
+}
+
+async function initAllGroupMembersCache() {
+    if (typeof globalThis.wsCall !== 'function') return;
+    try {
+        globalThis.print('⏳ [系统] 正在全量拉取所有群成员数据，请稍候...');
+        const res = await globalThis.wsCall('get_group_list');
+        if (res && res.status === 'ok' && Array.isArray(res.data)) {
+            const groups = res.data;
+            globalThis.print(`🔍 [系统] 发现 ${groups.length} 个群，开始拉取成员信息...`);
+            await sleep(1000);
+            
+            for (const group of groups) {
+                await updateGroupMembersCache(group.group_id);
+                await new Promise(r => setTimeout(r, 500)); 
+            }
+            await sleep(1000);
+            globalThis.print('✅ [系统] 所有群成员数据缓存完毕！');
+        }
+    } catch (e) {
+        globalThis.print(`⚠️ [系统] 初始化群成员缓存失败: ${e.message}`);
+    }
+}
+
 if (fs.existsSync(ownerFilePath)) {
     try {
         const data = JSON.parse(fs.readFileSync(ownerFilePath, 'utf8'));
@@ -47,15 +170,12 @@ globalThis.botInfo = { qq: '10000' };
 let processedMessages = [];
 const MAX_CACHE_SIZE = 2000;
 const interactiveSessions = new Map();
-// 🌟 核心修复：暴露给全局，让验证插件能往里面塞人！
 globalThis._interactiveSessions = interactiveSessions; 
 
 let cmdConfig = { enable: true, prefixes: ['#', '/'] };
 let whitelistConfig = { enable: false, list: [] };
 let priorityPlugins = new Set(); 
 
-// ==================== 1. 消息发送 ====================
-// 底层安全发送函数
 function safeSend(ws, data) {
     if (ws && ws.readyState === 1) {
         try {
@@ -69,16 +189,11 @@ function safeSend(ws, data) {
     return false;
 }
 
-// 挂载全局 Bot 发送器
 globalThis.bot = {
   send: async (msg) => {
     let targetWs = null;
-    
-    // 优先通过 botId 找对应的连接
     if (msg.botId) targetWs = sharedState.botIdToWs.get(String(msg.botId));
-    // 其次使用消息自带的 ws
     if (!targetWs && msg._ws) targetWs = msg._ws;
-    // 🌟 兜底：使用全局当前活跃的 ws (配合 network.js 新增的 globalThis.activeWs)
     if (!targetWs) targetWs = globalThis.activeWs || globalThis._ws;
 
     if (!targetWs || targetWs.readyState !== 1) {
@@ -90,7 +205,6 @@ globalThis.bot = {
       ? { message_type: 'group', group_id: msg.chatId }
       : { message_type: 'private', user_id: msg.chatId };
 
-    // 发送图片
     if (msg.file) {
       const base64 = msg.file.toString('base64');
       safeSend(targetWs, {
@@ -101,7 +215,6 @@ globalThis.bot = {
       return;
     }
 
-    // 发送文本
     if (msg.content) {
       safeSend(targetWs, {
           action: 'send_msg', 
@@ -112,7 +225,6 @@ globalThis.bot = {
   }
 };
 
-// ==================== 2. 插件执行逻辑 ====================
 async function runPlugin(plugin, msg) {
   const raw = plugin.handler;
   if (!raw) return false;
@@ -131,7 +243,6 @@ async function runPlugin(plugin, msg) {
   const pluginName = raw.name || plugin.name || '未知';
   const isPriority = priorityPlugins.has(pluginName);
 
-  // 处理交互式会话拦截
   const session = interactiveSessions.get(msg.senderQQ);
   if (session && session.expireAt > Date.now() && !isPriority) {
       if (session.pluginName === pluginName) {
@@ -156,32 +267,35 @@ async function runPlugin(plugin, msg) {
   let matchText = (msg.pureText || "").trim();
   let finalPureText = matchText; 
 
-  // 处理指令前缀和白名单
   if (!isPriority) {
-      let hasValidPrefix = false;
-
-      for (const p of cmdConfig.prefixes) {
-        if (matchText.startsWith(p)) {
-          hasValidPrefix = true;
-          finalPureText = matchText.slice(p.length).trim(); 
-          break;
-        }
-      }
-
-      const isAdminCmd = /^(启用前缀|禁用前缀|查询前缀|添加前缀|删除前缀|启用指令白名单|禁用指令白名单|查询指令白名单|添加指令白名单|删除指令白名单)/.test(finalPureText);
-      let isWhitelisted = false;
-
-      if (!hasValidPrefix && !isAdminCmd && whitelistConfig.enable && whitelistConfig.list.length > 0) {
-        for (const word of whitelistConfig.list) {
-          if (matchText === word) {
-            isWhitelisted = true;
-            break;
+      // 🌟 核心放行逻辑：如果是映射指令，直接放行，不管前缀
+      if (msg._isMapped) {
+          finalPureText = matchText;
+      } else {
+          let hasValidPrefix = false;
+          for (const p of cmdConfig.prefixes) {
+            if (matchText.startsWith(p)) {
+              hasValidPrefix = true;
+              finalPureText = matchText.slice(p.length).trim(); 
+              break;
+            }
           }
-        }
-      }
 
-      if (cmdConfig.enable && !hasValidPrefix && !isAdminCmd && !isWhitelisted && matchText) {
-          return false;
+          const isAdminCmd = /^(启用前缀|禁用前缀|查询前缀|添加前缀|删除前缀|启用指令白名单|禁用指令白名单|查询指令白名单|添加指令白名单|删除指令白名单)/.test(finalPureText);
+          let isWhitelisted = false;
+
+          if (!hasValidPrefix && !isAdminCmd && whitelistConfig.enable && whitelistConfig.list.length > 0) {
+            for (const word of whitelistConfig.list) {
+              if (matchText === word) {
+                isWhitelisted = true;
+                break;
+              }
+            }
+          }
+
+          if (cmdConfig.enable && !hasValidPrefix && !isAdminCmd && !isWhitelisted && matchText) {
+              return false;
+          }
       }
 
       if (matchFn) {
@@ -228,23 +342,20 @@ async function runPlugin(plugin, msg) {
   }
 }
 
-// ==================== 3. 核心消息处理 ====================
 async function handleIncomingMessage(rawData, ws, registry, plugins) {
     if (!ws || ws.readyState !== 1) return;
 
     if (!sharedState.wsPool.has(ws)) {
-      sharedState.wsPool.set(ws, { connectedAt: Date.now() });
-      globalThis._ws = ws; 
-      globalThis.activeWs = ws; // 确保给 wsCall 兜底
+        sharedState.wsPool.set(ws, { connectedAt: Date.now() });
+        globalThis._ws = ws; 
+        globalThis.activeWs = ws;
     }
 
     try {
         const parsed = JSON.parse(rawData);
         
-        // 过滤心跳包和 API 回执 (network.js 已经拦截了 API 回执，这里再兜底一次)
         if (parsed.post_type === 'meta_event' || parsed.echo !== undefined) return;
 
-        // 动态绑定 Bot ID 和 WS 连接
         if (parsed.self_id) {
             const botId = String(parsed.self_id);
             globalThis.botInfo.qq = botId; 
@@ -253,16 +364,22 @@ async function handleIncomingMessage(rawData, ws, registry, plugins) {
                 sharedState.botIdToWs.set(botId, ws);
                 globalThis.print(`🔗 [路由] 动态绑定连接成功，Bot QQ: ${botId}`);
                 
-                // 🌟 记录号主 QQ
                 if (sharedState.ownerQQ !== botId) {
                     sharedState.ownerQQ = botId;
                     fs.writeFileSync(ownerFilePath, JSON.stringify({ ownerQQ: botId, updateAt: Date.now() }, null, 2));
                     globalThis.print(`👑 [系统] 已将 ${botId} 记录为号主！`);
+                    
+                    setTimeout(() => initAllGroupMembersCache(), 2000); 
                 }
             }
         }
 
-        // 交给适配器转换为标准格式
+        if (parsed.post_type === 'notice' && ['group_increase', 'group_decrease', 'group_kick', 'group_card'].includes(parsed.notice_type)) {
+            if (parsed.group_id) {
+                updateGroupMembersCache(parsed.group_id);
+            }
+        }
+
         let stdMsg = null;
         for (const adapter of registry.list.values()) {
           if (typeof adapter.match === 'function' && adapter.match(parsed)) {
@@ -273,7 +390,6 @@ async function handleIncomingMessage(rawData, ws, registry, plugins) {
         
         if (!stdMsg) return;
 
-        // 处理消息事件
         if (parsed.post_type === 'message') {
           const senderQQ = stdMsg.senderId;
           const chatId = stdMsg.chatId;
@@ -284,13 +400,60 @@ async function handleIncomingMessage(rawData, ws, registry, plugins) {
              userRole = getRole(senderQQ);
           } catch(e) {}
 
-          // 号主直接放行，不受黑白名单限制
           if (userRole !== 'master' && userRole !== 'owner' && senderQQ !== sharedState.ownerQQ) {
               if (isGroup && !isGroupAllowed(chatId)) return;
               if (!isQQAllowed(senderQQ)) return;
           }
 
-          // 消息去重
+          // ==========================================
+          // 🌟 绝对门禁：全局与局部映射替换
+          // ==========================================
+          if (isGroup) {
+              let pureText = stdMsg.pureText || "";
+              let currentPrefix = '';
+              
+              for (const p of cmdConfig.prefixes) {
+                  if (pureText.startsWith(p)) { currentPrefix = p; break; }
+              }
+              
+              // 剥离前缀，获取纯净文本
+              let textWithoutPrefix = currentPrefix ? pureText.slice(currentPrefix.length).trim() : pureText;
+              
+              if (textWithoutPrefix) {
+                  const parts = textWithoutPrefix.split(/\s+/);
+                  const baseCmd = parts[0];
+                  
+                  let originalCmd = null;
+                  
+                  // 🌟 核心：优先查本群局部映射，再查全局！
+                  if (globalThis._commandAliases) {
+                      const aliasKeyLocal = `${chatId}_${baseCmd}`;
+                      const aliasKeyGlobal = `global_${baseCmd}`;
+                      
+                      if (globalThis._commandAliases.has(aliasKeyLocal)) {
+                          originalCmd = globalThis._commandAliases.get(aliasKeyLocal);
+                      } else if (globalThis._commandAliases.has(aliasKeyGlobal)) {
+                          originalCmd = globalThis._commandAliases.get(aliasKeyGlobal);
+                      }
+                  }
+
+                  // 只要查到了映射，直接执行替换
+                  if (originalCmd) {
+                      parts[0] = originalCmd;
+                      const finalText = parts.join(' ');
+
+                      stdMsg.pureText = finalText; 
+                      parsed.raw_message = finalText;
+                      
+                      // 免死金牌
+                      stdMsg._isMapped = true;
+                      
+                      globalThis.print(`[映射触发] 群聊( ${chatId} ) 将 [${baseCmd}] 映射为 [${originalCmd}]，最终纯净指令: ${finalText}`);
+                  }
+              }
+          }
+          // 🌟 映射替换结束
+
           if (parsed.message_id) {
             const msgId = `${stdMsg.selfId}_${parsed.message_id}_${stdMsg.senderId}`;
             if (processedMessages.includes(msgId)) return;
@@ -298,7 +461,6 @@ async function handleIncomingMessage(rawData, ws, registry, plugins) {
             if (processedMessages.length > MAX_CACHE_SIZE) processedMessages.shift();
           }
 
-          // 构建标准统一消息对象
           const msg = {
             type: 'receive',
             post_type: parsed.post_type,
@@ -315,10 +477,10 @@ async function handleIncomingMessage(rawData, ws, registry, plugins) {
             raw_message: parsed.raw_message,
             rawData: parsed,
             botId: stdMsg.selfId ? String(stdMsg.selfId) : null,
-            _ws: ws 
+            _ws: ws,
+            _isMapped: stdMsg._isMapped // 传递给 runPlugin 强行放行
           };
 
-          // 分发给所有插件
           for (const plugin of plugins) {
             if (plugin && plugin.handler) {
               const handled = await runPlugin(plugin, msg);
@@ -331,7 +493,6 @@ async function handleIncomingMessage(rawData, ws, registry, plugins) {
     } catch (e) { globalThis.print(`[处理异常] ${e.message}`); }
 }
 
-// ==================== 4. 配置加载 ====================
 function loadCmdConfig() {
   try {
     if (fs.existsSync(configPath)) {
@@ -378,15 +539,18 @@ function watchConfig() {
   } catch (e) {}
 }
 
-// ==================== 5. 启动主流程 ====================
 async function main() {
   await lib(); 
   console.log('🚀 XingYuanBot 启动中...\n');
 
+  killPort(4000); 
+  killPort(3001); 
+
+  await loadCommandAliases();
+
   loadCmdConfig();
   watchConfig();
 
-  // 定时清理过期的交互会话
   setInterval(() => {
       const now = Date.now();
       for (const [qq, sess] of interactiveSessions) {
@@ -394,37 +558,28 @@ async function main() {
       }
   }, 60000);
 
-  // 1. 初始化网络配置
   const netConfigs = loadNetworkConfig(dataDir);
-  
-  // 2. 初始化适配器
   const registry = new AdapterRegistry();
   await registry.scan(join(__dirname, 'adapter', 'adapters'));
 
-  // 3. 加载所有插件
   const { plugins, errors } = await loadPlugins(registry);
   globalThis.print(`\n✅ 已成功加载 ${plugins.length} 个插件\n`);
   if (errors && errors.length > 0) {
       globalThis.print(`⚠️ 插件加载时产生 ${errors.length} 个错误，请检查。`);
   }
 
-  // 4. 暴露给全局，供插件和定时器使用
   globalThis.handleIncomingMessage = handleIncomingMessage;
   globalThis._registry = registry;
   globalThis._plugins = plugins;
 
-  // 🌟 5. 核心挂载：让指令插件的“重载”功能生效
   globalThis._xyReloadPlugins = async (pluginName) => {
       try {
           if (pluginName && typeof hotReloadPlugin === 'function') {
-              // 单插件热重载
               await hotReloadPlugin(pluginName, registry);
               return [pluginName];
           } else {
-              // 全量重载
               if (typeof clearPluginCache === 'function') clearPluginCache();
               const result = await loadPlugins(registry);
-              // 必须更新全局的插件数组，否则主分发逻辑用的还是旧数组
               globalThis._plugins = result.plugins;
               return result.plugins;
           }
@@ -434,7 +589,6 @@ async function main() {
       }
   };
 
-  // 6. 启动网络监听/连接
   if (netConfigs.length > 0) {
       const connections = await startNetwork(
         netConfigs,
@@ -446,7 +600,6 @@ async function main() {
       globalThis.print('⚠️ 未找到网络配置文件，跳过网络启动。');
   }
 
-  // 7. 启动 Web 面板
   startWebPanel({
       registry,
       plugins,
@@ -456,18 +609,14 @@ async function main() {
   });
 
   globalThis.print('\n✅ 主控与网页面板均启动完成。\n');
-  
-  // 8. 启动终端保活 CLI
   startBot();
 }
 
-// 启动！
 main().catch(e => {
   globalThis.print(`💥 启动失败: ${e.message}`);
   process.exit(1);
 });
 
-// 退出清理
 function cleanupAllInstances() {
     globalThis.print('⚠️ 接收到退出信号，正在清理所有子进程...');
     for (const [id, inst] of sharedState.instances) {

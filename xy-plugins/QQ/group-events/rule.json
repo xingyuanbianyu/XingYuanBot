@@ -1,6 +1,6 @@
 {
   "name": "群事件通知",
-  "enabled": false,
+  "enabled": true,
   "entry": "index.js",
   "type": "event"
 }

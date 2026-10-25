@@ -9,6 +9,12 @@ plugins:
   - name: daily-tool
     enabled: true
     path: ./plugin
-    entry: index.js
+    entry: daily-tool.js
     type: command     # 这里的配置会覆盖全局的 type
     timeout: 3500     # 这里的超时(3.5s)会覆盖全局的 1000ms
+  - name: qq-level
+    enabled: true
+    path: ./plugin
+    entry: qq-level.js
+    type: command
+    timeout: 3000

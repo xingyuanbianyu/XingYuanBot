@@ -14,8 +14,10 @@ whitelist:
     - "菜单"
     - "开启"
     - "关闭"
+    - "拒绝"
+    - "同意"
     
 group_events:
-  enabled: false     # 总开关：如果为 false，所有入群退群提示全部静默
+  enabled: true     # 总开关：如果为 false，所有入群退群提示全部静默
   welcome: true      # 单独控制：入群欢迎
   decrease: true     # 单独控制：退群/被踢提示

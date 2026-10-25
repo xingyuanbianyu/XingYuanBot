@@ -7,17 +7,29 @@ import { parse as parseYaml } from 'yaml';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MENU_PATH = path.resolve(__dirname, '../../plugins/指令/menu.json');
-const DB_NAME = 'group_data';
+const DB_PATH = path.resolve(__dirname, 'group_data.db'); 
+
+// ==========================================
+// 🌟 公共前缀剥离函数，防止匹配失败
+// ==========================================
+function stripPrefix(text) {
+    let cmd = (text || "").trim();
+    const dynamicPrefixes = ['/', '$', '#', '!', '。', '.'];
+    for (const p of dynamicPrefixes) {
+        if (cmd.startsWith(p)) { 
+            cmd = cmd.slice(p.length).trim(); 
+            break; 
+        }
+    }
+    return cmd;
+}
 
 // 初始化数据库表
 if (typeof globalThis.db === 'function') {
-    globalThis.db('exec', { dbName: DB_NAME, sql: 'CREATE TABLE IF NOT EXISTS like_records (user_id TEXT PRIMARY KEY, last_like_cycle TEXT NOT NULL)' });
+    globalThis.db('exec', { dbPath: DB_PATH, sql: 'CREATE TABLE IF NOT EXISTS like_records (user_id TEXT PRIMARY KEY, last_like_cycle TEXT NOT NULL)' });
+    globalThis.db('exec', { dbPath: DB_PATH, sql: 'CREATE TABLE IF NOT EXISTS group_ban_settings (group_id TEXT PRIMARY KEY, auto_ban INTEGER DEFAULT 1)' });
     globalThis.db('exec', { 
-        dbName: DB_NAME, 
-        sql: 'CREATE TABLE IF NOT EXISTS group_ban_settings (group_id TEXT PRIMARY KEY, auto_ban INTEGER DEFAULT 1)' 
-    });
-    globalThis.db('exec', { 
-        dbName: DB_NAME, 
+        dbPath: DB_PATH,
         sql: `CREATE TABLE IF NOT EXISTS group_reject_list (
             group_id TEXT, 
             user_id TEXT, 
@@ -26,6 +38,8 @@ if (typeof globalThis.db === 'function') {
             PRIMARY KEY(group_id, user_id)
         )` 
     });
+    try { globalThis.db('exec', { dbPath: DB_PATH, sql: 'ALTER TABLE group_reject_list ADD COLUMN nickname TEXT' }); } catch (e) {}
+    try { globalThis.db('exec', { dbPath: DB_PATH, sql: 'ALTER TABLE group_reject_list ADD COLUMN create_time INTEGER' }); } catch (e) {}
 }
 
 function getCurrentLikeCycle() {
@@ -75,12 +89,8 @@ const myCommands = [
   { cmd: '清理潜水 [天数] -y', desc: '清理潜水成员' }
 ];
 
-// 🌟 重写帮助注入逻辑：增量更新，防止重复和报错
 function injectHelp() {
-  if (!fs.existsSync(MENU_PATH)) {
-      console.error(`❌ [群管] 找不到 menu.json，路径: ${MENU_PATH}`);
-      return;
-  }
+  if (!fs.existsSync(MENU_PATH)) return;
   try {
     let menu = JSON.parse(fs.readFileSync(MENU_PATH, 'utf-8'));
     if (!menu.commands) menu.commands = {};
@@ -114,10 +124,7 @@ function injectHelp() {
 
     menu.version = (menu.version || 0) + 1;
     fs.writeFileSync(MENU_PATH, JSON.stringify(menu, null, 4), 'utf-8');
-    console.log(`✅ [群管] 帮助信息已更新，新增 ${newAddedIds.length} 条指令，版本: ${menu.version}`);
-  } catch (e) {
-    console.error(`❌ [群管] 注入帮助信息失败: ${e.message}`);
-  }
+  } catch (e) {}
 }
 injectHelp();
 
@@ -150,7 +157,7 @@ export default {
 
   match: (text) => {
     if (!text || typeof text !== 'string') return false;
-    const cmd = text.trim();
+    const cmd = stripPrefix(text);
     if (cmd.includes('添加定时') || cmd.includes('查看定时') || cmd.includes('删除定时')) return false;
     return cmd.startsWith('随机抽人') || cmd.startsWith('踢') || cmd.startsWith('禁言') || cmd.startsWith('解禁')
         || cmd.startsWith('头衔') || cmd.startsWith('设置管理') || cmd.startsWith('取消管理') 
@@ -167,20 +174,31 @@ export default {
       if (typeof globalThis.db !== 'function') return;
 
       if (e.event === 'group.decrease' || e.event === 'group.kick') {
-          const userId = String(e.userId); 
-          if (userId === String(globalThis.botInfo?.qq)) return;
+          const raw = e.raw || {};
+          const userId = String(e.userId || raw.target_id || raw.user_id); 
+          if (!userId || userId === 'undefined' || userId === String(globalThis.botInfo?.qq)) return;
           
-          const res = globalThis.db('find', { dbName: DB_NAME, table: 'group_ban_settings', where: 'group_id = ?', params: [groupId], all: false });
+          const res = globalThis.db('find', { dbPath: DB_PATH, table: 'group_ban_settings', where: 'group_id = ?', params: [groupId], all: false });
           if (!res.data || res.data.auto_ban === 1) {
-              let nick = e.raw?.nickname || e.raw?.card || '未知';
-              if (nick === '未知' && typeof globalThis.wsCall === 'function') {
+              let nick = raw.nickname || raw.card;
+              
+              if (!nick && typeof globalThis.getGroupMembers === 'function') {
+                  const cachedMembers = globalThis.getGroupMembers(groupId) || [];
+                  const cachedUser = cachedMembers.find(m => String(m.user_id) === userId);
+                  if (cachedUser) nick = cachedUser.card || cachedUser.nickname;
+              }
+
+              if (!nick && typeof globalThis.wsCall === 'function') {
                   try {
-                      const infoData = await globalThis.wsCall('get_group_member_info', { group_id: Number(groupId), user_id: Number(userId), no_cache: true });
-                      if (infoData?.data) nick = infoData.data.card || infoData.data.nickname || nick;
+                      const infoData = await globalThis.wsCall('get_stranger_info', { user_id: Number(userId) });
+                      if (infoData?.data) nick = infoData.data.nickname;
                   } catch(err) {}
               }
+              
+              nick = nick || '未知昵称';
+
               globalThis.db('exec', {
-                  dbName: DB_NAME,
+                  dbPath: DB_PATH,
                   sql: 'INSERT OR REPLACE INTO group_reject_list (group_id, user_id, nickname, create_time) VALUES (?, ?, ?, ?)',
                   params: [groupId, userId, nick, Math.floor(Date.now() / 1000)]
               });
@@ -191,7 +209,7 @@ export default {
           const userId = String(e.userId);
           const flag = e.raw?.flag;
           const subType = e.raw?.sub_type;
-          const checkRes = globalThis.db('find', { dbName: DB_NAME, table: 'group_reject_list', where: 'group_id = ? AND user_id = ?', params: [groupId, userId], all: false });
+          const checkRes = globalThis.db('find', { dbPath: DB_PATH, table: 'group_reject_list', where: 'group_id = ? AND user_id = ?', params: [groupId, userId], all: false });
 
           if (checkRes.success && checkRes.data && typeof globalThis.wsCall === 'function') {
               try {
@@ -203,11 +221,12 @@ export default {
 
   handle: async function({ text, pureText, chatId, isGroup, senderName, senderQQ, role, _ws }) {
     if (!text) return false;
-    const cmd = (pureText || "").trim();
+    
+    const cmd = stripPrefix(pureText || "");
     if (!cmd) return false;
+    
     let textStr = parseText(text).trim();
 
-    // 🌟 核心：计算用户真实权限
     let isGroupAdmin = false;
     if (typeof globalThis.wsCall === 'function') {
         try {
@@ -218,183 +237,12 @@ export default {
     }
     
     const configAdmin = ['master', 'owner', 'admin'];
-    
-    // 这里的 realRole 就是读取配置文件得到的大主人身份！
     const realRole = (typeof getRole === 'function') ? getRole(senderQQ) : role;
-    
-    // 只要有群管理权限，或者全局身份是 admin/owner/master，就有权限
     let hasPermission = isGroupAdmin || configAdmin.includes(realRole);
     const isMaster = (realRole === 'master');
 
     // ==========================================
-    // 撤回指令
-    // ==========================================
-    if (cmd.startsWith('撤回')) {
-        if (!isGroup) return '❌ 该指令仅限群聊使用';
-        if (!hasPermission) return '❌ 权限不足：仅限管理员或主人使用。';
-        if (!(await checkBotRole(chatId))) return '❌ 操作失败：Bot 不是管理员或群主，无法撤回。';
-
-        let refId = null;
-        if (Array.isArray(text)) {
-            const replyItem = text.find(item => item?.type === 'reply');
-            if (replyItem && replyItem.data) refId = replyItem.data.id || replyItem.data.message_id;
-        }
-        if (!refId) {
-            const match = textStr.match(/\[引用ID:(-?\d+)\]/);
-            if (match) refId = match[1];
-        }
-        if (!refId) return '⚠️ 用法：引用一条消息发送“撤回”。';
-
-        try {
-            const result = await globalThis.wsCall('delete_msg', { message_id: Number(refId) });
-            if (result.status === 'ok' || result.retcode === 0) return '✅ 撤回成功。';
-            return `❌ 撤回失败：${result.msg || result.message}`;
-        } catch (e) { return `❌ 请求失败: ${e.message}`; }
-    }
-
-    // ==========================================
-    // 查询群黑名单
-    // ==========================================
-    if (cmd === '查询群黑名单') {
-        if (!isGroup) return '❌ 该指令仅限群聊使用';
-        if (!hasPermission) return '❌ 权限不足。';
-        if (typeof globalThis.db !== 'function') return '❌ 数据库未挂载。';
-
-        const res = globalThis.db('find', { dbName: DB_NAME, table: 'group_reject_list', where: 'group_id = ?', params: [String(chatId)] });
-        if (!res.success || !res.data || res.data.length === 0) return '📭 本群的数据库黑名单为空。';
-
-        if (res.data.length > 5) {
-            let msgList = [];
-            res.data.forEach((row, index) => {
-                const date = new Date(row.create_time * 1000).toLocaleString('zh-CN');
-                msgList.push(`[${index + 1}] ${row.nickname} (${row.user_id})\n拉黑时间: ${date}`);
-            });
-            msgList.unshift(`🛑 本群数据库黑名单（共 ${res.data.length} 人）`);
-            if (await sendForwardMsg(chatId, isGroup, '群黑名单查询', msgList)) return true;
-        }
-
-        let reply = `🛑 本群数据库黑名单（共 ${res.data.length} 人）：\n\n`;
-        res.data.forEach((row, index) => {
-            const date = new Date(row.create_time * 1000).toLocaleString('zh-CN');
-            reply += `${index + 1}. ${row.nickname} (${row.user_id})\n   拉黑时间: ${date}\n`;
-        });
-        reply += `\n💡 发送：解除拉黑 [QQ号] 可移出黑名单。`;
-        return reply.trim();
-    }
-
-    // ==========================================
-    // 手动拉黑 / 解除拉黑
-    // ==========================================
-    if (cmd.startsWith('拉黑群成员') || cmd.startsWith('解除拉黑')) {
-        if (!isGroup) return '❌ 该指令仅限群聊使用';
-        if (!hasPermission) return '❌ 权限不足。';
-        
-        let targetQQ = null;
-        if (Array.isArray(text)) {
-            const atItem = text.find(item => item?.type === 'at');
-            if (atItem && atItem.data) targetQQ = String(atItem.data.qq || atItem.data.target);
-        }
-        if (!targetQQ) {
-            const match = textStr.match(/@([^\s]+)/) || textStr.match(/(?<!\d)(\d{5,12})(?!\d)/);
-            if (match) targetQQ = match[1];
-        }
-        if (!targetQQ) return `⚠️ 用法：${cmd.startsWith('拉黑') ? '拉黑群成员 @某人' : '解除拉黑 [QQ号]'}`;
-
-        if (typeof globalThis.db === 'function') {
-            if (cmd.startsWith('拉黑群成员')) {
-                globalThis.db('exec', {
-                    dbName: DB_NAME,
-                    sql: 'INSERT OR REPLACE INTO group_reject_list (group_id, user_id, nickname, create_time) VALUES (?, ?, ?, ?)',
-                    params: [String(chatId), targetQQ, '手动拉黑', Math.floor(Date.now() / 1000)]
-                });
-                return `✅ 已将 ${targetQQ} 加入本群数据库黑名单。`;
-            } else {
-                globalThis.db('exec', {
-                    dbName: DB_NAME,
-                    sql: 'DELETE FROM group_reject_list WHERE group_id = ? AND user_id = ?',
-                    params: [String(chatId), targetQQ]
-                });
-                return `✅ 已将 ${targetQQ} 从本群数据库黑名单中移除。`;
-            }
-        }
-    }
-
-    // ==========================================
-    // 提取目标QQ
-    // ==========================================
-    let targetQQ = null;
-    let targetName = null;
-    if (Array.isArray(text)) {
-        const atItem = text.find(item => item?.type === 'at');
-        if (atItem && atItem.data && (atItem.data.qq || atItem.data.target)) targetQQ = String(atItem.data.qq || atItem.data.target);
-    } else if (typeof text === 'string') {
-        const atMatch = text.match(/@\{at:(\d+)}/) || text.match(/\[CQ:at,qq=(\d+)\]/);
-        if (atMatch) targetQQ = atMatch[1];
-    }
-    if (!targetQQ) {
-        const match = textStr.match(/@([^\s]+)/) || textStr.match(/(?<!\d)(\d{5,12})(?!\d)/);
-        if (match) {
-            const keyword = match[1];
-            if (typeof globalThis.wsCall === 'function') {
-                try {
-                    const data = await globalThis.wsCall('get_group_member_list', { group_id: Number(chatId) });
-                    const members = data?.data || [];
-                    const found = members.find(m => String(m.user_id) === keyword || (m.nickname && m.nickname.includes(keyword)) || (m.card && m.card.includes(keyword)));
-                    if (found) { targetQQ = String(found.user_id); targetName = found.card || found.nickname; }
-                } catch (e) {}
-            }
-        }
-    }
-
-    // ==========================================
-    // 踢人 / 禁言 / 解禁
-    // ==========================================
-    if (cmd.startsWith('踢') || cmd.startsWith('禁言') || cmd.startsWith('解禁')) {
-        if (!targetQQ) return `⚠️ 用法：${cmd.split(' ')[0]}@成员`;
-        if (!hasPermission) return '❌ 权限不足。';
-        if (!(await checkBotRole(chatId))) return '❌ 操作失败：Bot 不是管理员或群主，无法执行该操作。';
-
-        if (cmd.startsWith('踢')) {
-            try {
-                const result = await globalThis.wsCall('set_group_kick', { group_id: Number(chatId), user_id: Number(targetQQ), reject_add_request: true });
-                if (result.status === 'ok' || result.retcode === 0) {
-                    if (typeof globalThis.db === 'function') {
-                        globalThis.db('exec', { 
-                            dbName: DB_NAME, sql: 'INSERT OR REPLACE INTO group_reject_list (group_id, user_id, nickname, create_time) VALUES (?, ?, ?, ?)', 
-                            params: [String(chatId), targetQQ, targetName || '被踢出', Math.floor(Date.now() / 1000)] 
-                        });
-                    }
-                    return `✅ 已成功踢出，并已记入本群黑名单。`;
-                }
-                return `❌ 踢人失败：${result.msg || result.message}`;
-            } catch (err) { return `❌ 请求失败：${err.message}`; }
-        }
-
-        if (cmd.startsWith('禁言')) {
-            let duration = 600; 
-            const durationMatch = cmd.replace(targetQQ, "").match(/(\d+)\s*(s|秒|m|分钟|min|h|小时|d|天|日)?/i);
-            if (durationMatch) {
-                const value = parseInt(durationMatch[1]);
-                const unit = (durationMatch[2] || 'm').toLowerCase();
-                duration = unit.includes('s') || unit.includes('秒') ? value : unit.includes('h') || unit.includes('时') ? value * 3600 : unit.includes('d') || unit.includes('天') ? value * 86400 : value * 60;
-            }
-            try {
-                const result = await globalThis.wsCall('set_group_ban', { group_id: Number(chatId), user_id: Number(targetQQ), duration: duration });
-                if (cmd.includes('@') && cmd.includes('禁言')) return true; 
-                return (result.status === 'ok' || result.retcode === 0) ? `✅ 已禁言 @${targetQQ} ${duration}秒` : `❌ 禁言失败：${result.msg || result.message}`;
-            } catch (e) { return `❌ 禁言失败：${e.message}`; }
-        }
-
-        if (cmd.startsWith('解禁')) {
-            try {
-                const result = await globalThis.wsCall('set_group_ban', { group_id: Number(chatId), user_id: Number(targetQQ), duration: 0 });
-                return (result.status === 'ok' || result.retcode === 0) ? `✅ 已成功解除禁言` : `❌ 解禁失败：${result.msg || result.message}`;
-            } catch (err) { return `❌ 请求失败：${err.message}`; }
-        }
-    }
-
-    // ==========================================
-    // 随机抽人
+    // 🌟 核心补全：随机抽人逻辑
     // ==========================================
     if (cmd.startsWith('随机抽人')) {
         if (!isGroup) return '❌ 该指令仅限群聊使用';
@@ -405,11 +253,8 @@ export default {
         const countMatch = restCmd.match(/^(\d+)\s*(.*)$/);
         if (countMatch) { count = parseInt(countMatch[1]); actionCmd = countMatch[2].trim(); }
 
-        actionCmd = actionCmd.replace(/^[#\/]+/, '').trim();
+        actionCmd = actionCmd.replace(/^[#\/$]+/, '').trim();
         if (count <= 0) return '⚠️ 抽取人数必须大于 0';
-
-        let isLikeCmd = actionCmd.includes('赞他') || actionCmd.includes('赞她');
-        if (isLikeCmd && !actionCmd.includes('-s')) actionCmd += ' -s';
 
         let template = actionCmd;
         if (!template.includes('{QQ}') && !template.includes('@')) template = `${template} {QQ}`;
@@ -444,8 +289,37 @@ export default {
                 return atSegments;
             }
 
+            // 🌟 动态获取当前使用的前缀
+            let usedPrefix = '#';
+            for (const p of ['#', '/', '$', '!', '！', '。', '.']) {
+                if (cmd.startsWith(p)) { usedPrefix = p; break; }
+            }
+
             (async () => {
                 let successCount = 0;
+                let collectedNodes = []; 
+            
+                // 临时劫持发送方法
+                const originalSend = globalThis.bot.send;
+                globalThis.bot.send = async (m) => {
+                    if (m.content && (m.content.includes('随机抽人回调启动') || m.content.includes('所有查询执行完毕'))) {
+                        return originalSend(m);
+                    }
+
+                    if (String(m.chatId) === String(chatId) && m.isGroup && typeof m.content === 'string') {
+                        collectedNodes.push({
+                            type: 'node',
+                            data: {
+                                name: '执行结果',
+                                uin: String(globalThis.botInfo?.qq || 10000),
+                                content: [{ type: 'text', data: { text: m.content } }]
+                            }
+                        });
+                        return; 
+                    }
+                    return originalSend(m);
+                };
+
                 for (let i = 0; i < winners.length; i++) {
                     const w = winners[i];
                     try {
@@ -464,28 +338,230 @@ export default {
                         const fakeMsgData = {
                             time: Math.floor(Date.now() / 1000), self_id: Number(globalThis.botInfo?.qq || 10000), 
                             post_type: "message", message_type: "group", sub_type: "normal", message_id: Math.floor(Math.random() * 10000000),
-                            group_id: Number(chatId), user_id: Number(senderQQ), raw_message: `#${rawMessageText}`, font: 0,
+                            group_id: Number(chatId), user_id: Number(senderQQ), raw_message: `${usedPrefix}${rawMessageText}`, font: 0,
                             sender: { user_id: Number(senderQQ), nickname: senderName, card: senderName, role: role },
-                            message: [{ type: 'text', data: { text: '#' } }, ...fakeMessageSegments]
-                        };
+                            message: [{ type: 'text', data: { text: usedPrefix } }, ...fakeMessageSegments]
+                         };
                         if (typeof globalThis.handleIncomingMessage === 'function' && globalThis.activeWs) {
                             globalThis.handleIncomingMessage(JSON.stringify(fakeMsgData), globalThis.activeWs, globalThis._registry, globalThis._plugins);
                             successCount++;
                         }
                     } catch (e) {}
+                    
                     const sleepFn = globalThis.sleep || ((ms) => new Promise(r => setTimeout(r, ms)));
-                    if (i < winners.length - 1) await sleepFn(1200); 
+                    await sleepFn(1500); 
                 }
+
+                await new Promise(r => setTimeout(r, 1000));
+
+                // 恢复发送
+                globalThis.bot.send = originalSend;
+
+                // 发送合并消息（切片发送）
+                if (collectedNodes.length > 0) {
+                    const chunkSize = 20;
+                    let sendSuccess = 0;
+                    for (let i = 0; i < collectedNodes.length; i += chunkSize) {
+                        const chunk = collectedNodes.slice(i, i + chunkSize);
+                        try {
+                            await globalThis.wsCall('send_group_forward_msg', {
+                                group_id: Number(chatId),
+                                messages: chunk
+                            });
+                            sendSuccess++;
+                            await new Promise(r => setTimeout(r, 500));
+                        } catch (err) {
+                            globalThis.print(`[随机抽人] 合并消息发送失败: ${err.message}`);
+                        }
+                    }
+                    if (sendSuccess > 0) {
+                        globalThis.bot.send({ chatId, isGroup, content: `✅ 全部执行完毕，共打包了 ${collectedNodes.length} 条执行记录。` });
+                    }
+                } else {
+                    globalThis.bot.send({ chatId, isGroup, content: `❌ 没有任何插件返回结果，可能是前置条件不满足。` });
+                }
+
                 globalThis.print(`[群管] 随机抽人回调执行完毕，成功静默处理 ${successCount}/${winners.length} 人。`);
             })();
 
             let names = winners.map(w => w.card || w.nickname || '神秘人');
-            let tipMsg = `🎲 随机抽人回调启动！\n✨ 抽中人数：${winners.length} 人\n🔗 执行模板：${template.replace(/{QQ}/g, '@抽中者').replace('-s', '')}\n`;
+            let tipMsg = `🎲 随机抽人回调启动！\n✨ 抽中人数：${winners.length} 人\n🔗 执行模板：${template.replace(/{QQ}/g, '@抽中者')}\n`;
             if (winners.length > 5) tipMsg += `(名单: ${names.slice(0, 5).join(', ')} 等 ${winners.length} 人...)\n`;
             else tipMsg += `(名单: ${names.join(', ')})\n`;
-            tipMsg += `⏳ 正在后台匀速派发，请稍候查看结果。`;
+            tipMsg += `⏳ 正在后台匀速派发，所有返回结果将合并为消息发送。`;
             return tipMsg;
         } catch (e) { return `❌ 随机抽人失败: ${e.message}`; }
+    }
+
+    // ==========================================
+    // 查询群黑名单
+    // ==========================================
+    if (cmd === '查询群黑名单') {
+        if (!isGroup) return '❌ 该指令仅限群聊使用';
+        if (!hasPermission) return '❌ 权限不足。';
+        if (typeof globalThis.db !== 'function') return '❌ 数据库未挂载。';
+
+        const res = globalThis.db('find', { dbPath: DB_PATH, table: 'group_reject_list', where: 'group_id = ?', params: [String(chatId)] });
+        if (!res.success || !res.data || res.data.length === 0) return '📭 本群的数据库黑名单为空。';
+
+        const formatRow = (row) => {
+            const displayName = (row.nickname && row.nickname !== 'undefined' && row.nickname !== 'null') ? row.nickname : '未知昵称';
+            let dateStr = '未知时间';
+            if (row.create_time) {
+                const timestamp = row.create_time < 10000000000 ? row.create_time * 1000 : row.create_time;
+                const d = new Date(timestamp);
+                if (!isNaN(d.getTime())) dateStr = d.toLocaleString('zh-CN');
+            }
+            return { name: displayName, date: dateStr, qq: row.user_id };
+        };
+
+        if (res.data.length > 5) {
+            let msgList = [];
+            res.data.forEach((row, index) => {
+                const info = formatRow(row);
+                msgList.push(`[${index + 1}] ${info.name} (${info.qq})\n拉黑时间: ${info.date}`);
+            });
+            msgList.unshift(`🛑 本群数据库黑名单（共 ${res.data.length} 人）`);
+            if (await sendForwardMsg(chatId, isGroup, '群黑名单查询', msgList)) return true;
+        }
+
+        let reply = `🛑 本群数据库黑名单（共 ${res.data.length} 人）：\n\n`;
+        res.data.forEach((row, index) => {
+            const info = formatRow(row);
+            reply += `${index + 1}. ${info.name} (${info.qq})\n   拉黑时间: ${info.date}\n`;
+        });
+        reply += `\n💡 发送：解除拉黑 [QQ号] 可移出黑名单。`;
+        return reply.trim();
+    }
+
+    // ==========================================
+    // 手动拉黑 / 解除拉黑
+    // ==========================================
+    if (cmd.startsWith('拉黑群成员') || cmd.startsWith('解除拉黑')) {
+        if (!isGroup) return '❌ 该指令仅限群聊使用';
+        if (!hasPermission) return '❌ 权限不足。';
+        
+        let targetQQ = null;
+        if (Array.isArray(text)) {
+            const atItem = text.find(item => item?.type === 'at');
+            if (atItem && atItem.data) targetQQ = String(atItem.data.qq || atItem.data.target);
+        }
+        if (!targetQQ) {
+            const match = textStr.match(/@([^\s]+)/) || textStr.match(/(?<!\d)(\d{5,12})(?!\d)/);
+            if (match) targetQQ = match[1];
+        }
+        if (!targetQQ) return `⚠️ 用法：${cmd.startsWith('拉黑') ? '拉黑群成员 @某人' : '解除拉黑 [QQ号]'}`;
+
+        if (typeof globalThis.db === 'function') {
+            if (cmd.startsWith('拉黑群成员')) {
+                let nick = '手动拉黑';
+                if (typeof globalThis.getGroupMembers === 'function') {
+                    const cachedMembers = globalThis.getGroupMembers(chatId) || [];
+                    const cachedUser = cachedMembers.find(m => String(m.user_id) === targetQQ);
+                    if (cachedUser) nick = cachedUser.card || cachedUser.nickname || nick;
+                }
+                globalThis.db('exec', {
+                    dbPath: DB_PATH,
+                    sql: 'INSERT OR REPLACE INTO group_reject_list (group_id, user_id, nickname, create_time) VALUES (?, ?, ?, ?)',
+                    params: [String(chatId), targetQQ, nick, Math.floor(Date.now() / 1000)]
+                });
+                return `✅ 已将 ${targetQQ} 加入本群数据库黑名单。`;
+            } else {
+                globalThis.db('exec', {
+                    dbPath: DB_PATH,
+                    sql: 'DELETE FROM group_reject_list WHERE group_id = ? AND user_id = ?',
+                    params: [String(chatId), targetQQ]
+                });
+                return `✅ 已将 ${targetQQ} 从本群数据库黑名单中移除。`;
+            }
+        }
+    }
+
+    // ==========================================
+    // 提取目标QQ
+    // ==========================================
+    let targetQQ = null;
+    let targetName = null;
+    
+    if (Array.isArray(text)) {
+        const atItem = text.find(item => item?.type === 'at');
+        if (atItem && atItem.data && (atItem.data.qq || atItem.data.target)) {
+            targetQQ = String(atItem.data.qq || atItem.data.target);
+        }
+    }
+    
+    if (!targetQQ) {
+        const cqMatch = textStr.match(/\[CQ:at,qq=(\d+)\]/); 
+        if (cqMatch) {
+            targetQQ = cqMatch[1];
+        } else {
+            const match = textStr.match(/@([^\s]+)/) || textStr.match(/(?<!\d)(\d{5,12})(?!\d)/);
+            if (match) targetQQ = match[1];
+        }
+    }
+
+    if (!targetQQ) {
+        const match = textStr.match(/@([^\s]+)/) || textStr.match(/(?<!\d)(\d{5,12})(?!\d)/);
+        if (match) {
+            const keyword = match[1];
+            if (typeof globalThis.wsCall === 'function') {
+                try {
+                    const data = await globalThis.wsCall('get_group_member_list', { group_id: Number(chatId) });
+                    const members = data?.data || [];
+                    const found = members.find(m => String(m.user_id) === keyword || (m.nickname && m.nickname.includes(keyword)) || (m.card && m.card.includes(keyword)));
+                    if (found) { targetQQ = String(found.user_id); targetName = found.card || found.nickname; }
+                } catch (e) {}
+            }
+        }
+    }
+
+    // ==========================================
+    // 踢人 / 禁言 / 解禁
+    // ==========================================
+    if (cmd.startsWith('踢') || cmd.startsWith('禁言') || cmd.startsWith('解禁')) {
+        if (!targetQQ) return `⚠️ 用法：${cmd.split(' ')[0]}@成员`;
+        if (!hasPermission) return '❌ 权限不足。';
+        if (!(await checkBotRole(chatId))) return '❌ 操作失败：Bot 不是管理员或群主，无法执行该操作。';
+
+        if (cmd.startsWith('踢')) {
+            try {
+                const result = await globalThis.wsCall('set_group_kick', { group_id: Number(chatId), user_id: Number(targetQQ), reject_add_request: true });
+                if (result.status === 'ok' || result.retcode === 0) {
+                    if (typeof globalThis.db === 'function') {
+                        const dbRes = globalThis.db('exec', { 
+                            dbPath: DB_PATH, 
+                            sql: 'INSERT OR REPLACE INTO group_reject_list (group_id, user_id, nickname, create_time) VALUES (?, ?, ?, ?)', 
+                            params: [String(chatId), targetQQ, targetName || '被踢出', Math.floor(Date.now() / 1000)] 
+                        });
+                        if (!dbRes.success) return `✅ 已成功踢出，但记入黑名单失败: ${dbRes.error}`;
+                    }
+                    return `✅ 已成功踢出，并已记入本群黑名单。`;
+                }
+                return `❌ 踢人失败：${result.msg || result.message}`;
+            } catch (err) { return `❌ 请求失败：${err.message}`; }
+        }
+
+        if (cmd.startsWith('禁言')) {
+            let duration = 600; 
+            const durationMatch = cmd.replace(targetQQ, "").match(/(\d+)\s*(s|秒|m|分钟|min|h|小时|d|天|日)?/i);
+            if (durationMatch) {
+                const value = parseInt(durationMatch[1]);
+                const unit = (durationMatch[2] || 'm').toLowerCase();
+                duration = unit.includes('s') || unit.includes('秒') ? value : unit.includes('h') || unit.includes('时') ? value * 3600 : unit.includes('d') || unit.includes('天') ? value * 86400 : value * 60;
+            }
+            try {
+                const result = await globalThis.wsCall('set_group_ban', { group_id: Number(chatId), user_id: Number(targetQQ), duration: duration });
+                if (cmd.includes('@') && cmd.includes('禁言')) return true; 
+                return (result.status === 'ok' || result.retcode === 0) ? `✅ 已禁言 @${targetQQ} ${duration}秒` : `❌ 禁言失败：${result.msg || result.message}`;
+            } catch (e) { return `❌ 禁言失败：${e.message}`; }
+        }
+
+        if (cmd.startsWith('解禁')) {
+            try {
+                const result = await globalThis.wsCall('set_group_ban', { group_id: Number(chatId), user_id: Number(targetQQ), duration: 0 });
+                return (result.status === 'ok' || result.retcode === 0) ? `✅ 已成功解除禁言` : `❌ 解禁失败：${result.msg || result.message}`;
+            } catch (err) { return `❌ 请求失败：${err.message}`; }
+        }
     }
 
     // ==========================================
@@ -494,14 +570,22 @@ export default {
     if (cmd.startsWith('查等级')) {
         if (!isGroup) return '❌ 该指令仅限群聊使用';
         if (!hasPermission) return '❌ 权限不足：仅限管理员及以上身份使用。';
+        
         const targetLevel = cmd.split(/\s+/)[1];
+        
         try {
             const data = await globalThis.wsCall('get_group_member_list', { group_id: Number(chatId) });
+            if (!data || (data.status !== 'ok' && data.retcode !== 0)) {
+                return `❌ 获取群成员列表失败: ${data?.msg || data?.message || '接口未返回数据，可能是群过大导致超时'}`;
+            }
+
             let rawMembers = data?.data || [];
             let memberMap = new Map();
-            for (const m of rawMembers) { if (m.user_id && m.user_id !== '0') memberMap.set(String(m.user_id), m); }
+            for (const m of rawMembers) { 
+                if (m.user_id && m.user_id !== '0') memberMap.set(String(m.user_id), m); 
+            }
             let members = Array.from(memberMap.values());
-            if (members.length === 0) return '❌ 无法获取群成员列表';
+            if (members.length === 0) return '❌ 无法获取群成员列表，群内可能没有有效成员数据。';
             
             if (targetLevel) {
                 const filtered = members.filter(m => {
@@ -530,10 +614,14 @@ export default {
                     levelCount[lvl] = (levelCount[lvl] || 0) + 1;
                 }
                 let levelText = `📊 本群成员等级统计（共 ${members.length} 人）：\n`;
-                for (const lvl of Object.keys(levelCount).sort((a, b) => parseInt(b) - parseInt(a))) { levelText += `Lv.${lvl} : ${levelCount[lvl]} 人\n`; }
+                for (const lvl of Object.keys(levelCount).sort((a, b) => parseInt(b) - parseInt(a))) { 
+                    levelText += `Lv.${lvl} : ${levelCount[lvl]} 人\n`; 
+                }
                 return levelText.trim() + `\n💡 提示：发送“查等级 1”可查看具体成员。`;
             }
-        } catch (e) { return `❌ 查询等级失败: ${e.message}`; }
+        } catch (e) { 
+            return `❌ 查询等级异常: ${e.message}`; 
+        }
     }
 
     // ==========================================
@@ -595,13 +683,19 @@ export default {
         let likeTargetQQ = senderQQ; 
         let isLikeOther = cmd.includes('赞他') || cmd.includes('赞她');
         let isSilent = cmd.includes('-s');
+        
         if (isLikeOther) {
+            if (!targetQQ) {
+                const numMatch = textStr.match(/(\d{5,12})/);
+                if (numMatch) targetQQ = numMatch[1];
+            }
             if (!targetQQ) return '⚠️ 未找到该成员，请真实艾特（@）对方，或者确认对方在群里。';
             likeTargetQQ = targetQQ;
         }
+        
         const currentCycle = getCurrentLikeCycle();
         if (!isLikeOther && typeof globalThis.db === 'function') {
-            const dbRes = globalThis.db('find', { dbName: DB_NAME, table: 'like_records', where: 'user_id = ?', params: [String(senderQQ)], all: false });
+            const dbRes = globalThis.db('find', { dbPath: DB_PATH, table: 'like_records', where: 'user_id = ?', params: [String(senderQQ)], all: false });
             if (dbRes.success && dbRes.data && dbRes.data.last_like_cycle === currentCycle) return `今天已经给自己点过赞啦，明天 0 点后再来吧~`;
         }
         if (botConfig.bot && botConfig.bot.likeEnabled === false) return '❌ 点赞功能已关闭';
@@ -617,7 +711,7 @@ export default {
             try { await globalThis.wsCall('send_like', { user_id: Number(likeTargetQQ), times: 10 }); } catch (e) {}
         }
         if (!isLikeOther && typeof globalThis.db === 'function') {
-            globalThis.db('exec', { dbName: DB_NAME, sql: 'INSERT OR REPLACE INTO like_records (user_id, last_like_cycle) VALUES (?, ?)', params: [String(senderQQ), currentCycle] });
+            globalThis.db('exec', { dbPath: DB_PATH, sql: 'INSERT OR REPLACE INTO like_records (user_id, last_like_cycle) VALUES (?, ?)', params: [String(senderQQ), currentCycle] });
         }
         if (isLikeOther) {
             if (isSilent) return true;
@@ -651,8 +745,7 @@ export default {
       } catch (err) { return `❌ 请求失败：${err.message}`; }
     }
 
-
-     // ==========================================
+    // ==========================================
     // 群公告相关
     // ==========================================
     if (cmd.startsWith('群公告')) {
@@ -736,7 +829,6 @@ export default {
             if (rawRole === 'admin') isGroupAdmin = true;
         } catch (e) {}
 
-        // 权限判断：大主人、群主、群管都可以用
         let checkRole = (typeof getRole === 'function') ? getRole(senderQQ) : 'member';
         if (!isSelfChange && !isGroupOwner && !isGroupAdmin && !['master', 'owner', 'admin'].includes(checkRole)) {
             return `❌ 权限不足！系统识别你的身份为: ${checkRole}，QQ: ${senderQQ}`;
@@ -788,8 +880,6 @@ export default {
                 duration: -1 
            });
         
-           console.log(`[申请头衔] 接口返回:`, JSON.stringify(res));
-
            if (res && (res.status === 'ok' || res.retcode === 0)) {
                return `✅ 已成功将你的头衔设置为：【${titleContent}】`;
            } else {
@@ -797,7 +887,6 @@ export default {
                return `❌ 设置头衔失败：${errMsg}`;
            }
         } catch (err) {
-            console.error(`[申请头衔] 异常崩溃:`, err);
             return `❌ 请求异常：${err.message}`;
         }
     }
