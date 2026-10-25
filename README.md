@@ -96,6 +96,15 @@ git clone https://gitcode.com/xingyuan3739/XingYuanBot.git
 ```bash
 cd XingYuanBot
 ```
+- 构建脚本
+```bash
+Linux请依次执行
+chmod +x setup.sh
+./setup.sh
+
+Windows请双击
+setup.bat
+```
 
 ### 安装依赖
 - 1.请先执行
