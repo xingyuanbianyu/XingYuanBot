@@ -16,10 +16,17 @@
 
 ## ✨ 功能特性
 
-- 📡 支持 NapCat、LLOneBot 协议端连接
-- 🔐 多级权限管理（大主人 / 小主人 / 管理员 / 普通成员）
-- 🔌 插件化架构，轻松扩展功能，插件直接在xy-plugins下创建插件文件夹，先写rule.json，再写index.js或者script.py（随便选，只要能够作为启动或者入口文件即可），最好还是按照插件启动，文件里面的要求填写
-这是一个rule.json的配置示例：
+- 📡 **协议端支持**：完美兼容 NapCat、LLOneBot 等 OneBot 11 协议端连接。
+- 🔐 **多级权限管理**：内置大主人 / 小主人 / 管理员 / 普通成员四级权限，支持指令动态管理。
+- 🔌 **插件化架构**：在 `xy-plugins` 目录下创建插件文件夹，编写 `rule.json` 和入口文件即可热加载运行。
+- 🚀 **全链路 WebSocket**：底层直连 WS，自带心跳保活、断线重连与 Token 鉴权，响应零延迟。
+- ♻️ **插件热重载**：修改插件代码后无需重启主控，终端输入 `reload` 即可增量更新。
+
+### 📦 插件开发示例
+
+在 `xy-plugins/` 下创建文件夹（例如 `hello`），并添加以下两个文件：
+
+**1. `rule.json` (插件配置)**
 ```json
 {
   "name": "你好世界",
@@ -28,15 +35,16 @@
   "entry": "index.js"
 }
 ```
-- command类型的插件，请使用如下方法进行创建插件
 ```js
 export default {
   name: '你好世界',
 
+  // 匹配规则：剥离前缀后的纯文本为“你好”时触发
   match(text) {
     return text === '你好';
   },
 
+  // 处理逻辑
   async handle(msg) {
     return [
       { type: 'at', data: { qq: msg.senderQQ } },
