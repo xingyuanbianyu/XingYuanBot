@@ -30,7 +30,6 @@ globalThis.wsCall = (action, params = {}, timeoutMs = 15000, targetWs = null) =>
         if (data.status === 'failed' || (data.retcode !== undefined && data.retcode !== 0)) {
           reject(new Error(`API [${action}] 返回失败: ${data.message || data.wording || data.retcode}`));
         } else {
-          // 自动解包 data，把最干净的返回交给插件
           resolve(data.data !== undefined ? data.data : data); 
         }
       },
@@ -179,7 +178,23 @@ export function startNetwork(configs, onMessage, onError) {
     
     setTimeout(() => {
         try {
-            serverInstance = new WebSocketServer({ port, host: '0.0.0.0' });
+            // 🌟 新增：服务端 Token 校验
+            const verifyClient = (info, cb) => {
+                if (!serverConfig.token) return cb(true); // 没有配置 token，直接放行
+                
+                const authHeader = info.req.headers['authorization'] || info.req.headers['token'];
+                // 兼容不带 Bearer 和带 Bearer 的写法
+                const isMatch = authHeader === serverConfig.token || authHeader === `Bearer ${serverConfig.token}`;
+                
+                if (isMatch) {
+                    cb(true);
+                } else {
+                    log(`⚠ [网络] 拒绝连接: 服务端 Token 校验失败`);
+                    cb(false, 401, 'Unauthorized');
+                }
+            };
+
+            serverInstance = new WebSocketServer({ port, host: '0.0.0.0', verifyClient });
         } catch (e) {
             log(`❌ [网络] 服务端启动失败: ${e.message}`);
             return;
@@ -237,8 +252,6 @@ export function startNetwork(configs, onMessage, onError) {
         clientPongTimer = setTimeout(() => {
           log('⚠ [网络] 客户端未收到 Pong，判定失联，主动断开！');
           if (clientWs) {
-            // 🌟 修复：这里直接 terminate 即可，它会触发 close 事件
-            // 不要在 close 事件外调用 startClientReconnect，否则会生成两个重连定时器
             clientWs.terminate(); 
           }
         }, HEARTBEAT_TIMEOUT);
@@ -248,16 +261,30 @@ export function startNetwork(configs, onMessage, onError) {
 
   const connectClient = () => {
     if (activeMode === 'server' || !clientConfig) return;
-    log(`🔗 [网络] 正在主动连接 NapCat: ${clientConfig.url}...`);
+    log(`🔗 [网络] 正在主动连接 NapCat: ${clientConfig.url}${clientConfig.token ? ' (带 Token)' : ''}...`);
     
     try {
-      clientWs = new WebSocket(clientConfig.url);
+      // 🌟 新增：客户端携带 Token
+      const options = {};
+      if (clientConfig.token) {
+          options.headers = {
+              'Authorization': `Bearer ${clientConfig.token}`
+          };
+      }
+      clientWs = new WebSocket(clientConfig.url, options);
     } catch (e) {
       log(`❌ [网络] 客户端连接异常: ${e.message}`);
       return startClientReconnect();
     }
 
-    clientWs.on('error', (err) => log(`❌ [网络] 客户端发生错误: ${err.message}`));
+    clientWs.on('error', (err) => {
+        // 如果是 401，通常是因为 Token 错了
+        if (err.message.includes('401') || err.message.includes('Unauthorized')) {
+            log(`❌ [网络] 客户端连接被拒绝: Token 校验失败，请检查 bot_client.yaml`);
+        } else {
+            log(`❌ [网络] 客户端发生错误: ${err.message}`);
+        }
+    });
 
     clientWs.on('open', () => {
       log(`✅ [网络] 客户端成功连接到 NapCat！`);
@@ -286,7 +313,7 @@ export function startNetwork(configs, onMessage, onError) {
         log('👉 触发竞争: 客户端断开，重新启动服务端监听...');
         if (serverConfig) tryListen(serverConfig.port);
       }
-      startClientReconnect(); // 🌟 所有的重连逻辑统一收口到这里
+      startClientReconnect(); 
     });
   };
 
