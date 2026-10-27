@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import yaml from 'yaml';
-import Database from 'better-sqlite3'; // 🌟 强烈建议换成 sqlite3，别用 globalThis.db 魔法
+import Database from 'better-sqlite3';
 import { fileURLToPath } from 'url';
 import { getRole } from '../../../xy-config/config/permissions.js';
 
@@ -21,6 +21,7 @@ db.exec(`
 
 const pendingVerifications = new Map();
 let verifyBrowser = null;
+let browserLaunching = null; // 🌟 浏览器启动锁
 
 export default {
   name: '入群验证',
@@ -61,7 +62,6 @@ export default {
     return str;
   },
 
-  // 🌟 修复：把 msg 传进来，作为双保险
   match(text, msg) {
     if (typeof text !== 'string') return false;
     const cmd = text.trim();
@@ -69,7 +69,6 @@ export default {
     if (['开启入群验证', '关闭入群验证', '切换算术题', '切换文本验证', '切换图片验证', '入群验证帮助', '验证帮助', '入群申请帮助', '申请帮助'].includes(cmd)) return true;
     if (cmd.startsWith('跳过验证') || cmd.startsWith('重新验证')) return true;
 
-    // 双保险：如果该用户在验证状态中，放行他的所有消息
     if (msg && msg.isGroup) {
         const key = `${msg.chatId}_${msg.senderQQ}`;
         if (pendingVerifications.has(key)) return true;
@@ -78,7 +77,6 @@ export default {
   },
 
   async generateCaptchaImage(answer) {
-    // ... (保留你原来的渲染代码，为了篇幅这里直接折叠)
     try {
         let chromium = null;
         try { chromium = (await import('playwright')).chromium; } catch (e) {
@@ -87,7 +85,12 @@ export default {
         if (!chromium) throw new Error("无浏览器内核");
 
         if (!verifyBrowser || !verifyBrowser.isConnected()) {
-            verifyBrowser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
+            if (!browserLaunching) {
+                browserLaunching = chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] }).then(b => {
+                    verifyBrowser = b; browserLaunching = null; return b;
+                });
+            }
+            await browserLaunching;
         }
 
         const html = `
@@ -121,7 +124,6 @@ export default {
     }
   },
 
-  // 🌟 修复：加入 ws 参数，确保下发通知精准
   async startVerification(groupId, userId, nickname, ws) {
     const config = this.loadConfig();
     const settings = this.getGroupSettings(groupId);
@@ -163,28 +165,31 @@ export default {
     }
 
     try {
-        // 🌟 加上 ws 参数
         await globalThis.wsCall('send_group_msg', { group_id: Number(groupId), message: welcomeMsg }, 5000, ws);
     } catch (err) {}
 
     const key = `${groupId}_${userId}`;
     if (pendingVerifications.has(key)) clearTimeout(pendingVerifications.get(key).timer);
 
-    // 🌟 核心修复：使用 this.name 动态塞入名字，杜绝硬编码！
     if (globalThis._interactiveSessions) {
         globalThis._interactiveSessions.set(String(userId), { 
-            pluginName: this.name, // 👈 就是这里！
+            pluginName: this.name,
             expireAt: Date.now() + timeout 
         });
     }
 
     const timer = setTimeout(async () => {
         try {
-            await globalThis.wsCall('set_group_kick', { group_id: Number(groupId), user_id: Number(userId), reject_add_request: true }, 5000, ws);
+            // 🌟 超时踢人加返回值校验
+            const kickRes = await globalThis.wsCall('set_group_kick', { group_id: Number(groupId), user_id: Number(userId), reject_add_request: true }, 5000, ws);
+            const isSuccess = kickRes === null || kickRes?.status === 'ok' || kickRes?.retcode === 0;
+            
             const kickText = msgs.timeout_kick || "⏰ 用户 {nickname}({userId}) 未在规定时间内完成验证，已自动踢出。";
+            const finalText = isSuccess ? kickText : "⚠️ 验证超时，但自动踢出失败，请检查 Bot 权限。";
+            
             await globalThis.wsCall('send_group_msg', {
                 group_id: Number(groupId),
-                message: [{ type: 'text', data: { text: this.formatMsg(kickText, { nickname, userId }) } }]
+                message: [{ type: 'text', data: { text: this.formatMsg(finalText, { nickname, userId }) } }]
             }, 5000, ws);
         } catch (err) {}
         pendingVerifications.delete(key);
@@ -201,7 +206,6 @@ export default {
     const groupId = Number(e.groupId);
     const userId = Number(e.userId);
     
-    // 🌟 修复：从 sharedState 找对应的 ws
     const selfId = String(e.selfId || e.raw?.self_id || '');
     if (userId === Number(selfId)) return;
     
@@ -212,12 +216,14 @@ export default {
     if (!ws && selfId && globalThis.sharedState?.botIdToWs) {
         ws = globalThis.sharedState.botIdToWs.get(selfId);
     }
+    if (!ws) ws = globalThis.activeWs;
 
     let nickname = e.raw?.card || e.raw?.nickname;
     if (!nickname && typeof globalThis.wsCall === 'function') {
         try {
             const info = await globalThis.wsCall('get_group_member_info', { group_id: groupId, user_id: userId, no_cache: true }, 5000, ws);
-            nickname = info?.data?.card || info?.data?.nickname;
+            // 🌟 兼容层级
+            nickname = info?.data?.card || info?.data?.nickname || info?.card || info?.nickname;
         } catch(err) {}
     }
     if (!nickname) nickname = '未知昵称';
@@ -230,9 +236,8 @@ export default {
     
     const groupId = msg.chatId;
     const senderQQ = String(msg.senderQQ);
-    const ws = msg._ws; // 🌟 统一使用
+    const ws = msg._ws;
     
-    // dispatcher 强制转发时，可能用户带了自己的前缀，这里再剥一次防呆
     let cmd = (msg.pureText || "").trim();
     const dynamicPrefixes = ['/', '$', '#', '!', '。'];
     for (const p of dynamicPrefixes) {
@@ -243,10 +248,8 @@ export default {
     const config = this.loadConfig();
     const msgs = config.messages || {};
 
-    // ... [帮助菜单渲染逻辑完全保留你原来的，这里为了篇幅折叠] ...
     if (cmd === '入群验证帮助' || cmd === '验证帮助' || cmd === '入群申请帮助' || cmd === '申请帮助') {
-        // 原样照抄你的代码即可
-        // return { file: buffer } / 文本降级
+        // 保留你原来的
     }
 
     // ==========================================
@@ -255,14 +258,14 @@ export default {
     if (cmd.startsWith('开启入群验证') || cmd.startsWith('关闭入群验证') || cmd === '切换算术题' || cmd === '切换文本验证' || cmd === '切换图片验证' || cmd.startsWith('跳过验证') || cmd.startsWith('重新验证')) {
         let hasPermission = false;
         try {
-            // 🌟 加上 ws
             const res = await globalThis.wsCall('get_group_member_info', { group_id: Number(groupId), user_id: Number(senderQQ) }, 5000, ws);
-            const role = res?.data?.role;
+            // 🌟 兼容层级
+            const role = res?.data?.role || res?.role;
             if (role === 'owner' || role === 'admin') hasPermission = true;
         } catch (e) {}
         
         if (!hasPermission && typeof getRole === 'function') {
-            if (['master', 'owner'].includes(getRole(senderQQ))) hasPermission = true;
+            if (['master', 'owner'].includes(getRole(senderQQ, msg.botId))) hasPermission = true;
         }
         if (!hasPermission) return '❌ 权限不足：仅群主、管理员或主人可操作。';
 
@@ -301,7 +304,7 @@ export default {
             let nickname = '未知昵称';
             try {
                 const info = await globalThis.wsCall('get_group_member_info', { group_id: Number(groupId), user_id: Number(targetQQ) }, 5000, ws);
-                nickname = info?.data?.card || info?.data?.nickname || nickname;
+                nickname = info?.data?.card || info?.data?.nickname || info?.card || info?.nickname || nickname;
             } catch(e) {}
             await this.startVerification(groupId, targetQQ, nickname, ws);
             return this.formatMsg(msgs.reverify_success || "✅ 已重新对 {nickname}({userId}) 发起验证。", { nickname, userId: targetQQ });
@@ -309,11 +312,10 @@ export default {
     }
 
     // ==========================================
-    // 2. 处理待验证者的回复 (此时已经被强制塞入了)
+    // 2. 处理待验证者的回复
     // ==========================================
     const key = `${groupId}_${senderQQ}`;
     if (!pendingVerifications.has(key)) {
-        // 没在验证状态，安全清理多余的 session
         if (globalThis._interactiveSessions) globalThis._interactiveSessions.delete(String(senderQQ));
         return false;
     }
@@ -334,7 +336,6 @@ export default {
         } catch (err) {}
         return true; 
     } else {
-        // 撤回
         if (msgId) {
             try { await globalThis.wsCall('delete_msg', { message_id: Number(msgId) }, 3000, ws); } catch (e) {}
         }
@@ -357,15 +358,17 @@ export default {
             await new Promise(r => setTimeout(r, 1000));
 
             try {
-                await globalThis.wsCall('set_group_kick', { group_id: Number(groupId), user_id: Number(senderQQ), reject_add_request: true }, 5000, ws);
+                const kickRes = await globalThis.wsCall('set_group_kick', { group_id: Number(groupId), user_id: Number(senderQQ), reject_add_request: true }, 5000, ws);
+                const isSuccess = kickRes === null || kickRes?.status === 'ok' || kickRes?.retcode === 0;
+                
                 const kickText = msgs.max_wrong_kick || "❌ 用户 {nickname}({userId}) 连续验证失败，已自动踢出。";
+                const finalText = isSuccess ? kickText : "⚠️ 试图踢出用户失败，请检查 Bot 是否为管理员。";
+                
                 await globalThis.wsCall('send_group_msg', {
                     group_id: Number(groupId),
-                    message: [{ type: 'text', data: { text: this.formatMsg(kickText, { nickname: data.nickname, userId: senderQQ }) } }]
+                    message: [{ type: 'text', data: { text: this.formatMsg(finalText, { nickname: data.nickname, userId: senderQQ }) } }]
                 }, 5000, ws);
-            } catch (err) {
-                await globalThis.wsCall('send_group_msg', { group_id: Number(groupId), message: [{ type: 'text', data: { text: `⚠️ 试图踢出用户失败，请检查 Bot 是否为管理员。` } }] }, 5000, ws);
-            }
+            } catch (err) {}
             return true;
         }
 

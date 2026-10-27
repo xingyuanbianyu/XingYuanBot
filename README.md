@@ -1,7 +1,7 @@
 # 🌟 XingYuanBot（星缘机器人）
 
 一个基于 Node.js 的轻量级 QQ 机器人框架，支持 NapCat / LLOneBot 协议端连接，内置灵活的权限管理系统和插件扩展机制。
-# 当前版本：3.0.0
+# 当前版本：4.0.0
 ## 项目目录结构
 
 <details>
@@ -22,18 +22,28 @@
 这是一个rule.json的配置示例：
 ```json
 {
-  "name": "系统指令",
+  "name": "你好世界",
+  "enabled": true,
   "type": "command",
-  "prefix": ["#", "/"],
-  "keywords": ["退出", "重启", "状态", "帮助", "权限"],
   "entry": "index.js"
 }
 ```
 - command类型的插件，请使用如下方法进行创建插件
 ```js
-//match和handle
-//match进行匹配
-//handle处理逻辑
+export default {
+  name: '你好世界',
+
+  match(text) {
+    return text === '你好';
+  },
+
+  async handle(msg) {
+    return [
+      { type: 'at', data: { qq: msg.senderQQ } },
+      { type: 'text', data: { text: ' 你好！欢迎使用 XingYuanBot 4.0.0 🎉' } }
+    ];
+  }
+};
 ```
 
 ## 🚀 快速开始
@@ -256,4 +266,3 @@ m1536_adjs318inp@aka.yeah.net
 ```
 1103117017
 ```
-

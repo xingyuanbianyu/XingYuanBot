@@ -1,4 +1,4 @@
-import fetch from 'node-fetch';
+// 🌟 修复：删除 import fetch，直接使用 Node 18 原生自带 fetch
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
@@ -10,7 +10,7 @@ const MENU_PATH = path.resolve(__dirname, '../../plugins/指令/menu.json');
 const DB_PATH = path.resolve(__dirname, 'group_data.db'); 
 
 // ==========================================
-// 🌟 公共前缀剥离函数
+// 🌟 公共辅助函数
 // ==========================================
 function stripPrefix(text) {
     let cmd = (text || "").trim();
@@ -24,9 +24,23 @@ function stripPrefix(text) {
     return cmd;
 }
 
-// 🌟 修复：sleep / random 兜底，防止主框架未挂载时崩溃
 const sleepFn = globalThis.sleep || ((ms) => new Promise(r => setTimeout(r, ms)));
 const randomFn = globalThis.random || ((min, max) => Math.floor(Math.random() * (max - min + 1)) + min);
+
+// 🌟 全局 API 成功判断（解决返回 null 被误判为失败的问题）
+function isApiSuccess(res) {
+    if (res === null || res === undefined) return true; // 很多框架成功时不返回对象
+    if (typeof res === 'object') {
+        if (res.status === 'ok' || res.retcode === 0 || res.retcode === 1) return true;
+    }
+    return false;
+}
+
+// 🌟 统一提取 API 错误信息
+function getApiError(res) {
+    if (!res) return '接口无返回(超时或未响应)';
+    return res?.msg || res?.message || res?.wording || JSON.stringify(res) || '未知错误';
+}
 
 // 初始化数据库表
 if (typeof globalThis.db === 'function') {
@@ -56,34 +70,6 @@ try {
     const yamlPath = path.join(__dirname, '../../../xy-config/config/bot.yaml');
     botConfig = parseYaml(fs.readFileSync(yamlPath, 'utf8')) || {};
 } catch (e) {}
-
-// ==========================================
-// 🌟 修复：Bot 权限缓存 + ws 参数
-// ==========================================
-const botRoleCache = new Map(); // groupId -> { role, time }
-
-async function checkBotRole(chatId, ws) {
-    if (typeof globalThis.wsCall !== 'function') return false;
-    const gid = String(chatId);
-    
-    const cached = botRoleCache.get(gid);
-    if (cached && Date.now() - cached.time < 60000) {
-        return cached.role === 'owner' || cached.role === 'admin';
-    }
-    
-    try {
-        const botQQ = globalThis.botInfo?.qq || (await globalThis.wsCall('get_login_info', {}, 3000, ws))?.data?.user_id;
-        if (!botQQ) return false;
-        const data = await globalThis.wsCall('get_group_member_info', { 
-            group_id: Number(chatId), user_id: Number(botQQ), no_cache: true 
-        }, 3000, ws);
-        const role = data?.data?.role || 'member';
-        botRoleCache.set(gid, { role, time: Date.now() });
-        return role === 'owner' || role === 'admin';
-    } catch (e) {
-        return false;
-    }
-}
 
 const myCommands = [
   { cmd: '随机抽人 [数量] [指令]', desc: '随机抽取成员，可附带指令。支持 {QQ} 或 @ 占位符' },
@@ -153,7 +139,6 @@ function parseText(text) {
   return String(text || '');
 }
 
-// 🌟 修复：sendForwardMsg 全链路带 ws
 async function sendForwardMsg(chatId, isGroup, title, msgList, ws) {
     if (typeof globalThis.wsCall !== 'function') return false;
     const nodes = msgList.map(m => ({
@@ -175,18 +160,16 @@ export default {
   description: '群管工具箱',
   events: ['group.decrease', 'group.kick', 'group.request'],
 
-  // 🌟 修复：严格锚定匹配，防止群友聊天误触
   match: (text) => {
     if (!text || typeof text !== 'string') return false;
     const cmd = stripPrefix(text);
     if (cmd.includes('添加定时') || cmd.includes('查看定时') || cmd.includes('删除定时')) return false;
     
-    if (/^(随机抽人|踢|禁言|解禁|头衔|申请头衔|改头衔|设置管理|取消管理|群公告|查公告|删公告|批量移出|查等级|查潜水|清理潜水|查询群黑名单|拉黑群成员|解除拉黑|赞我|点赞)(\s|$)/.test(cmd)) return true;
-    if (/赞(他|她)/.test(cmd) && cmd.length < 30) return true;
+    if (/^(随机抽人|踢|禁言|解禁|头衔|申请头衔|改头衔|设置管理|取消管理|群公告|查公告|删公告|批量移出|查等级|查潜水|清理潜水|查询群黑名单|拉黑群成员|解除拉黑|赞我|点赞)/.test(cmd)) return true;
+    if (/^赞(他|她)/.test(cmd) && cmd.length < 30) return true;
     return false;
   },
 
-  // 🌟 修复：onEvent 补 ws
   async onEvent(e, context) {
       const groupId = String(e.groupId);
       if (typeof globalThis.db !== 'function') return;
@@ -244,14 +227,15 @@ export default {
       }
   },
 
-  handle: async function({ text, pureText, chatId, isGroup, senderName, senderQQ, role, _ws }) {
+  handle: async function({ text, pureText, chatId, isGroup, senderName, senderQQ, role, _ws, botId }) {
     if (!text) return false;
     
-    const ws = _ws; // 🌟 统一使用
+    const ws = _ws;
     const cmd = stripPrefix(pureText || "");
     if (!cmd) return false;
     
     let textStr = parseText(text).trim();
+    const safeChatId = Number(chatId) || 0;
 
     let isGroupAdmin = false;
     if (typeof globalThis.wsCall === 'function') {
@@ -261,8 +245,9 @@ export default {
             if (cachedUser && ['owner', 'admin'].includes(cachedUser.role)) {
                 isGroupAdmin = true;
             } else {
-                const res = await globalThis.wsCall('get_group_member_info', { group_id: Number(chatId), user_id: Number(senderQQ) }, 3000, ws);
-                const rawRole = res?.data?.role;
+                const res = await globalThis.wsCall('get_group_member_info', { group_id: safeChatId, user_id: Number(senderQQ) }, 3000, ws);
+                // 🌟 兼容层级
+                const rawRole = res?.data?.role || res?.role;
                 if (rawRole === 'owner' || rawRole === 'admin') isGroupAdmin = true;
             }
         } catch (e) {}
@@ -285,7 +270,7 @@ export default {
         const countMatch = restCmd.match(/^(\d+)\s*(.*)$/);
         if (countMatch) { count = parseInt(countMatch[1]); actionCmd = countMatch[2].trim(); }
 
-        actionCmd = actionCmd.replace(/^[#\/$]+/, '').trim();
+       actionCmd = actionCmd.replace(/^[#\/$]+/, '').trim();
         if (count <= 0) return '⚠️ 抽取人数必须大于 0';
 
         let template = actionCmd;
@@ -294,12 +279,38 @@ export default {
         const textParts = template.split('{QQ}');
 
         try {
-            const data = await globalThis.wsCall('get_group_member_list', { group_id: Number(chatId) }, 10000, ws);
-            let rawMembers = data?.data || [];
+            const activeWs = ws || globalThis.activeWs;
+            const gid = Number(safeChatId);
+
+            let data;
+            try {
+                data = await globalThis.wsCall('get_group_member_list', { group_id: gid, no_cache: false }, 15000, activeWs);
+            } catch (wsErr) {
+                return `❌ 获取群成员网络接口报错: ${wsErr.message || wsErr}`;
+            }
+
+            let rawMembers = data?.data;
+            if (!rawMembers && Array.isArray(data)) rawMembers = data;
+            if (!rawMembers && data?.data?.data) rawMembers = data.data.data;
+            if (!rawMembers && data?.data?.members) rawMembers = data.data.members;
+
+            if (!Array.isArray(rawMembers)) {
+                const errDetail = JSON.stringify(data)?.slice(0, 100) || '无返回数据';
+                return `❌ 获取群成员失败，接口返回异常：${errDetail}`;
+            }
+
             let memberMap = new Map();
-            for (const m of rawMembers) { if (m.user_id && m.user_id !== '0') memberMap.set(String(m.user_id), m); }
+            for (const m of rawMembers) { 
+                const uid = m.user_id || m.userId; 
+                if (uid && uid !== '0' && uid !== 0) {
+                    memberMap.set(String(uid), { ...m, user_id: uid }); 
+                }
+            }
             let members = Array.from(memberMap.values());
-            if (members.length === 0) return '❌ 无法获取群成员列表。';
+        
+            if (members.length === 0) {
+                return `❌ 无法获取群成员列表。\n(可能原因：Bot不是管理员被风控、NapCat接口未返回数据、或群号错误)\n原返回空数组。`;
+            }
 
             let winners = [];
             if (members.length <= count) { winners = members; } 
@@ -326,12 +337,11 @@ export default {
                 if (cmd.startsWith(p)) { usedPrefix = p; break; }
             }
 
-            // 🌟 关键修复：try...finally 保证 bot.send 一定恢复
             (async () => {
                 let successCount = 0;
                 let collectedNodes = []; 
                 const originalSend = globalThis.bot.send;
-                
+            
                 try {
                     globalThis.bot.send = async (m) => {
                         if (m.content && (m.content.includes('随机抽人回调启动') || m.content.includes('所有查询执行完毕'))) {
@@ -369,21 +379,20 @@ export default {
                             const fakeMsgData = {
                                 time: Math.floor(Date.now() / 1000), self_id: Number(globalThis.botInfo?.qq || 10000), 
                                 post_type: "message", message_type: "group", sub_type: "normal", message_id: Math.floor(Math.random() * 10000000),
-                                group_id: Number(chatId), user_id: Number(senderQQ), raw_message: `${usedPrefix}${rawMessageText}`, font: 0,
+                                group_id: gid, user_id: Number(senderQQ), raw_message: `${usedPrefix}${rawMessageText}`, font: 0,
                                 sender: { user_id: Number(senderQQ), nickname: senderName, card: senderName, role: role },
                                 message: [{ type: 'text', data: { text: usedPrefix } }, ...fakeMessageSegments]
                              };
-                            if (typeof globalThis.handleIncomingMessage === 'function' && globalThis.activeWs) {
-                                globalThis.handleIncomingMessage(JSON.stringify(fakeMsgData), ws || globalThis.activeWs, globalThis._registry, globalThis._plugins);
+                            if (typeof globalThis.handleIncomingMessage === 'function') {
+                                globalThis.handleIncomingMessage(JSON.stringify(fakeMsgData), activeWs, globalThis._registry, globalThis._plugins);
                                 successCount++;
                             }
                         } catch (e) {}
                         await sleepFn(1500); 
                     }
-
+    
                     await sleepFn(1000);
                 } finally {
-                    // 🌟 无论如何都要恢复，否则整个 Bot 崩溃
                     globalThis.bot.send = originalSend;
                 }
 
@@ -393,7 +402,7 @@ export default {
                     for (let i = 0; i < collectedNodes.length; i += chunkSize) {
                         const chunk = collectedNodes.slice(i, i + chunkSize);
                         try {
-                            await globalThis.wsCall('send_group_forward_msg', { group_id: Number(chatId), messages: chunk }, 10000, ws);
+                            await globalThis.wsCall('send_group_forward_msg', { group_id: gid, messages: chunk }, 10000, activeWs);
                             sendSuccess++;
                             await sleepFn(500);
                         } catch (err) {
@@ -401,10 +410,10 @@ export default {
                         }
                     }
                     if (sendSuccess > 0) {
-                        globalThis.bot.send({ chatId, isGroup, content: `✅ 全部执行完毕，共打包了 ${collectedNodes.length} 条执行记录。`, botId: globalThis.botInfo?.qq, _ws: ws });
+                        globalThis.bot.send({ chatId, isGroup, content: `✅ 全部执行完毕，共打包了 ${collectedNodes.length} 条执行记录。`, botId: globalThis.botInfo?.qq, _ws: activeWs });
                     }
                 } else {
-                    globalThis.bot.send({ chatId, isGroup, content: `❌ 没有任何插件返回结果，可能是前置条件不满足。`, botId: globalThis.botInfo?.qq, _ws: ws });
+                    globalThis.bot.send({ chatId, isGroup, content: `❌ 没有任何插件返回结果，可能是前置条件不满足。`, botId: globalThis.botInfo?.qq, _ws: activeWs });
                 }
 
                 globalThis.print(`[群管] 随机抽人回调执行完毕，成功静默处理 ${successCount}/${winners.length} 人。`);
@@ -532,7 +541,7 @@ export default {
             const keyword = match[1];
             if (typeof globalThis.wsCall === 'function') {
                 try {
-                    const data = await globalThis.wsCall('get_group_member_list', { group_id: Number(chatId) }, 10000, ws);
+                    const data = await globalThis.wsCall('get_group_member_list', { group_id: safeChatId }, 10000, ws);
                     const members = data?.data || [];
                     const found = members.find(m => String(m.user_id) === keyword || (m.nickname && m.nickname.includes(keyword)) || (m.card && m.card.includes(keyword)));
                     if (found) { targetQQ = String(found.user_id); targetName = found.card || found.nickname; }
@@ -547,45 +556,71 @@ export default {
     if (cmd.startsWith('踢') || cmd.startsWith('禁言') || cmd.startsWith('解禁')) {
         if (!targetQQ) return `⚠️ 用法：${cmd.split(' ')[0]}@成员`;
         if (!hasPermission) return '❌ 权限不足。';
-        if (!(await checkBotRole(chatId, ws))) return '❌ 操作失败：Bot 不是管理员或群主，无法执行该操作。';
-
+    
+        // 尝试获取目标昵称，让回复更好看
+        if (!targetName && typeof globalThis.wsCall === 'function') {
+            try {
+                const memData = await globalThis.wsCall('get_group_member_info', { group_id: safeChatId, user_id: Number(targetQQ) }, 3000, ws);
+                const info = memData?.data || memData;
+                targetName = info?.card || info?.nickname;
+            } catch (e) {}
+        }
+        // 如果拿不到名字，就用纯数字兜底
+        const displayName = targetName || targetQQ;
+    
         if (cmd.startsWith('踢')) {
             try {
-                const result = await globalThis.wsCall('set_group_kick', { group_id: Number(chatId), user_id: Number(targetQQ), reject_add_request: true }, 5000, ws);
-                if (result.status === 'ok' || result.retcode === 0) {
+                const result = await globalThis.wsCall('set_group_kick', { group_id: safeChatId, user_id: Number(targetQQ), reject_add_request: true }, 5000, ws);
+                if (isApiSuccess(result)) {
                     if (typeof globalThis.db === 'function') {
                         const dbRes = globalThis.db('exec', { 
                             dbPath: DB_PATH, 
                             sql: 'INSERT OR REPLACE INTO group_reject_list (group_id, user_id, nickname, create_time) VALUES (?, ?, ?, ?)', 
-                            params: [String(chatId), targetQQ, targetName || '被踢出', Math.floor(Date.now() / 1000)] 
+                            params: [String(chatId), targetQQ, displayName, Math.floor(Date.now() / 1000)] 
                         });
-                        if (!dbRes.success) return `✅ 已成功踢出，但记入黑名单失败: ${dbRes.error}`;
+                        if (!dbRes.success) return `✅ 已成功将 ${displayName} 踢出，但记入黑名单失败: ${dbRes.error}`;
                     }
-                    return `✅ 已成功踢出，并已记入本群黑名单。`;
+                    return `✅ 已成功将 ${displayName} 踢出，并已记入本群黑名单。`;
                 }
-                return `❌ 踢人失败：${result.msg || result.message}`;
+                return `❌ 踢人失败：${getApiError(result)}`;
             } catch (err) { return `❌ 请求失败：${err.message}`; }
         }
 
         if (cmd.startsWith('禁言')) {
             let duration = 600; 
-            const durationMatch = cmd.replace(targetQQ, "").match(/(\d+)\s*(s|秒|m|分钟|min|h|小时|d|天|日)?/i);
+            let durationText = '10分钟'; // 默认文案
+            const durationMatch = cmd.replace(targetQQ || "", "").match(/(\d+)\s*(s|秒|m|分钟|min|h|小时|d|天|日)?/i);
             if (durationMatch) {
                 const value = parseInt(durationMatch[1]);
                 const unit = (durationMatch[2] || 'm').toLowerCase();
-                duration = unit.includes('s') || unit.includes('秒') ? value : unit.includes('h') || unit.includes('时') ? value * 3600 : unit.includes('d') || unit.includes('天') ? value * 86400 : value * 60;
+                if (unit.includes('s') || unit.includes('秒')) {
+                    duration = value; durationText = `${value}秒`;
+                } else if (unit.includes('h') || unit.includes('时')) {
+                    duration = value * 3600; durationText = `${value}小时`;
+                } else if (unit.includes('d') || unit.includes('天')) {
+                    duration = value * 86400; durationText = `${value}天`;
+                } else {
+                    duration = value * 60; durationText = `${value}分钟`;
+                }
             }
             try {
-                const result = await globalThis.wsCall('set_group_ban', { group_id: Number(chatId), user_id: Number(targetQQ), duration: duration }, 5000, ws);
-                if (cmd.includes('@') && cmd.includes('禁言')) return true; 
-                return (result.status === 'ok' || result.retcode === 0) ? `✅ 已禁言 @${targetQQ} ${duration}秒` : `❌ 禁言失败：${result.msg || result.message}`;
+                const result = await globalThis.wsCall('set_group_ban', { group_id: safeChatId, user_id: Number(targetQQ), duration: duration }, 5000, ws);
+                if (isApiSuccess(result)) {
+                    return `✅ 已禁言 ${displayName} ${durationText}`;
+                } else {
+                    return `❌ 禁言失败：${getApiError(result)}`;
+                }
             } catch (e) { return `❌ 禁言失败：${e.message}`; }
         }
 
         if (cmd.startsWith('解禁')) {
             try {
-                const result = await globalThis.wsCall('set_group_ban', { group_id: Number(chatId), user_id: Number(targetQQ), duration: 0 }, 5000, ws);
-                return (result.status === 'ok' || result.retcode === 0) ? `✅ 已成功解除禁言` : `❌ 解禁失败：${result.msg || result.message}`;
+                const result = await globalThis.wsCall('set_group_ban', { group_id: safeChatId, user_id: Number(targetQQ), duration: 0 }, 5000, ws);
+                if (isApiSuccess(result)) {
+                    return `✅ 已成功解除 ${displayName} 的禁言`;
+                } else {
+                    return `❌ 解禁失败：${getApiError(result)}`;
+                }
             } catch (err) { return `❌ 请求失败：${err.message}`; }
         }
     }
@@ -600,9 +635,9 @@ export default {
         const targetLevel = cmd.split(/\s+/)[1];
         
         try {
-            const data = await globalThis.wsCall('get_group_member_list', { group_id: Number(chatId) }, 10000, ws);
-            if (!data || (data.status !== 'ok' && data.retcode !== 0)) {
-                return `❌ 获取群成员列表失败: ${data?.msg || data?.message || '接口未返回数据，可能是群过大导致超时'}`;
+            const data = await globalThis.wsCall('get_group_member_list', { group_id: safeChatId }, 10000, ws);
+            if (!isApiSuccess(data) && !data?.data) {
+                return `❌ 获取群成员列表失败: ${getApiError(data)}`;
             }
 
             let rawMembers = data?.data || [];
@@ -658,17 +693,16 @@ export default {
         const isClean = cmd.startsWith('清理潜水');
         const days = parseInt(cmd.split(/\s+/)[1]) || 30;
         if (isClean && !cmd.includes('-y')) return `⚠️ 危险操作！如需清理，请发送：清理潜水 ${days} -y`;
-        if (isClean && !(await checkBotRole(chatId, ws))) return '❌ 操作失败：Bot 不是管理员或群主，无法清理成员。';
 
         try {
-            const data = await globalThis.wsCall('get_group_member_list', { group_id: Number(chatId) }, 15000, ws);
+            const data = await globalThis.wsCall('get_group_member_list', { group_id: safeChatId }, 15000, ws);
             let rawMembers = data?.data || [];
             let memberMap = new Map();
             for (const m of rawMembers) { if (m.user_id && m.user_id !== '0') memberMap.set(String(m.user_id), m); }
             let members = Array.from(memberMap.values());
             
             const loginData = await globalThis.wsCall('get_login_info', {}, 3000, ws);
-            const botQQ = loginData?.data?.user_id;
+            const botQQ = loginData?.data?.user_id || globalThis.botInfo?.qq;
 
             const threshold = Date.now() - days * 24 * 60 * 60 * 1000;
             let silentMembers = members.filter(m => m.role !== 'owner' && m.role !== 'admin' && m.user_id != botQQ && (m.last_sent_time || m.join_time) * 1000 < threshold);
@@ -689,14 +723,13 @@ export default {
             if (!isClean) return resultMsg + `\n⚠️ 若要清理他们，请发送：清理潜水 ${days} -y`;
             if (!hasPermission) return '❌ 权限不足。';
             
-            // 🌟 关键修复：改为异步执行，不阻塞主线程
             (async () => {
                 let s = 0, f = 0;
                 for (const m of silentMembers) {
                     await sleepFn(400);
                     try {
-                        const k = await globalThis.wsCall('set_group_kick', { group_id: Number(chatId), user_id: Number(m.user_id), reject_add_request: true }, 5000, ws);
-                        if (k.status === 'ok' || k.retcode === 0) s++; else f++;
+                        const k = await globalThis.wsCall('set_group_kick', { group_id: safeChatId, user_id: Number(m.user_id), reject_add_request: true }, 5000, ws);
+                        if (isApiSuccess(k)) s++; else f++;
                     } catch (_) { f++; }
                 }
                 globalThis.bot.send({ 
@@ -718,7 +751,9 @@ export default {
         let likeTargetQQ = senderQQ; 
         let isLikeOther = cmd.includes('赞他') || cmd.includes('赞她');
         let isSilent = cmd.includes('-s');
-        
+    
+        let activeWs = ws || globalThis.activeWs;
+
         if (isLikeOther) {
             if (!targetQQ) {
                 const numMatch = textStr.match(/(\d{5,12})/);
@@ -726,39 +761,84 @@ export default {
             }
             if (!targetQQ) return '⚠️ 未找到该成员，请真实艾特（@）对方，或者确认对方在群里。';
             likeTargetQQ = targetQQ;
+
+            if (!targetName) {
+                try {
+                    const memData = await globalThis.wsCall('get_group_member_info', { 
+                        group_id: Number(chatId), 
+                        user_id: Number(likeTargetQQ),
+                        no_cache: false 
+                    }, 5000, activeWs);
+                
+                    const info = memData?.data || memData; 
+                    targetName = info?.card || info?.nickname;
+                } catch (e) {
+                    if (typeof globalThis.print === 'function') globalThis.print(`[点赞] 获取群名片异常: ${e.message}`);
+                }
+            }
         }
-        
+
         const currentCycle = getCurrentLikeCycle();
-        if (!isLikeOther && typeof globalThis.db === 'function') {
-            const dbRes = globalThis.db('find', { dbPath: DB_PATH, table: 'like_records', where: 'user_id = ?', params: [String(senderQQ)], all: false });
-            if (dbRes.success && dbRes.data && dbRes.data.last_like_cycle === currentCycle) return `今天已经给自己点过赞啦，明天 0 点后再来吧~`;
+
+        if (typeof globalThis.db === 'function') {
+            const dbRes = globalThis.db('find', { dbPath: DB_PATH, table: 'like_records', where: 'user_id = ?', params: [String(likeTargetQQ)], all: false });
+            if (dbRes.success && dbRes.data && dbRes.data.last_like_cycle === currentCycle) {
+                if (isLikeOther) {
+                    return `今天已经给 ${targetName || '该群友'} 点过赞啦，明天 0 点后再来吧~`;
+                } else {
+                    return `今天已经给自己点过赞啦，明天 0 点后再来吧~`;
+                }
+            }
         }
+
         if (botConfig.bot && botConfig.bot.likeEnabled === false) return '❌ 点赞功能已关闭';
+
         let isFriend = false;
         try {
-            const friendData = await globalThis.wsCall('get_friend_list', {}, 5000, ws);
-            const friends = friendData?.data || [];
-            if (friends.some(f => f.user_id == likeTargetQQ)) isFriend = true;
+            const friendData = await globalThis.wsCall('get_friend_list', {}, 5000, activeWs);
+            const friends = friendData?.data || friendData || [];
+            if (Array.isArray(friends) && friends.some(f => String(f.user_id) === String(likeTargetQQ))) isFriend = true;
         } catch (e) {}
+
         const times = isFriend ? 10 : 50;
         const loops = Math.ceil(times / 10);
         for (let i = 0; i < loops; i++) {
-            try { await globalThis.wsCall('send_like', { user_id: Number(likeTargetQQ), times: 10 }, 5000, ws); } catch (e) {}
+            try { 
+                await globalThis.wsCall('send_like', { user_id: Number(likeTargetQQ), times: 10 }, 5000, activeWs); 
+                if (loops > 1) await new Promise(r => setTimeout(r, 1000)); 
+            } catch (e) {}
         }
-        if (!isLikeOther && typeof globalThis.db === 'function') {
-            globalThis.db('exec', { dbPath: DB_PATH, sql: 'INSERT OR REPLACE INTO like_records (user_id, last_like_cycle) VALUES (?, ?)', params: [String(senderQQ), currentCycle] });
+
+        if (typeof globalThis.db === 'function') {
+            globalThis.db('exec', { dbPath: DB_PATH, sql: 'INSERT OR REPLACE INTO like_records (user_id, last_like_cycle) VALUES (?, ?)', params: [String(likeTargetQQ), currentCycle] });
         }
+
+        const msgs = botConfig.messages || {};
+    
+        let finalTargetName = targetName;
+        if (!finalTargetName) {
+            finalTargetName = isLikeOther ? '群友' : (senderName || '你');
+        }
+    
+        const relationStr = isFriend ? '好友' : '非好友';
+
+        const formatMsg = (template) => {
+            return template
+                .replace(/{name}/g, finalTargetName)
+                .replace(/{mame}/g, finalTargetName) 
+                .replace(/{qq}/g, String(likeTargetQQ))
+                .replace(/{times}/g, String(times))
+                .replace(/{relation}/g, relationStr);
+        };
+
         if (isLikeOther) {
             if (isSilent) return true;
-            if (!targetName) {
-                try {
-                    const memData = await globalThis.wsCall('get_group_member_info', { group_id: Number(chatId), user_id: Number(likeTargetQQ) }, 3000, ws);
-                    if (memData && memData.data) targetName = memData.data.card || memData.data.nickname;
-                } catch (e) {}
-            }
-            return `✨ 已成功为 @${targetName || likeTargetQQ} 点赞 ${times} 次！`;
+            let replyMsg = msgs.like_reply || "✨ 已成功为 {name}({qq}) 点赞 {times} 次！";
+            return formatMsg(replyMsg);
+        } else {
+            let selfReplyMsg = msgs.like_self_reply || "✨ 点赞成功！[目标: 你] [关系: {relation}] 本次共为你点赞 {times} 次~\n(每日 0:00 刷新)";
+            return formatMsg(selfReplyMsg);
         }
-        return `✨ 点赞成功！[目标: 你] [关系: ${isFriend ? '好友' : '非好友'}] 本次共为你点赞 ${times} 次~\n(每日 0:00 刷新)`;
     }
 
     // ==========================================
@@ -769,14 +849,13 @@ export default {
       if (!isMaster) return '❌ 权限不足：仅大主人可用。';
       if (!targetQQ) return `⚠️ 用法：${isSet ? '设置' : '取消'}管理@成员`;
       
-      const loginData = await globalThis.wsCall('get_login_info', {}, 3000, ws);
-      const botQQ = loginData?.data?.user_id;
-      const botInfoData = await globalThis.wsCall('get_group_member_info', { group_id: Number(chatId), user_id: Number(botQQ) }, 3000, ws);
-      if (botInfoData?.data?.role !== 'owner') return `❌ Bot权限不足：需要是群主才能设置/取消管理员。`;
-
       try {
-        const res = await globalThis.wsCall('set_group_admin', { group_id: Number(chatId), user_id: Number(targetQQ), enable: isSet }, 5000, ws);
-        return (res.status === 'ok' || res.retcode === 0) ? `✅ 已成功${isSet ? '设置' : '取消'}管理员。` : `❌ 失败。`;
+        const res = await globalThis.wsCall('set_group_admin', { group_id: safeChatId, user_id: Number(targetQQ), enable: isSet }, 5000, ws);
+        if (isApiSuccess(res)) {
+            return `✅ 已成功${isSet ? '设置' : '取消'}管理员。`;
+        } else {
+            return `❌ 失败：${getApiError(res)}`;
+        }
       } catch (err) { return `❌ 请求失败：${err.message}`; }
     }
 
@@ -785,7 +864,6 @@ export default {
     // ==========================================
     if (cmd.startsWith('群公告')) {
         if (!hasPermission) return '❌ 权限不足。';
-        if (!(await checkBotRole(chatId, ws))) return '❌ 操作失败：Bot 不是管理员或群主，无法发布公告。';
 
         const noticeText = cmd.replace(/^群公告\s*/, '').trim();
         let imageUrl = ''; 
@@ -793,19 +871,22 @@ export default {
         if (imgMatch) imageUrl = imgMatch[1];
         if (!noticeText && !imageUrl) return '⚠️ 用法：群公告 公告内容';
         try {
-            const result = await globalThis.wsCall('_send_group_notice', { group_id: Number(chatId), content: noticeText || ' ', ...(imageUrl ? { image: imageUrl } : {}) }, 10000, ws);
-            return (result.status === 'ok' || result.retcode === 0) ? '✅ 群公告发布成功！' : `❌ 失败：${result.msg || result.message}`;
+            const result = await globalThis.wsCall('_send_group_notice', { group_id: safeChatId, content: noticeText || ' ', ...(imageUrl ? { image: imageUrl } : {}) }, 10000, ws);
+            if (isApiSuccess(result)) {
+                return '✅ 群公告发布成功！';
+            } else {
+                return `❌ 失败：${getApiError(result)}`;
+            }
         } catch (e) { return `❌ 失败：${e.message}`; }
     }
 
     if (cmd === '查公告' || cmd.startsWith('删公告')) {
         if (!isGroup) return '❌ 该指令仅限群聊使用';
         if (!hasPermission) return '❌ 权限不足：仅限管理员及以上身份使用。';
-        if (!(await checkBotRole(chatId, ws))) return '❌ 操作失败：Bot 不是管理员或群主，无法操作公告。';
 
         if (cmd === '查公告') {
             try {
-                const result = await globalThis.wsCall('_get_group_notice', { group_id: Number(chatId) }, 10000, ws);
+                const result = await globalThis.wsCall('_get_group_notice', { group_id: safeChatId }, 10000, ws);
                 const notices = result.data || [];
                 if (notices.length === 0) return '📭 当前群没有发布过任何公告。';
                 
@@ -837,8 +918,12 @@ export default {
             const noticeId = cmd.split(/\s+/)[1];
             if (!noticeId) return '⚠️ 用法：删公告 [公告ID]\n请先发送“查公告”获取ID，防止误删。';
             try {
-                const result = await globalThis.wsCall('_del_group_notice', { group_id: Number(chatId), notice_id: noticeId }, 5000, ws);
-                return (result.status === 'ok' || result.retcode === 0) ? `✅ 已成功删除公告 [ID: ${noticeId}]。` : `❌ 删除失败：${result.msg || result.message || '可能是ID错误或公告已不存在'}`;
+                const result = await globalThis.wsCall('_del_group_notice', { group_id: safeChatId, notice_id: noticeId }, 5000, ws);
+                if (isApiSuccess(result)) {
+                    return `✅ 已成功删除公告 [ID: ${noticeId}]。`;
+                } else {
+                    return `❌ 删除失败：${getApiError(result) || '可能是ID错误或公告已不存在'}`;
+                }
             } catch (e) { return `❌ 删除公告失败: ${e.message}`; }
         }
     }
@@ -850,16 +935,16 @@ export default {
         let targetToChange = targetQQ;
         let isSelfChange = false;
         if (!targetToChange) { targetToChange = String(senderQQ); isSelfChange = true; }
-    
+
         let newTitle = cmd.replace(/^改头衔\s*/, '').trim().replace(/@\{at:\d+\}/g, '').replace(/@\S+\s*/g, '').trim();
         if (!newTitle) return '❌ 请输入要设置的头衔内容，例如：改头衔 @某人 大佬';
         if (newTitle.length > 18) return '❌ 头衔过长：最多 18 个字符';
-        
+    
         let isGroupOwner = false;
         let isGroupAdmin = false;
         try {
-            const res = await globalThis.wsCall('get_group_member_info', { group_id: Number(chatId), user_id: Number(senderQQ) }, 3000, ws);
-            const rawRole = res?.data?.role;
+            const res = await globalThis.wsCall('get_group_member_info', { group_id: safeChatId, user_id: Number(senderQQ) }, 3000, ws);
+            const rawRole = res?.data?.role || res?.role;
             if (rawRole === 'owner') isGroupOwner = true;
             if (rawRole === 'admin') isGroupAdmin = true;
         } catch (e) {}
@@ -868,26 +953,37 @@ export default {
         if (!isSelfChange && !isGroupOwner && !isGroupAdmin && !['master', 'owner', 'admin'].includes(checkRole)) {
             return `❌ 权限不足！系统识别你的身份为: ${checkRole}，QQ: ${senderQQ}`;
         }
-    
+
         if (!isSelfChange) {
             const loginData = await globalThis.wsCall('get_login_info', {}, 3000, ws);
             const botQQ = loginData?.data?.user_id;
-            const botInfoData = await globalThis.wsCall('get_group_member_info', { group_id: Number(chatId), user_id: Number(botQQ) }, 3000, ws);
-            if (botInfoData?.data?.role !== 'owner') return '❌ Bot权限不足：机器人需要是群主才能修改他人头衔。';
+            const botInfoData = await globalThis.wsCall('get_group_member_info', { group_id: safeChatId, user_id: Number(botQQ) }, 3000, ws);
+            if (botInfoData?.data?.role !== 'owner' && botInfoData?.role !== 'owner') return '❌ Bot权限不足：机器人需要是群主才能修改他人头衔。';
+        }
+
+        // 🌟 核心修复：优先从缓存拿目标名字，或者去查一次 API
+        if (!isSelfChange && !targetName) {
+            // 1. 尝试从全局缓存找
+            const cachedMembers = globalThis.getGroupMembers ? globalThis.getGroupMembers(safeChatId) : [];
+            const cachedUser = cachedMembers.find(m => String(m.user_id) === String(targetToChange));
+            if (cachedUser) targetName = cachedUser.card || cachedUser.nickname;
+
+            // 2. 缓存里没找到，再去请求 API
+            if (!targetName) {
+                try {
+                    const memData = await globalThis.wsCall('get_group_member_info', { group_id: safeChatId, user_id: Number(targetToChange) }, 3000, ws);
+                    const info = memData?.data || memData;
+                    targetName = info?.card || info?.nickname;
+               } catch (e) {}
+            }
         }
 
         try {
-            const res = await globalThis.wsCall('set_group_special_title', { group_id: Number(chatId), user_id: Number(targetToChange), special_title: newTitle, duration: -1 }, 5000, ws);
-            if (res?.status === 'ok' || res?.retcode === 0) {
-                if (!targetName && !isSelfChange) {
-                    try {
-                        const memData = await globalThis.wsCall('get_group_member_info', { group_id: Number(chatId), user_id: Number(targetToChange) }, 3000, ws);
-                        targetName = memData?.data?.card || memData?.data?.nickname;
-                    } catch (e) {}
-                }
+            const res = await globalThis.wsCall('set_group_special_title', { group_id: safeChatId, user_id: Number(targetToChange), special_title: newTitle, duration: -1 }, 5000, ws);
+            if (isApiSuccess(res)) {
                 return `✅ 已将 ${isSelfChange ? '你' : (targetName || `@${targetToChange}`)} 的头衔修改为「${newTitle}」`;
             }
-            return `❌ 修改失败：${res?.msg || res?.message || '未知错误'}`;
+            return `❌ 修改失败：${getApiError(res)}`;
         } catch (err) { return `❌ 请求失败：${err.message}`; }
     }
 
@@ -898,29 +994,21 @@ export default {
         const titleContent = cmd.replace(/^(申请头衔|头衔)\s*/, '').trim();
         if (!titleContent) return '⚠️ 用法：申请头衔 头衔内容';
     
+        const botQQ = globalThis.botInfo?.qq || botId;
+
         try {
-            const loginData = await globalThis.wsCall('get_login_info', {}, 3000, ws);
-            const botQQ = loginData?.data?.user_id;
-            if (!botQQ) return '❌ 无法获取 Bot 账号信息';
-
-            const botInfoData = await globalThis.wsCall('get_group_member_info', { group_id: Number(chatId), user_id: Number(botQQ) }, 3000, ws);
-            if (botInfoData?.data?.role !== 'owner') {
-                return '❌ 操作失败：Bot 当前不是群主，无法设置头衔。';
-           }
-
-           const res = await globalThis.wsCall('set_group_special_title', { 
-               group_id: Number(chatId), 
+            const res = await globalThis.wsCall('set_group_special_title', { 
+                group_id: Number(chatId), 
                 user_id: Number(senderQQ), 
                 special_title: titleContent, 
                 duration: -1 
-           }, 5000, ws);
-        
-           if (res && (res.status === 'ok' || res.retcode === 0)) {
-               return `✅ 已成功将你的头衔设置为：【${titleContent}】`;
-           } else {
-               const errMsg = res?.msg || res?.message || res?.wording || JSON.stringify(res) || '未知错误（接口返回为空）';
-               return `❌ 设置头衔失败：${errMsg}`;
-           }
+            }, 5000, ws);
+    
+            if (isApiSuccess(res)) {
+                return `✅ 已成功将你的头衔设置为：【${titleContent}】`;
+            } else {
+                return `❌ 设置头衔失败：${getApiError(res)}`;
+            }
         } catch (err) {
             return `❌ 请求异常：${err.message}`;
         }

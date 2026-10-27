@@ -6,14 +6,22 @@
     <title>扫码登录 - 云挂机</title>
     <style>
         body { font-family: sans-serif; background: #121212; color: #e0e0e0; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; flex-direction: column; }
-        .qr-box { background: #1e1e1e; padding: 30px; border-radius: 12px; text-align: center; width: 320px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); }
+        .qr-box { background: #1e1e1e; padding: 30px; border-radius: 12px; text-align: center; width: 320px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); border: 1px solid #333; }
         h2 { margin-top: 0; color: #fff; }
         .img-container { width: 260px; height: 260px; background: #000; border-radius: 8px; margin: 20px auto; display: flex; justify-content: center; align-items: center; overflow: hidden; position: relative; }
-        #qr-img { width: 100%; height: 100%; object-fit: contain; display: none; }
-        .loading { color: #888; font-size: 14px; position: absolute; }
-        #status { font-size: 14px; color: #10b981; margin-top: 15px; font-weight: bold; }
+        #qr-img { width: 100%; height: 100%; object-fit: contain; display: none; transition: opacity 0.3s; }
+        
+        .loading-text { color: #888; font-size: 14px; position: absolute; display: flex; flex-direction: column; align-items: center; gap: 10px; }
+        .spinner { width: 20px; height: 20px; border: 2px solid rgba(255,255,255,0.3); border-radius: 50%; border-top-color: #fff; animation: spin 1s linear infinite; }
+        
+        #status { font-size: 14px; color: #10b981; margin-top: 15px; font-weight: bold; min-height: 20px; }
         .back-link { margin-top: 20px; color: #3b82f6; text-decoration: none; font-size: 14px; display: inline-block; }
         .back-link:hover { text-decoration: underline; }
+        
+        /* 扫码成功遮罩 */
+        .success-overlay { position: absolute; top:0; left:0; width:100%; height:100%; background: rgba(16, 185, 129, 0.1); display: none; justify-content: center; align-items: center; color: #10b981; font-size: 24px; font-weight: bold; backdrop-filter: blur(2px); }
+        
+        @keyframes spin { to { transform: rotate(360deg); } }
     </style>
 </head>
 <body>
@@ -22,8 +30,12 @@
         <p style="color: #aaa; font-size: 13px; margin: 0;">使用手机 QQ 扫码，成功后自动跳转</p>
         
         <div class="img-container">
-            <span class="loading" id="loading-text">二维码生成中...</span>
+            <div class="loading-text" id="loading-text">
+                <div class="spinner"></div>
+                <span>正在获取二维码...</span>
+            </div>
             <img id="qr-img" src="" alt="二维码">
+            <div class="success-overlay" id="success-overlay">✅ 扫码成功</div>
         </div>
         
         <div id="status">等待扫码...</div>
@@ -34,57 +46,126 @@
         const urlParams = new URLSearchParams(window.location.search);
         const instanceId = urlParams.get('id');
         
+        let pollImgTimer = null;
+        let pollStatusTimer = null;
+        let currentImgUrl = '';
+        let isHandled = false; // 是否已经处理完（跳转或报错）
+
         if (!instanceId) {
-            document.getElementById('loading-text').innerText = '缺少实例ID参数';
-            document.getElementById('status').innerText = '非法访问';
+            showError('缺少实例ID参数', '非法访问');
+        } else {
+            startPolling();
+        }
+
+        function showError(msg, statusText) {
+            isHandled = true;
+            clearAllTimers();
+            document.getElementById('loading-text').innerHTML = '❌';
+            document.getElementById('qr-img').style.display = 'none';
+            document.getElementById('status').innerText = statusText || msg;
             document.getElementById('status').style.color = '#ef4444';
         }
 
-        let pollImgTimer = null;
-        let pollStatusTimer = null;
+        function clearAllTimers() {
+            if (pollImgTimer) clearInterval(pollImgTimer);
+            if (pollStatusTimer) clearInterval(pollStatusTimer);
+        }
 
         function startPolling() {
             const qrImg = document.getElementById('qr-img');
             const loadingText = document.getElementById('loading-text');
-            
-            pollImgTimer = setInterval(() => {
-                qrImg.src = '/api/qrcode/' + instanceId + '?t=' + Date.now();
-                qrImg.onload = () => { 
-                    qrImg.style.display = 'block'; 
-                    loadingText.style.display = 'none';
-                };
-                qrImg.onerror = () => {};
-            }, 2000);
+            const statusEl = document.getElementById('status');
+            const successOverlay = document.getElementById('success-overlay');
 
+            // 1. 轮询图片 (每 2 秒)
+            const fetchQrImage = () => {
+                if (isHandled) return;
+                const newUrl = '/api/qrcode/' + instanceId + '?t=' + Date.now();
+                
+                // 使用 Image 对象预加载，防止闪烁
+                const img = new Image();
+                img.onload = () => {
+                    if (isHandled) return;
+                    qrImg.src = newUrl;
+                    qrImg.style.display = 'block';
+                    loadingText.style.display = 'none';
+                    currentImgUrl = newUrl;
+                };
+                img.onerror = () => {
+                    // 二维码还没生成出来（404），继续等
+                    if (!currentImgUrl && !isHandled) {
+                        loadingText.innerHTML = '<div class="spinner"></div><span>二维码生成中...</span>';
+                    }
+                };
+                img.src = newUrl;
+            };
+            
+            fetchQrImage();
+            pollImgTimer = setInterval(fetchQrImage, 2000);
+
+            // 2. 轮询状态 (每 2 秒，之前3秒有点慢)
             pollStatusTimer = setInterval(async () => {
+                if (isHandled) return;
+                
+                // 🌟 优化：页面切到后台时跳过轮询
+                if (document.hidden) return;
+
                 try {
                     const res = await fetch('/api/state');
                     const data = await res.json();
                     const inst = data.instances.find(i => i.id === instanceId);
                     
-                    if (inst && inst.online) {
-                        clearInterval(pollImgTimer);
-                        clearInterval(pollStatusTimer);
-                        document.getElementById('status').innerText = '✅ 扫码成功，正在跳转...';
-                        document.getElementById('status').style.color = '#10b981';
-                        qrImg.style.display = 'none';
+                    if (!inst) {
+                        return showError('实例已停止', '❌ 实例已销毁或消失');
+                    }
+
+                    // 🌟 新增：如果实例崩溃了，提示用户
+                    if (inst.exitCode !== undefined) {
+                        return showError('登录失败', `❌ 进程已退出 (代码: ${inst.exitCode})，请返回查看日志`);
+                    }
+
+                    if (inst.online) {
+                        // 登录成功
+                        isHandled = true;
+                        clearAllTimers();
+                        statusEl.innerText = '✅ 登录成功，正在跳转...';
+                        statusEl.style.color = '#10b981';
+                        successOverlay.style.display = 'flex';
+                        
+                        // 隐藏二维码
+                        qrImg.style.opacity = '0';
+                        setTimeout(() => {
+                            qrImg.style.display = 'none';
+                        }, 300);
+                        
                         setTimeout(() => {
                             window.location.href = '/';
                         }, 1500);
-                    } else if (!inst) {
-                        clearInterval(pollImgTimer);
-                        clearInterval(pollStatusTimer);
-                        document.getElementById('status').innerText = '❌ 实例已停止或消失';
-                        document.getElementById('status').style.color = '#ef4444';
-                        document.getElementById('loading-text').innerText = '已断开';
+                    } else {
+                        // 没崩溃，也没上线。如果已经有二维码了，说明用户可能扫了，在等确认
+                        if (currentImgUrl) {
+                            statusEl.innerText = '等待手机端确认...';
+                            statusEl.style.color = '#fbbf24'; // 黄色提示
+                        }
                     }
-                } catch (e) {}
-            }, 3000);
+                } catch (e) {
+                    // 网络异常不处理，继续下一轮
+                }
+            }, 2000);
         }
 
-        if (instanceId) {
-            startPolling();
-        }
+        // 🌟 优化：切回前台时强制刷新一次
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden && !isHandled) {
+                // 切回前台，立刻触发一次状态检查
+                fetch('/api/state').then(res => res.json()).then(data => {
+                    const inst = data.instances.find(i => i.id === instanceId);
+                    if (inst && inst.online) {
+                        window.location.href = '/';
+                    }
+                }).catch(() => {});
+            }
+        });
     </script>
 </body>
 </html>

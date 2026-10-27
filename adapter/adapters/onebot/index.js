@@ -1,4 +1,5 @@
 // adapter/adapters/onebot/index.js
+
 export default class OneBotAdapter {
   constructor(meta) {
     this.name = meta.name || 'onebot';
@@ -11,13 +12,12 @@ export default class OneBotAdapter {
     this.role = conn.role;
   }
 
+  // 判断是不是 OneBot 的包
   match(raw) {
-    return raw.post_type !== undefined;
+    return raw && raw.post_type !== undefined;
   }
 
   toStandard(raw) {
-    // 🌟 优化 1：不再在这里触发事件，统一交给主框架或 Registry 处理
-    // 直接返回标准的事件对象，让上层去决定
     if (raw.post_type === 'notice') {
       return this.normalizeNotice(raw);
     }
@@ -28,11 +28,11 @@ export default class OneBotAdapter {
 
     if (raw.post_type !== 'message' && raw.post_type !== 'message_sent') return null;
 
-    // 🌟 优化 2：兼容 raw.message 为字符串（CQ码）或数组的情况
+    // 🌟 修复 1：处理 CQ 码字符串
     let messageSegments = raw.message;
     if (typeof messageSegments === 'string') {
-      // 简易 CQ 码兜底（如果配置了 CQ 码模式）
-      messageSegments = [{ type: 'text', data: { text: raw.message } }];
+      // 极简 CQ 码解析兜底
+      messageSegments = this.parseCQCode(messageSegments);
     } else if (!Array.isArray(messageSegments)) {
       messageSegments = [];
     }
@@ -44,7 +44,6 @@ export default class OneBotAdapter {
       .replace(/\s+/g, ' ')
       .trim();
 
-    // 🌟 优化 3：优化 displayContent 的拼接，防止 @ 和文字粘连
     const displayContent = messageSegments.map(m => {
       if (m.type === 'reply') {
         const refId = m.data?.id ?? m.data?.message_id ?? '';
@@ -52,18 +51,21 @@ export default class OneBotAdapter {
       }
       if (m.type === 'at') {
         const qq = m.data?.qq ?? m.data?.user_id ?? '';
-        return `@{at:${qq}} `; // 加个空格防止粘连
+        return `@{at:${qq}} `;
       }
       if (m.type === 'image') {
         return `[图片]`;
       }
       return m.data?.text ?? `[${m.type}]`;
-    }).join('') ?? '';
+    }).join(''); 
 
     const selfId = String(raw.self_id || '');
     const chatId = String(raw.group_id ?? raw.user_id ?? '');
     const senderId = String(raw.user_id ?? '');
     const messageId = raw.message_id ?? raw.id ?? raw.seq ?? raw.msg_id ?? null;
+
+    // 🌟 核心新增：判断这条消息是不是“自己/上号的人”发的
+    const isSelf = raw.post_type === 'message_sent' || senderId === selfId;
 
     return {
       type: raw.post_type === 'message_sent' ? 'send' : 'receive',
@@ -79,16 +81,41 @@ export default class OneBotAdapter {
       messageSegments,  
       pureText,         
       content: displayContent, 
+      isSelf: isSelf, // 🌟 将标记传出去
     };
   }
 
   // ==========================================
-  // 从 toStandard 中拆分出的事件标准化方法
+  // 极简 CQ 码解析器 (当 OneBot 返回 string 时兜底)
   // ==========================================
-  
+  parseCQCode(str) {
+    const segments = [];
+    const regex = /\[CQ:([^,\]]+)(?:,([^\]]+))?\]|([^\[]+)/g;
+    let match;
+    while ((match = regex.exec(str)) !== null) {
+      if (match[3]) {
+        segments.push({ type: 'text', data: { text: match[3] } });
+      } else {
+        const type = match[1];
+        const data = {};
+        if (match[2]) {
+          match[2].split(',').forEach(kv => {
+            const [k, v] = kv.split('=');
+            if (k) data[k] = v;
+          });
+        }
+        segments.push({ type, data });
+      }
+    }
+    return segments;
+  }
+
+  // ==========================================
+  // 事件标准化 (Notice & Request)
+  // ==========================================
   normalizeNotice(raw) {
     const basePayload = {
-      type: 'notice', // 加上类型标识，方便主框架识别
+      type: 'notice',
       groupId: raw.group_id,
       userId: raw.user_id,
       operatorId: raw.operator_id,
@@ -101,7 +128,7 @@ export default class OneBotAdapter {
     else if (raw.notice_type === 'group_decrease') basePayload.event = (raw.sub_type === 'kick' ? 'group.kick' : 'group.decrease');
     else if (raw.notice_type === 'group_recall') basePayload.event = 'group.recall';
     else if (raw.notice_type === 'friend_recall') basePayload.event = 'friend.recall';
-    else basePayload.event = raw.notice_type; // 兜底
+    else basePayload.event = raw.notice_type;
 
     return basePayload;
   }
@@ -120,48 +147,55 @@ export default class OneBotAdapter {
 
     if (raw.request_type === 'group') basePayload.event = 'group.request';
     else if (raw.request_type === 'friend') basePayload.event = 'friend.request';
-    else basePayload.event = raw.request_type; // 兜底
+    else basePayload.event = raw.request_type;
 
     return basePayload;
   }
 
   // ==========================================
-  // 发送消息 (fromStandard)
+  // 发送消息反向标准化
   // ==========================================
   fromStandard(reply, std) {
     const target = std.chatType === 'group'
         ? { message_type: 'group', group_id: std.chatId }
         : { message_type: 'private', user_id: std.chatId };
 
+    const formatImage = (file) => {
+      if (Buffer.isBuffer(file)) {
+        return { type: 'image', data: { file: `base64://${file.toString('base64')}` } };
+      }
+      return { type: 'image', data: { file: String(file) } };
+    };
+
     if (typeof reply === 'string') {
       return { action: 'send_msg', params: { ...target, message: [{ type: 'text', data: { text: reply } }] } };
     }
 
     if (reply?.type === 'image' && reply.file) {
-      return { action: 'send_msg', params: { ...target, message: [{ type: 'image', data: { file: `base64://${reply.file.toString('base64')}` } }] } };
+      return { action: 'send_msg', params: { ...target, message: [formatImage(reply.file)] } };
     }
 
     if (Array.isArray(reply)) {
-      return {
-        action: 'send_msg',
-        params: {
-          ...target,
-          message: reply.map(s =>
-              s.type === 'image'
-                  ? { type: 'image', data: { file: `base64://${s.file.toString('base64')}` } }
-                  : { type: 'text', data: { text: String(s.text ?? '') } }
-          )
+      const message = reply.map(s => {
+        if (s.type === 'image') {
+          const fileObj = s.file || s.data?.file;
+          if (fileObj) return formatImage(fileObj);
         }
-      };
+        if (s.type === 'text') {
+          return { type: 'text', data: { text: String(s.text ?? s.data?.text ?? '') } };
+        }
+        if (s.type === 'at') {
+          return { type: 'at', data: { qq: String(s.qq ?? s.data?.qq ?? '') } };
+        }
+        return s;
+      });
+      return { action: 'send_msg', params: { ...target, message } };
     }
 
     if (reply?.file) {
-      let buf = null;
-      if (Buffer.isBuffer(reply.file)) buf = reply.file;
-      else if (Buffer.isBuffer(reply.file.file)) buf = reply.file.file;
-
+      const buf = Buffer.isBuffer(reply.file) ? reply.file : (Buffer.isBuffer(reply.file.file) ? reply.file.file : null);
       if (buf) {
-        return { action: 'send_msg', params: { ...target, message: [{ type: 'image', data: { file: `base64://${buf.toString('base64')}` } }] } };
+        return { action: 'send_msg', params: { ...target, message: [formatImage(buf)] } };
       }
     }
 

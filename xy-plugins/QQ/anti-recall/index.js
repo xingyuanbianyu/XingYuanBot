@@ -3,24 +3,63 @@ import path from 'path';
 import yaml from 'yaml';
 import { fileURLToPath } from 'url';
 import Database from 'better-sqlite3';
+import { getAllOwners, getRole } from '../../../xy-config/config/permissions.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CONFIG_PATH = path.join(__dirname, 'config.yaml');
-const GLOBAL_CONFIG_PATH = path.resolve(__dirname, '../../../xy-config/config/config.yaml');
 
 const DB_PATH = path.join(__dirname, 'anti_recall.db');
 const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS exclusive_push (
-    user_id TEXT PRIMARY KEY,
-    group_id TEXT NOT NULL
-  )
-`);
+// ==========================================
+// 🌟 核心：数据库无感升级 (支持一个主人绑定多个群)
+// ==========================================
+try {
+    const tableInfo = db.prepare("PRAGMA table_info(exclusive_push)").all();
+    const pkCount = tableInfo.filter(col => col.pk > 0).length;
+    
+    // 如果表存在，且主键只有1个（旧版结构），则进行迁移
+    if (tableInfo.length > 0 && pkCount === 1 && tableInfo.find(c => c.name === 'user_id' && c.pk === 1)) {
+        globalThis.print('[防撤回] 🔄 正在升级数据库，支持多群绑定拦截...');
+        db.exec(`
+            ALTER TABLE exclusive_push RENAME TO exclusive_push_old;
+            CREATE TABLE exclusive_push (
+                user_id TEXT NOT NULL,
+                group_id TEXT NOT NULL,
+                PRIMARY KEY (user_id, group_id)
+            );
+            INSERT OR IGNORE INTO exclusive_push (user_id, group_id) SELECT user_id, group_id FROM exclusive_push_old;
+            DROP TABLE exclusive_push_old;
+        `);
+        globalThis.print('[防撤回] ✅ 数据库升级完成！');
+    } else {
+        db.exec(`
+            CREATE TABLE IF NOT EXISTS exclusive_push (
+                user_id TEXT NOT NULL,
+                group_id TEXT NOT NULL,
+                PRIMARY KEY (user_id, group_id)
+            )
+        `);
+    }
+} catch (e) {
+    globalThis.print(`[防撤回] ⚠️ 数据库检查/升级失败: ${e.message}`);
+    // 兜底建表
+    db.exec(`
+        CREATE TABLE IF NOT EXISTS exclusive_push (
+            user_id TEXT NOT NULL,
+            group_id TEXT NOT NULL,
+            PRIMARY KEY (user_id, group_id)
+        )
+    `);
+}
 
 const backupCache = new Map();
 const CACHE_TIME = 5 * 60 * 1000;
+
+let friendListCache = new Set();
+let lastFriendFetchTime = 0;
+const FRIEND_CACHE_EXPIRE = 5 * 60 * 1000;
 
 let recallBrowser = null;
 let browserLaunching = null;
@@ -75,32 +114,6 @@ export default {
     try { return yaml.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) || {}; } catch (e) { return {}; }
   },
 
-  // 🌟 修复：更精准地获取所有类型的主人
-  getOwners() {
-    try {
-      if (!fs.existsSync(GLOBAL_CONFIG_PATH)) return [];
-      const authConfig = yaml.parse(fs.readFileSync(GLOBAL_CONFIG_PATH, 'utf8')) || {};
-      const ownersObj = authConfig.permissions?.owners || {};
-      const permStatus = authConfig.permissions?.owner_permission || {};
-      const validOwners = [];
-      
-      for (const [qq, val] of Object.entries(ownersObj)) {
-          const qqStr = String(qq).trim();
-          if (!qqStr) continue;
-          
-          if (val === true || val === 'true') {
-              validOwners.push(qqStr); // 全局大主人
-          } else if (Array.isArray(val)) {
-              validOwners.push(qqStr); // 局部主人
-          } else if (val === false) {
-              // 全局小主人（看开关）
-              if (String(permStatus[qqStr]) !== '0') validOwners.push(qqStr);
-          }
-      }
-      return [...new Set(validOwners)];
-    } catch (e) { return []; }
-  },
-
   async handle(msg) {
     const config = this.loadConfig();
     if (config.enabled === false) return false;
@@ -114,9 +127,8 @@ export default {
     const isInterceptCmd = cmd.startsWith('指定拦截') || cmd.startsWith('取消拦截') || cmd.startsWith('查看拦截');
 
     if (isInterceptCmd) {
-        const owners = this.getOwners();
-        const isSenderOwner = owners.includes(senderQQ);
-        if (!isSenderOwner) return '❌ 权限不足：仅主人可配置专属拦截。';
+        const role = getRole(senderQQ, msg.botId);
+        if (role !== 'master' && role !== 'owner') return '❌ 权限不足：仅主人可配置专属拦截。';
 
         if (cmd.startsWith('指定拦截')) {
             const content = cmd.replace('指定拦截', '').trim();
@@ -124,36 +136,67 @@ export default {
             if (!match) return '⚠️ 用法：\n指定拦截 QQ号 群号\n指定拦截 QQ号';
             const targetQQ = match[1];
             const targetGroup = match[2] || currentGroupId;
+            
             if (!targetGroup) return '❌ 必须在群内使用，或者显式提供群号。';
-            if (!owners.includes(targetQQ)) return `❌ 设置失败：${targetQQ} 不在主人列表中。`;
+            
+            const targetRole = getRole(targetQQ, msg.botId);
+            if (targetRole !== 'master' && targetRole !== 'owner') return `❌ 设置失败：${targetQQ} 不在有效主人列表中（或权限已关闭）。`;
 
-            db.prepare('INSERT OR REPLACE INTO exclusive_push (user_id, group_id) VALUES (?, ?)').run(targetQQ, targetGroup);
-            return `✅ 设置成功！\n主人 ${targetQQ} 现在起【只接收群 ${targetGroup}】的撤回通知。`;
+            // 🌟 使用 INSERT OR IGNORE 防止重复插入
+            const info = db.prepare('INSERT OR IGNORE INTO exclusive_push (user_id, group_id) VALUES (?, ?)').run(targetQQ, targetGroup);
+            
+            if (info.changes > 0) {
+                return `✅ 绑定成功！\n主人 ${targetQQ} 现在起会额外接收【群 ${targetGroup}】的撤回通知。`;
+            } else {
+                return `⚠️ 主人 ${targetQQ} 已经绑定了【群 ${targetGroup}】，无需重复设置。`;
+            }
         }
 
         if (cmd.startsWith('取消拦截')) {
             const content = cmd.replace('取消拦截', '').trim();
-            const match = content.match(/^(\d{5,12})$/);
-            const targetQQ = match ? match[1] : senderQQ;
-            if (!owners.includes(targetQQ)) return `❌ 失败：${targetQQ} 不在主人列表中。`;
-            const info = db.prepare('DELETE FROM exclusive_push WHERE user_id = ?').run(targetQQ);
-            return info.changes > 0 ? `✅ 已取消！主人 ${targetQQ} 恢复接收所有群的通知。` : `⚠️ 主人 ${targetQQ} 当前没有设置专属拦截。`;
+            const match = content.match(/^(\d{5,12})(?:\s+(\d{5,12}))?$/);
+            
+            let targetQQ = senderQQ;
+            let targetGroup = null;
+
+            if (match) {
+                targetQQ = match[1];
+                if (match[2]) targetGroup = match[2];
+            }
+
+            if (targetGroup) {
+                // 取消指定群的拦截
+                const info = db.prepare('DELETE FROM exclusive_push WHERE user_id = ? AND group_id = ?').run(targetQQ, targetGroup);
+                return info.changes > 0 ? `✅ 已取消！主人 ${targetQQ} 不再单独接收群 ${targetGroup} 的通知。` : `⚠️ 主人 ${targetQQ} 当前没有绑定群 ${targetGroup}。`;
+            } else {
+                // 取消该用户的所有拦截
+                const info = db.prepare('DELETE FROM exclusive_push WHERE user_id = ?').run(targetQQ);
+                return info.changes > 0 ? `✅ 已取消！主人 ${targetQQ} 的所有专属拦截绑定已清空，恢复接收所有群通知。` : `⚠️ 主人 ${targetQQ} 当前没有设置任何专属拦截。`;
+            }
         }
 
         if (cmd.startsWith('查看拦截')) {
             const rows = db.prepare('SELECT user_id, group_id FROM exclusive_push').all();
             if (rows.length === 0) return '⚙️ 当前没有任何主人设置专属拦截。';
+            
+            // 🌟 按用户分组显示
+            const userGroups = {};
+            rows.forEach(r => {
+                if (!userGroups[r.user_id]) userGroups[r.user_id] = [];
+                userGroups[r.user_id].push(r.group_id);
+            });
+
             let reply = '⚙️ 当前专属拦截绑定列表：\n';
-            rows.forEach(r => { reply += `👤 主人 ${r.user_id} ➡️ 只听群 ${r.group_id}\n`; });
+            for (const [uid, groups] of Object.entries(userGroups)) {
+                reply += `👤 主人 ${uid} ➡️ 只听群：${groups.join(', ')}\n`;
+            }
             return reply.trim();
         }
     }
 
-    // 缓存消息
     if (raw.post_type === 'message' && raw.message_id) {
         if (senderQQ === String(msg.botId)) return false;
 
-        // 🌟 核心修复 1：强制 String 解决撤回时类型不匹配的问题
         backupCache.set(String(raw.message_id), {
             name: msg.senderName || '未知',
             senderId: senderQQ,
@@ -184,11 +227,10 @@ export default {
     if (!ws) ws = globalThis.activeWs;
 
     if (raw.notice_type === 'group_recall' || raw.notice_type === 'friend_recall') {
-        // 🌟 核心修复 1：查缓存时强制 String
         const backup = backupCache.get(String(raw.message_id));
         
         if (backup) {
-            globalThis.print(`\n[防撤回] 🚨 检测到撤回事件，正在提取缓存并私聊通知主人...`);
+            globalThis.print(`\n[防撤回] 🚨 检测到撤回事件...`);
             let locationStr = '私聊';
             const currentGroupId = backup.groupId; 
             
@@ -203,9 +245,31 @@ export default {
                 locationStr = gName ? `${gName}(${currentGroupId})` : `群聊(${currentGroupId})`;
             }
 
-            const allOwners = this.getOwners();
+            if (Date.now() - lastFriendFetchTime > FRIEND_CACHE_EXPIRE) {
+                try {
+                    const res = await globalThis.wsCall('get_friend_list', {}, 10000, ws);
+                    let friendsData = null;
+                    if (Array.isArray(res)) friendsData = res;
+                    else if (res && res.data && Array.isArray(res.data)) friendsData = res.data;
+                    
+                    if (friendsData) {
+                        friendListCache.clear();
+                        friendsData.forEach(f => friendListCache.add(String(f.user_id)));
+                        lastFriendFetchTime = Date.now();
+                        globalThis.print(`[防撤回] 好友列表已刷新，共拉取到 ${friendListCache.size} 个好友。`);
+                    } else {
+                        globalThis.print(`[防撤回] ⚠️ 好友列表格式异常，本次将尝试盲目发送...`);
+                        lastFriendFetchTime = Date.now();
+                    }
+                } catch(e) {
+                    globalThis.print(`[防撤回] 获取好友列表异常: ${e.message}，将尝试尝试盲目发送...`);
+                    lastFriendFetchTime = Date.now();
+                }
+            }
+
+            const allOwners = getAllOwners(selfId);
             if (allOwners.length === 0) {
-                globalThis.print(`[防撤回] ⚠️ 没有获取到主人列表，无法发送！请检查 ${GLOBAL_CONFIG_PATH}`);
+                globalThis.print(`[防撤回] ⚠️ 当前没有任何有效主人，取消发送。`);
                 return;
             }
 
@@ -286,8 +350,6 @@ export default {
             }
 
             const alertText = config.alert_text || '🛑 【防撤回拦截】\n';
-            
-            // 🌟 核心修复 2：将原始 CQ 数组强行转为纯文本，防止发出去红框报错
             let rawContentStr = '';
             if (Array.isArray(backup.content)) {
                 rawContentStr = backup.content.map(c => {
@@ -304,42 +366,106 @@ export default {
                 { type: 'text', data: { text: `${alertText}来源：${locationStr}\n发送者：${backup.name}(${backup.senderId})\n内容：${rawContentStr}\n` } }
             ];
 
-            const boundGroups = new Map();
+            // 🌟 新增核心逻辑：提取需要额外发送的动图 / 视频 / 语音
+            const extraMediaMsgs = [];
+            if (Array.isArray(backup.content)) {
+                for (const seg of backup.content) {
+                    // 视频和语音直接透传
+                    if (seg.type === 'video' || seg.type === 'record') {
+                        let fileUrl = seg.data.url || seg.data.file;
+                        if (fileUrl) {
+                            extraMediaMsgs.push({ type: seg.type, data: { file: fileUrl } });
+                        }
+                    } 
+                    // 动图判断（sub_type === 1 或者后缀名包含 .gif）
+                    else if (seg.type === 'image') {
+                        let fileUrl = seg.data.url || seg.data.file;
+                        let isGif = (seg.data.sub_type === 1) || (fileUrl && fileUrl.toLowerCase().includes('.gif'));
+                        if (fileUrl && isGif) {
+                            extraMediaMsgs.push({ type: 'image', data: { file: fileUrl } });
+                        }
+                    }
+                }
+            }
+            if (extraMediaMsgs.length > 0) {
+                globalThis.print(`[防撤回] 发现 ${extraMediaMsgs.length} 个视频/动图，准备额外发送。`);
+            }
+
+            // 🌟 核心修改：获取所有绑定关系并按用户分组
+            const boundGroupsMap = new Map();
             const rows = db.prepare('SELECT user_id, group_id FROM exclusive_push').all();
-            rows.forEach(r => boundGroups.set(String(r.user_id), String(r.group_id)));
+            rows.forEach(r => {
+                const uid = String(r.user_id);
+                if (!boundGroupsMap.has(uid)) boundGroupsMap.set(uid, new Set());
+                boundGroupsMap.get(uid).add(String(r.group_id));
+            });
 
             for (const owner of allOwners) {
                 if (owner === backup.senderId) continue;
 
-                const boundGroup = boundGroups.get(String(owner));
-                let shouldSend = false;
+                if (friendListCache.size > 0 && !friendListCache.has(String(owner))) {
+                    globalThis.print(`[防撤回] ⏭️ 跳过非好友: ${owner}`);
+                    continue; 
+                }
 
-                if (boundGroup) {
-                    if (currentGroupId === boundGroup) shouldSend = true;
-                } else {
-                    shouldSend = true;
+                // 🌟 核心修改：多群判断逻辑
+                const userBoundGroups = boundGroupsMap.get(String(owner));
+                let shouldSend = true;
+
+                // 如果该主人配置了指定群，则只有当当前群在他的绑定列表中时才发送
+                if (userBoundGroups && userBoundGroups.size > 0) {
+                    // 如果是私聊消息（currentGroupId 为 null），默认允许发送，或者可以根据需求忽略
+                    if (currentGroupId && !userBoundGroups.has(String(currentGroupId))) {
+                        shouldSend = false;
+                    }
                 }
 
                 if (shouldSend && typeof globalThis.wsCall === 'function') {
-                    // 🌟 核心修复 3：加入 500ms 延迟和 15 秒超时，防止多主人并发把接口刷爆
-                    await new Promise(r => setTimeout(r, 500));
-                    try {
-                        if (imageBuffer) {
+                    await new Promise(r => setTimeout(r, 1500)); 
+                    
+                    let sendSuccess = false;
+
+                    // 1. 先发防撤回卡片
+                    if (imageBuffer) {
+                        try {
                             await globalThis.wsCall('send_msg', {
                                 message_type: 'private',
                                 user_id: Number(owner),
                                 message: [{ type: 'image', data: { file: `base64://${imageBuffer.toString('base64')}` } }]
                             }, 15000, ws);
-                        } else {
+                            sendSuccess = true;
+                            globalThis.print(`[防撤回] ✅ 成功发送图片给: ${owner}`);
+                        } catch (err) {
+                            globalThis.print(`❌ [防撤回] 图片发 ${owner} 失败，降级发文本...`);
+                        }
+                    }
+                    
+                    if (!sendSuccess) {
+                        try {
                             await globalThis.wsCall('send_msg', {
                                 message_type: 'private',
                                 user_id: Number(owner),
                                 message: fallbackMsg
                             }, 15000, ws);
+                            globalThis.print(`[防撤回] ✅ (文本降级) 成功发送给: ${owner}`);
+                        } catch(err) {
+                            globalThis.print(`❌ [防撤回] 文本发 ${owner} 失败: ${err.message}`);
                         }
-                        globalThis.print(`[防撤回] ✅ 已成功发送给主人: ${owner}`);
-                    } catch(err) {
-                        globalThis.print(`❌ [防撤回] 发送给主人 ${owner} 失败: ${err.message}`);
+                    }
+
+                    // 🌟 2. 如果存在动图/视频/语音，额外发送原始媒体文件
+                    if (extraMediaMsgs.length > 0) {
+                        await new Promise(r => setTimeout(r, 1000)); // 稍微停顿一下，防止风控
+                        try {
+                            await globalThis.wsCall('send_msg', {
+                                message_type: 'private',
+                                user_id: Number(owner),
+                                message: extraMediaMsgs
+                            }, 15000, ws);
+                            globalThis.print(`[防撤回] ✅ 成功发送额外媒体文件给: ${owner}`);
+                        } catch (err) {
+                            globalThis.print(`❌ [防撤回] 额外媒体发送给 ${owner} 失败: ${err.message}`);
+                        }
                     }
                 }
             }

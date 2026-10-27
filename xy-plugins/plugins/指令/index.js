@@ -4,7 +4,6 @@ import path from 'path';
 import yaml from 'yaml';
 import os from 'os'; 
 import { fileURLToPath } from 'url';
-import { chromium } from 'playwright';
 import { manageBlacklist } from '../../../xy-bot/blacklist.js';
 import { hasPermission, getRole } from '../../../xy-config/config/permissions.js';
 import { getConfig } from '../../../xy-bot/config.js'; 
@@ -15,7 +14,9 @@ const CONFIG_PATH = path.join(PROJECT_ROOT, 'xy-config/config.yaml');
 const MENU_PATH = path.join(__dirname, 'menu.json');
 const CACHE_DIR = path.join(PROJECT_ROOT, 'temp/cache');
 
+// 🌟 修复 1：状态浏览器变量与并发锁
 let statusBrowser = null;
+let statusBrowserLaunching = null;
 
 // ==================== 辅助函数 ====================
 function formatUptime(seconds) {
@@ -70,11 +71,10 @@ function updateYamlConfig(mutatorFn) {
         const config = yaml.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) || {};
         const resultMsg = mutatorFn(config);
         
-        // 如果返回了成功标识，才写入文件
         if (resultMsg && !resultMsg.startsWith('❌') && !resultMsg.startsWith('⚠️')) {
             const tmpPath = CONFIG_PATH + '.tmp';
             fs.writeFileSync(tmpPath, yaml.stringify(config), 'utf8');
-            fs.renameSync(tmpPath, CONFIG_PATH); // 原子写入
+            fs.renameSync(tmpPath, CONFIG_PATH); 
             
             if (typeof globalThis._configReload === 'function') globalThis._configReload();
         }
@@ -162,18 +162,14 @@ export default {
         const chatId = msgObj.chatId || msgObj.group_id || msgObj.user_id; 
         const isGroup = msgObj.isGroup || msgObj.message_type === 'group'; 
         
-        // 🌟 核心修复：获取当前接收消息的 Bot ID，用于判断局部权限
         const botId = msgObj.botId || msgObj.selfId || msgObj.rawData?.self_id;
         
         if (!senderId || senderId === 'undefined') return null;
 
-        // 🌟 核心修复：传入 botId，让局部大主人/小主人生效！
         const isMaster = hasPermission(senderId, 'master', botId);
         const isOwner = isMaster || hasPermission(senderId, 'owner', botId);
 
-        // ==========================================
         // 1. 帮助 / 菜单
-        // ==========================================
         if (pureText === '帮助' || pureText === '菜单') {
           try {
             const imagePath = await generateHelpCard(chatId, isGroup);
@@ -186,9 +182,7 @@ export default {
           }
         }
 
-        // ==========================================
         // 2. 重新生成
-        // ==========================================
         if (pureText === '重新生成' || pureText === '刷新菜单') {
             if (!isOwner) return '❌ 权限不足：仅主人可执行此操作。';
             try {
@@ -202,9 +196,7 @@ export default {
             }
         }
 
-        // ==========================================
-        // 3. 权限查询 (之前漏掉的)
-        // ==========================================
+        // 3. 权限查询
         if (pureText === '权限') {
             const roleMap = {
                 master: '👑 大主人（最高权限）',
@@ -216,9 +208,7 @@ export default {
             return `【${senderName}】的权限等级：${roleMap[userRole] || '未知'}`;
         }
 
-        // ==========================================
-        // 4. 全局黑白名单拉黑操作 (之前漏掉的)
-        // ==========================================
+        // 4. 全局黑白名单拉黑操作
         if (/^(拉黑|取消)\s*\d{5,13}\s+[01]$/.test(pureText)) {
             if (!isOwner) return '❌ 权限不足：仅主人可管理黑名单。';
 
@@ -236,9 +226,7 @@ export default {
             }
         }
 
-        // ==========================================
         // 5. 全局黑白名单查询
-        // ==========================================
         if (pureText === '查询黑名单' || pureText === '查询白名单') {
             if (!isMaster) return '❌ 权限不足：仅大主人可查看全局黑白名单。';
             const cfg = getConfig();
@@ -252,9 +240,7 @@ export default {
             return `${icon} 全局${name}配置：\n\n👤 ${name}用户：\n${qqList}\n\n👥 ${name}群聊：\n${groupList}`;
         }
 
-        // ==========================================
         // 6. 前缀管理
-        // ==========================================
         if (/^(启用|禁用|查询)前缀$/.test(pureText) || pureText.startsWith('添加前缀') || pureText.startsWith('删除前缀')) {
             if (!isMaster) return '❌ 权限不足：仅大主人可管理前缀。';
             
@@ -288,9 +274,7 @@ export default {
             });
         }
 
-        // ==========================================
-        // 7. 指令白名单管理 (之前完全漏掉的)
-        // ==========================================
+        // 7. 指令白名单管理
         if (pureText === '启用指令白名单' || pureText === '禁用指令白名单' || pureText === '查询指令白名单' || pureText.startsWith('添加指令白名单') || pureText.startsWith('删除指令白名单')) {
             if (!isMaster) return '❌ 权限不足：仅大主人可管理指令白名单。';
 
@@ -323,9 +307,7 @@ export default {
             });
         }
 
-        // ==========================================
         // 8. 状态 (带完整 HTML 面板)
-        // ==========================================
         if (pureText === '状态') {
           if (!isOwner && !hasPermission(senderId, 'admin', botId)) return '❌ 权限不足。';
           
@@ -351,9 +333,31 @@ export default {
           let page = null;
           let context = null;
           try {
-              if (!statusBrowser || !statusBrowser.isConnected()) {
-                  statusBrowser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
+              // 🌟 修复 2：动态兼容 Playwright 和 Puppeteer
+              let chromium = null;
+              try { chromium = (await import('playwright')).chromium; } catch (e) {
+                  try { chromium = (await import('puppeteer')).default || (await import('puppeteer')); } catch (e2) {}
               }
+              if (!chromium) return '❌ 未安装浏览器内核，无法渲染状态图。';
+
+              if (!statusBrowser || !statusBrowser.isConnected()) {
+                  if (statusBrowser) {
+                      try { await statusBrowser.close(); } catch(e){}
+                      statusBrowser = null;
+                  }
+                  if (!statusBrowserLaunching) {
+                      statusBrowserLaunching = chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] }).then(b => {
+                          statusBrowser = b;
+                          statusBrowserLaunching = null;
+                          return b;
+                      }).catch(err => {
+                          statusBrowserLaunching = null;
+                          throw err;
+                      });
+                  }
+                  await statusBrowserLaunching;
+              }
+
               context = await statusBrowser.newContext({ viewport: { width: 540, height: 580 }, deviceScaleFactor: 2 });
               page = await context.newPage();
               await page.setContent(getStatusHtml(data), { waitUntil: 'networkidle' });
@@ -367,9 +371,7 @@ export default {
           }
         }
 
-        // ==========================================
         // 9. 重启
-        // ==========================================
         if (pureText === '重启') {
           if (!isOwner) return '❌ 权限不足。';
           setTimeout(async () => {
@@ -388,9 +390,7 @@ export default {
           return '🔷 Bot 正在重启，请稍候...';
         }
 
-        // ==========================================
         // 10. 重载
-        // ==========================================
         if (pureText === '重载') {
           if (!isOwner) return '❌ 权限不足。';
           try {
@@ -405,9 +405,7 @@ export default {
           }
         }
 
-        // ==========================================
         // 11. 退出
-        // ==========================================
         if (pureText === '退出') {
           if (!isOwner) return '❌ 权限不足。';
           setTimeout(() => { process.exit(0); }, 1000);

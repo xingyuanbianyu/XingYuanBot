@@ -13,6 +13,11 @@
         .btn-edit { background: rgba(255,255,255,0.1); border: none; color: #fff; border-radius: 4px; cursor: pointer; padding: 2px 8px; font-size: 12px; }
         .btn-edit:hover { background: rgba(255,255,255,0.2); }
 
+        /* 全局下拉框样式 */
+        .global-select-box { background: var(--card); padding: 15px; border-radius: 12px; margin-bottom: 20px; border-left: 4px solid #fbbf24; }
+        .global-select-box label { display: block; margin-bottom: 8px; color: #fbbf24; font-size: 14px; font-weight: bold; }
+        .global-select-box select { width: 100%; padding: 12px; border-radius: 8px; border: 1px solid var(--border); background: #2a2a2a; color: #fff; box-sizing: border-box; font-size: 15px; outline: none; }
+
         .tabs { display: flex; gap: 10px; margin-bottom: 20px; }
         .tab { flex: 1; text-align: center; padding: 12px; background: #2a2a2a; border-radius: 8px; cursor: pointer; transition: 0.2s; font-weight: bold; }
         .tab.active { background: var(--primary); color: white; box-shadow: 0 4px 12px rgba(59,130,246,0.3); }
@@ -33,16 +38,23 @@
 
         .instances-title { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
         .instances-title h3 { margin: 0; font-size: 16px; color: #aaa; }
-        .instance-card { background: var(--card); padding: 15px; border-radius: 8px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; border-left: 4px solid #444; }
+        .instance-card { background: var(--card); padding: 15px; border-radius: 8px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; border-left: 4px solid #444; flex-wrap: wrap; gap: 10px; }
         .instance-card.online { border-left-color: var(--success); }
         
         .status-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: #555; margin-right: 8px; }
         .online .status-dot { background: var(--success); box-shadow: 0 0 8px var(--success); animation: pulse 2s infinite; }
         
         .btn-stop { background: #ef4444; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; }
-        
+        .btn-log { background: #3b82f6; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+
         #toast { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); background: #333; color: #fff; padding: 10px 20px; border-radius: 6px; font-size: 14px; opacity: 0; transition: 0.3s; pointer-events: none; z-index: 1000; }
         #toast.show { opacity: 1; }
+
+        /* 实时日志模态框 */
+        #log-modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 2000; align-items: center; justify-content: center; padding: 20px; box-sizing: border-box; }
+        .log-content { background: #000; border: 1px solid #333; border-radius: 8px; width: 100%; max-width: 800px; height: 70vh; display: flex; flex-direction: column; }
+        .log-header { padding: 10px 15px; border-bottom: 1px solid #333; display: flex; justify-content: space-between; align-items: center; color: #ccc; }
+        .log-body { flex: 1; padding: 15px; overflow-y: auto; font-family: monospace; font-size: 13px; color: #0f0; white-space: pre-wrap; line-height: 1.4; }
 
         @keyframes spin { to { transform: rotate(360deg); } }
         @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
@@ -52,6 +64,17 @@
 <body>
     <div id="toast">提示信息</div>
 
+    <!-- 实时日志弹窗 -->
+    <div id="log-modal">
+        <div class="log-content">
+            <div class="log-header">
+                <span>📟 实例实时日志监控</span>
+                <button class="btn-edit" onclick="closeLog()">关闭</button>
+            </div>
+            <div class="log-body" id="log-text">加载日志中...</div>
+        </div>
+    </div>
+
     <div class="header">
         <h2>🚀 云挂机控制台</h2>
         <div class="owner-box">
@@ -60,9 +83,17 @@
         </div>
     </div>
 
+    <!-- 🌟 新增：协议端选择区域 -->
+    <div class="global-select-box">
+        <label>🛠️ 选择协议端 (请确保本地已安装对应模板)</label>
+        <select id="select-protocol">
+            <option value="">正在扫描可用协议端...</option>
+        </select>
+    </div>
+
     <div class="tabs">
-        <div class="tab active" onclick="switchTab('qr')">📱 扫码登录</div>
-        <div class="tab" onclick="switchTab('pwd')">🔑 密码登录</div>
+        <div class="tab active" onclick="switchTab('qr', event)">📱 扫码登录</div>
+        <div class="tab" onclick="switchTab('pwd', event)">🔑 密码登录</div>
     </div>
 
     <div class="panel active" id="panel-qr">
@@ -98,6 +129,9 @@
     </div>
 
     <script>
+        let currentWatchingId = null;
+        let logInterval = null;
+
         function showToast(msg, color = '#333') {
             const t = document.getElementById('toast');
             t.innerText = msg;
@@ -106,9 +140,29 @@
             setTimeout(() => t.classList.remove('show'), 2500);
         }
 
+        // 🌟 新增：拉取可用的协议端列表
+        async function fetchProtocols() {
+            try {
+                const res = await fetch('/api/protocols');
+                const data = await res.json();
+                const select = document.getElementById('select-protocol');
+                
+                if (data.success && data.protocols && data.protocols.length > 0) {
+                    select.innerHTML = data.protocols.map(p => 
+                        `<option value="${p.id}">${p.name}</option>`
+                    ).join('');
+                } else {
+                    select.innerHTML = '<option value="">未找到可用协议端模板</option>';
+                    showToast('未找到协议端模板，请检查上级目录', '#ef4444');
+                }
+            } catch (e) {
+                showToast('获取协议端列表失败', '#ef4444');
+            }
+        }
+
         async function editOwner() {
             const current = document.getElementById('owner-qq').innerText;
-            const newQQ = prompt("请输入新的号主 QQ 账号:", current === '未绑定' ? '' : current);
+            const newQQ = prompt("请输入号主 QQ 账号:", current === '未绑定' ? '' : current);
             if (newQQ && newQQ.trim() !== '') {
                 const res = await fetch('/api/set-owner', {
                     method: 'POST',
@@ -125,14 +179,60 @@
             }
         }
 
-        function switchTab(mode) {
+        function switchTab(mode, event) {
             document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
             document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
             event.target.classList.add('active');
             document.getElementById('panel-' + mode).classList.add('active');
         }
 
+        // 修改：关闭日志窗口重置状态
+        function closeLog() {
+            document.getElementById('log-modal').style.display = 'none';
+            currentWatchingId = null;
+            if(logInterval) clearInterval(logInterval);
+        }
+
+        async function openLog(id) {
+            currentWatchingId = id;
+            document.getElementById('log-modal').style.display = 'flex';
+            document.getElementById('log-text').innerText = '正在拉取日志...';
+            
+            if (logInterval) clearInterval(logInterval);
+            logInterval = setInterval(async () => {
+                if (!currentWatchingId) return;
+                try {
+                    const res = await fetch('/api/logs/' + currentWatchingId);
+                    if (res.ok) {
+                        const logs = await res.text();
+                        const box = document.getElementById('log-text');
+                        const isScrolledToBottom = box.scrollHeight - box.clientHeight <= box.scrollTop + 50;
+                        box.innerText = logs;
+                        if (isScrolledToBottom) box.scrollTop = box.scrollHeight;
+                    }
+                } catch(e) {}
+            }, 1000);
+        }
+
         async function startBot(mode) {
+            // 🌟 新增：获取选中的协议端
+            const protocol = document.getElementById('select-protocol').value;
+            if (!protocol) return showToast('请先选择协议端！', '#ef4444');
+
+            if (mode === 'qr') {
+                const owner = document.getElementById('owner-qq').innerText;
+                if (owner === '未绑定' || owner === '加载中...') {
+                    const newQQ = prompt("为了确保安全，请先绑定主控号主 QQ：");
+                    if (!newQQ || newQQ.trim() === '') return showToast('必须绑定号主才能拉取实例', '#ef4444');
+                    await fetch('/api/set-owner', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ ownerQQ: newQQ.trim() })
+                    });
+                    await fetchState(); 
+                }
+            }
+
             const qq = document.getElementById('input-qq').value;
             const pwd = document.getElementById('input-pwd').value;
             
@@ -150,7 +250,8 @@
                 const res = await fetch('/api/create', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ mode, qq, password: pwd })
+                    // 🌟 修改：把 protocol 传给后端
+                    body: JSON.stringify({ mode, qq, password: pwd, protocol })
                 });
                 const data = await res.json();
                 
@@ -160,7 +261,8 @@
                         window.location.href = '/qr.html?id=' + data.instanceId;
                         return;
                     } else {
-                        text.innerText = '指令已发送，请观察状态';
+                        text.innerText = '指令已发送，观察日志中';
+                        openLog(data.instanceId); 
                         fetchState(); 
                     }
                 } else {
@@ -196,20 +298,24 @@
                             <div>
                                 <span class="status-dot"></span>
                                 <b>实例 ${inst.wsPort}</b> 
+                                <span style="color: #fbbf24; font-size: 12px; margin-left: 8px;">[${inst.protocol || '未知协议'}]</span>
                                 <span style="color: #666; font-size: 12px; margin-left: 8px;">(${inst.mode === 'qr' ? '扫码' : '密码'})</span>
                             </div>
                             <div style="display: flex; align-items: center; gap: 10px;">
-                                <span style="font-size: 12px; color: ${inst.online ? 'var(--success)' : '#888'}">${inst.online ? '运行中' : '启动中/离线'}</span>
+                                <span style="font-size: 12px; color: ${inst.online ? 'var(--success)' : '#888'}">${inst.online ? '运行中' : (inst.exitCode !== undefined ? '已退出' : '启动中')}</span>
+                                <button class="btn-log" onclick="openLog('${inst.id}')">日志</button>
                                 ${inst.hasQr && !inst.online ? `<button class="btn btn-primary" style="width: auto; padding: 6px 12px; font-size: 12px;" onclick="window.location.href='/qr.html?id=${inst.id}'">去扫码</button>` : ''}
                                 <button class="btn-stop" onclick="stopInstance('${inst.id}')">停止</button>
                             </div>
                         </div>
                     `).join('');
 
-                    if (document.getElementById('text-pwd').innerText === '指令已发送，请观察状态') {
+                    if (document.getElementById('text-pwd').innerText === '指令已发送，观察日志中') {
                         const offlineWithQr = data.instances.find(i => !i.online && i.hasQr);
                         if (offlineWithQr) {
-                            showToast('⚠️ 密码登录失败触发风控，已自动转到扫码页面', '#fbbf24');
+                            showToast('⚠️ 密码登录失败触发风控，已自动转到扫码', '#fbbf24');
+                            document.getElementById('log-modal').style.display = 'none'; 
+                            currentWatchingId = null;
                             window.location.href = '/qr.html?id=' + offlineWithQr.id;
                             return;
                         }
@@ -219,6 +325,7 @@
                 const anyOnline = data.instances.some(i => i.online);
                 if (anyOnline && !lastOnlineState) {
                     showToast('✅ 机器人登录成功并连入主控！', '#10b981');
+                    closeLog(); 
                     resetBtn(document.getElementById('btn-pwd'), document.getElementById('spin-pwd'), document.getElementById('text-pwd'), 'pwd');
                     resetBtn(document.getElementById('btn-qr'), document.getElementById('spin-qr'), document.getElementById('text-qr'), 'qr');
                 }
@@ -232,12 +339,17 @@
             const res = await fetch('/api/stop/' + id, { method: 'POST' });
             if (res.ok) {
                 showToast('实例已停止', '#10b981');
+                if (currentWatchingId === id) {
+                    closeLog();
+                }
                 fetchState();
             } else {
                 showToast('停止失败', '#ef4444');
             }
         }
 
+        // 页面加载时执行
+        fetchProtocols(); 
         setInterval(fetchState, 2000);
         fetchState();
     </script>

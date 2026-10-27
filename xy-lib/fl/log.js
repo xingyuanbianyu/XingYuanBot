@@ -1,120 +1,211 @@
 // xy-lib/log.js
-// ✅ 通用日志模块 — 创建 / 写入 / 清除
+// ✅ 通用日志模块 — 支持模块文件夹、多级路径、自动切分
 
 const fs = require('fs');
 const path = require('path');
 
-const LOG_DIR = path.join(__dirname, '../../', 'LOG');
+(function () {
+  "use strict";
+  const VERSION = "1.2.0";
+  const NS = "writeLog";
 
-// 确保 LOG 目录存在
-if (!fs.existsSync(LOG_DIR)) {
-  fs.mkdirSync(LOG_DIR, { recursive: true });
-}
-
-// ========================
-// 写入日志（追加模式）
-// ========================
-/**
- * @param {string} moduleName - 模块名（用于文件名和日志前缀）
- * @param {string} content    - 日志内容
- * @param {string} [ext='.log'] - 后缀名，支持 '.log' 或 '.txt'
- */
-globalThis.writeLog = function (moduleName, content, ext = '.log') {
-  if (!moduleName || typeof moduleName !== 'string') {
-    if (globalThis.print) globalThis.print(`⚠️ [writeLog] 模块名无效: ${moduleName}`);
+  if (globalThis[NS] && globalThis[NS].version === VERSION) {
     return;
   }
 
-  const validExt = ext === '.txt' ? '.txt' : '.log';
-  
-  // 🌟 核心修复 1：只提取日期部分 (YYYY-MM-DD)，彻底告别一秒一个文件！
-  const today = globalThis.now().split(' ')[0]; 
-  const fileName = `${moduleName}_${today}${validExt}`;
-  const filePath = path.join(LOG_DIR, fileName);
+  // 根目录：以此文件向上两级找到 LOG 目录
+  const LOG_DIR = path.join(__dirname, '../../', 'LOG');
 
-  const timeStr = globalThis.now();
-  const line = `[${timeStr}] [${moduleName}] ${content}\n`;
-
-  try {
-    // 🌟 如果涉及高并发且日志极大，未来可改为 fs.appendFile 异步写入，目前同步写入保证顺序不乱
-    fs.appendFileSync(filePath, line, 'utf8');
-    return filePath; // 返回写入路径，方便调试
-  } catch (err) {
-    if (globalThis.print) globalThis.print(`❌ [writeLog] 写入失败: ${err.message}`);
-    return null;
+  if (!fs.existsSync(LOG_DIR)) {
+    fs.mkdirSync(LOG_DIR, { recursive: true });
   }
-};
 
-// ========================
-// 清除日志（支持按天数保留、通配符）
-// ========================
-/**
- * @param {string} [moduleName] - 模块名。传 '*' 或为空表示清理所有模块。
- * @param {number|string} [keepDays] - 保留天数。不传或传 0 则清理所有时间段的日志。支持 "7", "7天"
- * @param {string} [ext]        - 限定后缀，如 '.log' 或 '.txt'
- */
-globalThis.clearLog = function (moduleName, keepDays, ext) {
-  if (!fs.existsSync(LOG_DIR)) return 0;
+  const _print = (msg) => {
+    if (globalThis.print) globalThis.print(msg);
+    else console.log(msg);
+  };
 
-  // 1. 通配符判断
-  const isWildcard = !moduleName || moduleName === '*';
+  const _getNowStr = () => {
+    if (globalThis.now) return globalThis.now();
+    const pad = n => String(n).padStart(2, "0");
+    const d = new Date();
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  };
 
-  // 2. 天数解析（默认清理所有，即 0 天）
-  let daysToKeep = 0; 
-  if (keepDays !== undefined && keepDays !== null) {
-    const numMatch = String(keepDays).match(/\d+/);
-    if (numMatch) {
-      daysToKeep = parseInt(numMatch[0], 10);
+  // ✅ 安全清洗路径，允许多级目录（如 'system/db'），但阻止 .. 穿越
+  const _safePath = (p) => {
+    if (!p) return '';
+    // 统一斜杠，移除非法字符，处理 ..
+    return String(p)
+      .replace(/\\/g, '/')
+      .split('/')
+      .map(seg => seg.replace(/[:\*?"<>|]/g, '_').replace(/\.\./g, '_').trim())
+      .filter(seg => seg && seg !== '.')
+      .join('/');
+  };
+
+  // ✅ 安全清洗单个文件名
+  const _safeFileName = (name) => {
+    if (!name) return '';
+    return String(name).replace(/[\/\\:\*?"<>|]/g, '_').replace(/\.\./g, '_').trim();
+  };
+
+  // ========================
+  // 1. 写入日志（追加模式）
+  // ========================
+  /**
+   * @param {string} moduleName - 模块名或子目录路径（如 'bot' 或 'system/db'）
+   * @param {string} [fileName] - 文件名（如 'error'），如果不传则默认以当天日期命名
+   * @param {string} [ext='.log'] - 扩展名
+   * @param {string} [content]  - 日志内容
+   */
+  function writeLog(moduleName, fileName, ext, content) {
+    if (!moduleName || typeof moduleName !== 'string') {
+      _print(`⚠️ [writeLog] 模块名无效: ${moduleName}`);
+      return null;
+    }
+
+    // 🌟 智能参数兼容：如果只传了2个或3个参数（兼容旧版调用习惯）
+    if (content === undefined && ext === undefined) {
+      content = fileName;         // writeLog('bot', '日志内容')
+      fileName = null;
+      ext = '.log';
+    } else if (content === undefined && typeof ext === 'string' && !ext.startsWith('.')) {
+      content = ext;              // writeLog('bot', 'error', '日志内容')
+      ext = '.log';
+    }
+
+    // 处理扩展名格式
+    ext = ext || '.log';
+    if (!ext.startsWith('.')) ext = '.' + ext;
+
+    // 解析路径
+    const safeDir = _safePath(moduleName);
+    const dirPath = path.join(LOG_DIR, safeDir);
+    
+    // 自动创建对应的模块文件夹
+    if (!fs.existsSync(dirPath)) {
+      try {
+        fs.mkdirSync(dirPath, { recursive: true });
+      } catch (err) {
+        _print(`❌ [writeLog] 创建目录失败: ${err.message}`);
+        return null;
+      }
+    }
+
+    // 默认按天命名
+    const today = _getNowStr().split(' ')[0];
+    const finalName = fileName ? _safeFileName(fileName) : today;
+    const filePath = path.join(dirPath, `${finalName}${ext}`);
+    
+    const timeStr = _getNowStr();
+    const line = `[${timeStr}] [${moduleName}] ${content}\n`;
+
+    try {
+      fs.appendFileSync(filePath, line, 'utf8');
+      return filePath;
+    } catch (err) {
+      _print(`❌ [writeLog] 写入失败: ${err.message}`);
+      return null;
     }
   }
 
-  const now = Date.now();
-  const msPerDay = 24 * 60 * 60 * 1000;
-  const cutoffTime = now - (daysToKeep * msPerDay);
+  // ========================
+  // 2. 清除日志（支持按模块/目录递归清理）
+  // ========================
+  /**
+   * @param {string} [moduleName] - 模块名或路径。传 '*' 或留空清理所有。
+   * @param {number|string} [keepDays] - 保留天数。
+   * @param {string} [ext] - 限定后缀。
+   */
+  function clearLog(moduleName, keepDays, ext) {
+    if (!fs.existsSync(LOG_DIR)) return 0;
 
-  let files = [];
-  try {
-    files = fs.readdirSync(LOG_DIR);
-  } catch (e) {
-    return 0;
-  }
+    const isWildcard = !moduleName || moduleName === '*';
+    const safeDir = isWildcard ? '' : _safePath(moduleName);
+    const targetDir = path.join(LOG_DIR, safeDir);
 
-  let count = 0;
+    if (!fs.existsSync(targetDir)) return 0;
 
-  for (const file of files) {
-    // 3. 保护特殊文件
-    if (file === '.gitkeep' || file === '.gitignore') continue;
+    let daysToKeep = 0; 
+    if (keepDays !== undefined && keepDays !== null) {
+      const numMatch = String(keepDays).match(/\d+/);
+      if (numMatch) daysToKeep = parseInt(numMatch[0], 10);
+    }
 
-    // 4. 模块名过滤（通配符直接放行，否则按前缀匹配）
-    if (!isWildcard && !file.startsWith(moduleName)) continue;
-    
-    // 5. 后缀过滤
-    if (ext && !file.endsWith(ext)) continue;
+    const now = Date.now();
+    const msPerDay = 24 * 60 * 60 * 1000;
+    const cutoffTime = now - (daysToKeep * msPerDay);
 
-    const filePath = path.join(LOG_DIR, file);
-    
-    try {
-      // 6. 日期判断：如果设定的保留天数 > 0，则只删早于截止时间的文件
-      if (daysToKeep > 0) {
-        const stats = fs.statSync(filePath);
-        if (stats.mtimeMs >= cutoffTime) {
-          continue; // 还没过期，保留
+    let count = 0;
+
+    // 🌟 递归清理目录
+    function processDir(dir) {
+      let files = [];
+      try {
+        files = fs.readdirSync(dir);
+      } catch (e) {
+        return;
+      }
+
+      for (const file of files) {
+        if (file === '.gitkeep' || file === '.gitignore' || file === 'Thumbs.db') continue;
+
+        const filePath = path.join(dir, file);
+        let stats;
+        try {
+          stats = fs.statSync(filePath);
+        } catch (e) {
+          continue;
+        }
+
+        if (stats.isDirectory()) {
+          processDir(filePath); // 递归子目录
+          // 如果子目录为空，顺便把空目录删掉
+          try {
+            if (fs.readdirSync(filePath).length === 0) fs.rmdirSync(filePath);
+          } catch (e) {}
+        } else {
+          // 后缀过滤
+          if (ext && !file.endsWith(ext)) continue;
+
+          // 日期过滤
+          if (daysToKeep > 0) {
+            let fileDateMs = 0;
+            const dateMatch = file.match(/(\d{4}-\d{2}-\d{2})/);
+            
+            if (dateMatch) {
+              const parsedDate = new Date(`${dateMatch[1]}T23:59:59`).getTime();
+              if (!Number.isNaN(parsedDate)) fileDateMs = parsedDate;
+            }
+            if (!fileDateMs) fileDateMs = stats.mtimeMs;
+
+            if (fileDateMs >= cutoffTime) continue;
+          }
+
+          // 删除文件
+          try {
+            fs.unlinkSync(filePath);
+            count++;
+          } catch (err) {
+            _print(`❌ [clearLog] 删除 ${file} 失败: ${err.message}`);
+          }
         }
       }
-      
-      // 7. 删除
-      fs.unlinkSync(filePath);
-      count++;
-    } catch (err) {
-      if (globalThis.print) globalThis.print(`❌ [clearLog] 删除 ${file} 失败: ${err.message}`);
     }
+
+    processDir(targetDir);
+
+    const dayMsg = daysToKeep === 0 ? '全部' : `超过 ${daysToKeep} 天的`;
+    const moduleMsg = isWildcard ? '全部模块' : safeDir;
+    _print(`🗑️ [clearLog] 已清除 ${count} 个日志文件（目录: ${moduleMsg}，保留: ${dayMsg}）`);
+    
+    return count;
   }
 
-  if (globalThis.print) {
-    const dayMsg = daysToKeep === 0 ? '全部' : `超过 ${daysToKeep} 天的`;
-    const moduleMsg = isWildcard ? '全部模块' : moduleName;
-    globalThis.print(`🗑️ [clearLog] 已清除 ${count} 个日志文件（模块: ${moduleMsg}，保留: ${dayMsg}）`);
-  }
-  
-  return count;
-};
+  writeLog.version = VERSION;
+  globalThis[NS] = writeLog;
+  globalThis.clearLog = clearLog;
+
+  _print(`✅ [xy-lib] 日志模块已加载 (v${VERSION}) -> ${LOG_DIR}`);
+})();

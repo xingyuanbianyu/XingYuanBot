@@ -8,7 +8,6 @@ import { getRole } from '../../../xy-config/config/permissions.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DB_PATH = path.join(__dirname, 'bad_words.db');
 const CONFIG_PATH = path.join(__dirname, 'config.yaml');
-// 🌟 修复：修正全局配置路径
 const GLOBAL_CONFIG_PATH = path.resolve(__dirname, '../../../xy-config/config.yaml');
 
 // 初始化数据库
@@ -27,8 +26,8 @@ db.exec(`
 let warnBrowser = null;
 let browserLaunching = null;
 
-// 🌟 缓存违禁词，减少数据库压力
-const badWordsCache = new Map(); // groupId -> [{word, match_type}]
+// 缓存违禁词，减少数据库压力
+const badWordsCache = new Map(); 
 function refreshBadWordsCache(groupId) {
     const rows = db.prepare('SELECT word, match_type FROM group_bad_words WHERE group_id = ?').all(groupId);
     badWordsCache.set(groupId, rows);
@@ -55,7 +54,6 @@ function escapeHtml(str) {
 export default {
     name: '违禁词拦截',
     
-    // 匹配所有消息
     match(text) {
         return !!text; 
     },
@@ -63,6 +61,12 @@ export default {
     async handle(msg) {
         if (!msg.isGroup) return false;
         
+        // ==========================================
+        // 🌟 锁 1：防止自己杀自己！
+        // 只要是机器人发出的消息，或者上号的人发的消息，统统放行，绝不检测！
+        // ==========================================
+        if (msg.isSelf) return false;
+
         let cmd = (msg.pureText || "").trim();
         const dynamicPrefixes = getDynamicPrefixes();
         let strippedCmd = cmd;
@@ -86,16 +90,14 @@ export default {
         if (isCmd) {
             let hasPermission = false;
             
-            // 🌟 优化 1：优先查本地缓存
             const cachedMembers = globalThis.getGroupMembers ? globalThis.getGroupMembers(groupId) : [];
             const member = cachedMembers.find(m => String(m.user_id) === senderQQ);
             
             if (member && ['owner', 'admin'].includes(member.role)) {
                 hasPermission = true;
-            } else if (typeof getRole === 'function' && ['master', 'owner', 'admin'].includes(getRole(senderQQ))) {
+            } else if (typeof getRole === 'function' && ['master', 'owner', 'admin'].includes(getRole(senderQQ, msg.botId))) {
                 hasPermission = true;
             } else {
-                // 缓存没命中，才请求 API
                 try {
                     const res = await globalThis.wsCall('get_group_member_info', { group_id: Number(groupId), user_id: Number(senderQQ) }, 3000, ws);
                     if (['owner', 'admin'].includes(res?.data?.role)) hasPermission = true;
@@ -113,7 +115,7 @@ export default {
                 const type = match[2] === '精确' ? 'exact' : 'fuzzy';
 
                 db.prepare('INSERT OR REPLACE INTO group_bad_words (group_id, word, match_type) VALUES (?, ?, ?)').run(groupId, word, type);
-                refreshBadWordsCache(groupId); // 刷新缓存
+                refreshBadWordsCache(groupId); 
                 return `✅ 已添加违禁词：【${word}】，匹配模式：${type === 'exact' ? '精确' : '模糊'}。`;
             }
 
@@ -123,7 +125,7 @@ export default {
                 
                 const info = db.prepare('DELETE FROM group_bad_words WHERE group_id = ? AND word = ?').run(groupId, word);
                 if (info.changes > 0) {
-                    refreshBadWordsCache(groupId); // 刷新缓存
+                    refreshBadWordsCache(groupId); 
                     return `✅ 已删除违禁词：【${word}】。`;
                 }
                 return `⚠️ 违禁词【${word}】不存在。`;
@@ -139,13 +141,13 @@ export default {
                 });
                 return reply.trim();
             }
+            // 🌟 锁 2：只要是管理指令，处理完直接 return，绝对不进入下面的检测！
             return false;
         }
 
         // ==========================================
         // 2. 违禁词检测
         // ==========================================
-        // 🌟 优化 2：先查违禁词列表，如果列表为空直接放行，别再发权限请求了！
         let badWords = badWordsCache.get(groupId);
         if (!badWords) {
             badWords = refreshBadWordsCache(groupId);
@@ -164,7 +166,6 @@ export default {
             }
         }
 
-        // 🌟 优化 3：如果没有触发违禁词，直接放行，千万别去查权限！
         if (!triggeredWord) return false;
 
         // ==========================================
@@ -176,7 +177,7 @@ export default {
         
         if (member && ['owner', 'admin'].includes(member.role)) {
             isExempt = true;
-        } else if (typeof getRole === 'function' && ['master', 'owner', 'admin'].includes(getRole(senderQQ))) {
+        } else if (typeof getRole === 'function' && ['master', 'owner', 'admin'].includes(getRole(senderQQ, msg.botId))) {
             isExempt = true;
         }
         
@@ -200,17 +201,79 @@ export default {
 
         const muteTime = config.mute_time || 600;
         let muteSuccess = false;
-        try {
-            const res = await globalThis.wsCall('set_group_ban', { group_id: Number(groupId), user_id: Number(senderQQ), duration: muteTime }, 3000, ws);
-            if (res.status === 'ok' || res.retcode === 0) muteSuccess = true;
-        } catch (e) {}
+        let failReason = '未知错误';
+
+        // 🌟 优化：如果目标本身就是群主，就别去调接口了，必定失败
+        if (member && member.role === 'owner') {
+            failReason = '目标为群主，无法禁言';
+        } else {
+            try {
+                // 🌟 优化：超时时间从 3 秒延长到 6 秒，防止 API 响应慢导致超时
+                const res = await globalThis.wsCall('set_group_ban', { 
+                    group_id: Number(groupId), 
+                    user_id: Number(senderQQ), 
+                    duration: Number(muteTime) 
+                }, 6000, ws);
+                
+                // 兼容多种成功返回值格式
+                if (res && (res.status === 'ok' || res.retcode === 0)) {
+                    muteSuccess = true;
+                } else if (res === null) {
+                    // 如果返回 null，当作成功处理（部分框架成功也返回null）
+                    muteSuccess = true;
+                } else {
+                    failReason = res?.msg || res?.wording || res?.message || JSON.stringify(res) || '接口超时无响应';
+                }
+            } catch (e) {
+                failReason = e.message || String(e);
+            }
+        }
 
         const avatarUrl = `https://q1.qlogo.cn/g?b=qq&nk=${senderQQ}&s=640`;
         const warnText = escapeHtml(config.warn_text);
-        const muteText = muteSuccess ? `禁言 ${Math.floor(muteTime / 60)} 分钟` : '禁言失败(权限不足)';
+        
+        // 🌟 如果失败，把真实的失败原因显示出来，而不是统一写“权限不足”
+        const muteText = muteSuccess ? `禁言 ${Math.floor(muteTime / 60)} 分钟` : `禁言失败(${failReason})`;
 
-        // ... [HTML 渲染部分完全保留你原来的，这里省略以节省篇幅] ...
-        const html = `...`; // 请把原来的 HTML 粘贴回来
+        const html = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="utf-8">
+            <style>
+                * { box-sizing: border-box; margin: 0; padding: 0; }
+                body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: transparent; display: inline-block; }
+                .card { background: linear-gradient(145deg, #2a1515, #1a0f0f); border-radius: 20px; width: 460px; padding: 24px; border: 1px solid rgba(255, 50, 50, 0.3); box-shadow: 0 15px 35px rgba(0, 0, 0, 0.5); position: relative; overflow: hidden; }
+                .card::before { content: ''; position: absolute; top: -50px; left: -50px; width: 150px; height: 150px; background: #F44336; filter: blur(80px); opacity: 0.25; z-index: 0; }
+                .content { position: relative; z-index: 1; display: flex; align-items: center; gap: 16px; }
+                .avatar-box { flex-shrink: 0; width: 64px; height: 64px; border-radius: 50%; border: 2px solid #F44336; box-shadow: 0 0 15px rgba(244,67,54,0.4); overflow: hidden; position: relative; }
+                .avatar-box img { width: 100%; height: 100%; object-fit: cover; }
+                .badge { position: absolute; bottom: -2px; right: -2px; background: #1e1e24; border-radius: 50%; width: 24px; height: 24px; display: flex; justify-content: center; align-items: center; font-size: 14px; border: 1px solid rgba(255,255,255,0.1); }
+                .text-box { flex: 1; display: flex; flex-direction: column; gap: 6px; }
+                .title { font-size: 18px; color: #ff5252; font-weight: bold; }
+                .desc { font-size: 14px; color: #ddd; line-height: 1.5; }
+                .highlight { color: #ff5252; font-weight: bold; }
+                .footer { font-size: 12px; color: #777; margin-top: 12px; text-align: right; }
+            </style>
+        </head>
+        <body>
+            <div class="card">
+                <div class="content">
+                    <div class="avatar-box">
+                        <img src="${avatarUrl}">
+                        <div class="badge">🚫</div>
+                    </div>
+                    <div class="text-box">
+                        <div class="title">⚠️ 触发违禁词警告</div>
+                        <div class="desc">用户 <span class="highlight">${escapeHtml(senderName)}</span> 发送了违规内容。<br>触发词：<span class="highlight">${escapeHtml(triggeredWord)}</span><br>处罚：<span class="highlight">${muteText}</span></div>
+                        <div class="desc" style="font-size:12px; margin-top:4px;">${warnText}</div>
+                    </div>
+                </div>
+                <div class="footer">XingYuanBot 自动风控</div>
+            </div>
+        </body>
+        </html>
+        `;
 
         let imageBuffer = null;
         try {
@@ -226,7 +289,7 @@ export default {
                     await browserLaunching;
                 }
                 const ctx = await warnBrowser.newContext({ deviceScaleFactor: 2, viewport: { width: 600, height: 800 } });
-                try { // 🌟 修复：确保 Context 必定关闭
+                try { 
                     const page = await ctx.newPage();
                     await page.setContent(html, { waitUntil: 'networkidle' });
                     const el = await page.$('.card');
@@ -242,7 +305,7 @@ export default {
         if (imageBuffer) {
             globalThis.bot.send({ chatId: Number(groupId), isGroup: true, file: imageBuffer, botId: msg.botId, _ws: ws });
         } else {
-            globalThis.bot.send({ chatId: Number(groupId), isGroup: true, content: `⚠️ 警告：${senderName} 触发违禁词【${triggeredWord}】，已被${muteText}！`, botId: msg.botId, _ws: ws });
+            globalThis.bot.send({ chatId: Number(groupId), isGroup: true, content: `⚠️ 警告：${senderName} 触发违禁词【${triggeredWord}】，处罚：${muteText}！`, botId: msg.botId, _ws: ws });
         }
 
         return true; 

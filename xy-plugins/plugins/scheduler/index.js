@@ -3,7 +3,7 @@ import path from 'path';
 import yaml from 'yaml';
 import Database from 'better-sqlite3';
 import { fileURLToPath } from 'url';
-import { getRole } from '../../../xy-config/config/permissions.js'; // 🌟 引入权限校验
+import { getRole } from '../../../xy-config/config/permissions.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CONFIG_PATH = path.join(__dirname, 'config.yaml');
@@ -59,7 +59,6 @@ setInterval(async () => {
         const tasks = db.prepare('SELECT * FROM scheduler_tasks WHERE last_run_date IS NULL OR last_run_date != ?').all(todayStr);
         if (tasks.length === 0) return;
 
-        // 🌟 修复 1：使用框架暴露的 activeWs，绝对不瞎猜
         const activeWs = globalThis.activeWs || globalThis._ws;
                          
         if (!activeWs || activeWs.readyState !== 1) {
@@ -83,17 +82,18 @@ setInterval(async () => {
                 let userRole = 'member';
                 let userNick = '定时任务';
                 
-                // 🌟 修复 2：干掉 HTTP 请求，改用 wsCall，并指定使用 activeWs
                 try {
                     const res = await globalThis.wsCall('get_group_member_info', { 
                         group_id: Number(task.group_id), 
                         user_id: Number(task.creator_id) 
                     }, 5000, activeWs);
                     
-                    if (res && res.data) {
-                        if (res.data.role) userRole = res.data.role; 
-                        if (res.data.card || res.data.nickname) {
-                            userNick = res.data.card || res.data.nickname;
+                    // 🌟 修复 1：兼容不同框架的嵌套层级
+                    const info = res?.data || res;
+                    if (info) {
+                        if (info.role) userRole = info.role; 
+                        if (info.card || info.nickname) {
+                            userNick = info.card || info.nickname;
                         }
                     }
                 } catch (e) {
@@ -106,7 +106,7 @@ setInterval(async () => {
                     post_type: "message",
                     message_type: "group",
                     sub_type: "normal",
-                    message_id: Date.now() + Math.floor(Math.random() * 1000), // 🌟 修复 3：用时间戳防止撞车
+                    message_id: Date.now() + Math.floor(Math.random() * 1000),
                     group_id: Number(task.group_id),
                     user_id: Number(task.creator_id),
                     raw_message: task.command,
@@ -122,10 +122,8 @@ setInterval(async () => {
 
                 if (typeof globalThis.handleIncomingMessage === 'function') {
                     try {
-                        // 注入伪消息，触发主框架逻辑
                         globalThis.handleIncomingMessage(JSON.stringify(fakeMsgData), activeWs, globalThis._registry, globalThis._plugins);
                         
-                        // 标记执行
                         if (task.is_loop === 1) {
                             db.prepare('UPDATE scheduler_tasks SET last_run_date = ? WHERE id = ?').run(todayStr, task.id);
                         } else {
@@ -149,7 +147,6 @@ setInterval(async () => {
 export default {
     name: '定时调度',
 
-    // 🌟 修复 4：严格匹配，防止“添加定时器”之类误触
     match(text) {
         if (typeof text !== 'string') return false;
         return /^(添加定时|查看定时|删除定时)(\s+|$)/.test(text.trim());
@@ -159,9 +156,11 @@ export default {
         const pureText = (msg.pureText || "").trim();
         const chatId = msg.chatId;
         const senderQQ = msg.senderQQ;
+        const botId = msg.botId; // 🌟 获取当前 botId
 
-        // 🌟 修复 5：权限校验（仅群管及以上）
-        const isMaster = getRole(senderQQ) === 'master' || getRole(senderQQ) === 'owner';
+        // 🌟 修复 2：带上 botId，让权限系统更精准（如果有的话）
+        const userRole = typeof getRole === 'function' ? getRole(senderQQ, botId) : 'member';
+        const isMaster = userRole === 'master' || userRole === 'owner';
         const isGroupAdmin = msg.sender?.role === 'admin' || msg.sender?.role === 'owner';
         
         if (!isMaster && !isGroupAdmin) {

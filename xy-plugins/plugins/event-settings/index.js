@@ -4,9 +4,8 @@ import Database from 'better-sqlite3';
 import { getRole } from '../../../xy-config/config/permissions.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DB_PATH = path.join(__dirname, 'group_data.db'); // 建在当前插件目录下
+const DB_PATH = path.join(__dirname, 'group_data.db'); 
 
-// 🌟 抛弃魔法，直接使用 better-sqlite3
 const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
 db.exec(`
@@ -18,7 +17,6 @@ db.exec(`
   )
 `);
 
-// 🌟 统一获取配置函数
 function getGroupSettings(groupId) {
     const gid = String(groupId);
     try {
@@ -37,34 +35,34 @@ function getGroupSettings(groupId) {
 export default {
     name: '群事件配置',
     
-    // 纯指令匹配
     match(text) {
         if (!text || typeof text !== 'string') return false;
-        const cmd = text.trim();
+        const cmd = text.trim(); // 🌟 信任框架，直接 trim
         return /^(开启|关闭)(入群|退群|踢人)提示$/.test(cmd) || cmd === '群事件设置';
     },
 
     async handle(msg) {
         if (!msg.isGroup) return '❌ 该指令仅限在群聊中使用。';
 
-        const cmd = (msg.pureText || "").trim();
+        const cmd = (msg.pureText || "").trim(); // 🌟 信任框架，直接 trim
         const groupId = String(msg.chatId);
         const senderQQ = String(msg.senderQQ);
-        const ws = msg._ws; // 🌟 获取当前连接的 ws
+        const ws = msg._ws || globalThis.activeWs; 
 
         // 权限校验
         let isAdmin = false;
         try {
-            // 🌟 核心修复 1：干掉 fetch，改用 wsCall 并精准传递 ws
             const res = await globalThis.wsCall('get_group_member_info', { 
                 group_id: Number(groupId), 
                 user_id: Number(senderQQ) 
             }, 3000, ws);
             
-            if (['owner', 'admin'].includes(res?.data?.role)) isAdmin = true;
+            // 兼容层级
+            const role = res?.data?.role || res?.role;
+            if (['owner', 'admin'].includes(role)) isAdmin = true;
         } catch(e) {}
         
-        const configRole = typeof getRole === 'function' ? getRole(senderQQ) : 'member';
+        const configRole = typeof getRole === 'function' ? getRole(senderQQ, msg.botId) : 'member';
         const hasPermission = isAdmin || ['master', 'owner', 'admin'].includes(configRole);
 
         if (!hasPermission) return '❌ 权限不足：仅群主、管理员或主人可配置。';
@@ -87,8 +85,6 @@ export default {
             if (type === '踢人') field = 'kick';
 
             try {
-                // 🌟 核心修复 2：使用 SQLite 的 UPSERT 语法 (ON CONFLICT)
-                // 如果记录存在，只更新对应的字段；如果不存在，则插入并设置默认值
                 db.prepare(`
                     INSERT INTO group_event_settings (group_id, welcome, decrease, kick)
                     VALUES (@gid, @welcome, @decrease, @kick)

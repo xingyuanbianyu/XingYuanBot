@@ -225,16 +225,19 @@ function parseMessage(cqString) {
   return result.length > 0 ? result : [{ type: 'text', data: { text: cqString } }];
 }
 
-// 🌟 补充 ws 参数
+// 🌟 核心修复：兼容多种返回格式的 API 查询
 async function getGroupName(groupId, userId, ws) {
   if (typeof globalThis.wsCall !== 'function') return null;
   try {
-    const data = await globalThis.wsCall('get_group_member_info', {
+    const res = await globalThis.wsCall('get_group_member_info', {
       group_id: Number(groupId),
       user_id: Number(userId),
       no_cache: false
     }, 3000, ws);
-    return data.data?.card || data.data?.nickname || null;
+    
+    // 🌟 兼容不同框架的返回层级 (NapCat/LLOneBot 等)
+    const memberInfo = res?.data || res;
+    return memberInfo?.card || memberInfo?.nickname || null;
   } catch (e) { 
     return null; 
   }
@@ -252,7 +255,6 @@ export default {
     const groupSets = getGroupSettings(e.groupId);
     if (!groupSets) return; 
 
-    // 🌟 核心修复 2：精准获取当前的 ws，多号不串台
     const raw = e.raw || {};
     const selfId = String(e.selfId || raw.self_id || '');
     let ws = conn?.ws;
@@ -281,35 +283,43 @@ export default {
     const targetQQ = String(e.userId || raw.target_id || raw.user_id || '未知');
     const operatorQQ = String(e.operatorId || raw.operator_id || '');
 
+    // 最终赋给文本的变量
     let qqValue = targetQQ;
     let opValue = operatorQQ || '系统';
 
     let cachedMembers = [];
     if (typeof globalThis.getGroupMembers === 'function') {
-        cachedMembers = globalThis.getGroupMembers(e.groupId) || [];
+        try {
+            cachedMembers = globalThis.getGroupMembers(e.groupId) || [];
+        } catch (err) {}
     }
 
-    if (key === 'decrease' || key === 'kick') {
-        qqValue = raw.nickname || raw.card || qqValue;
-        const cachedUser = cachedMembers.find(m => String(m.user_id) === targetQQ);
-        if (cachedUser) qqValue = cachedUser.card || cachedUser.nickname || qqValue;
+    // 1. 尝试从 raw 事件自带的数据中提取昵称/名片
+    if (raw.nickname) qqValue = raw.nickname;
+    if (raw.card) qqValue = raw.card;
+    if (raw.operator_nickname) opValue = raw.operator_nickname;
+    if (raw.operator_card) opValue = raw.operator_card;
 
-        if (operatorQQ && operatorQQ !== '0') {
-            opValue = raw.operator_nickname || raw.operator_card || opValue;
-            const cachedOp = cachedMembers.find(m => String(m.user_id) === operatorQQ);
-            if (cachedOp) opValue = cachedOp.card || cachedOp.nickname || opValue;
-        }
-    } else {
-        const cachedUser = cachedMembers.find(m => String(m.user_id) === targetQQ);
-        const cachedUserCard = cachedUser ? (cachedUser.card || cachedUser.nickname) : null;
-        
-        qqValue = raw.nickname || raw.card || cachedUserCard || await getGroupName(e.groupId, targetQQ, ws) || targetQQ;
-        
-        if (operatorQQ && operatorQQ !== '0') {
-            const cachedOp = cachedMembers.find(m => String(m.user_id) === operatorQQ);
-            const cachedOpCard = cachedOp ? (cachedOp.card || cachedOp.nickname) : null;
-            opValue = raw.operator_nickname || raw.operator_card || cachedOpCard || await getGroupName(e.groupId, operatorQQ, ws) || operatorQQ;
-        }
+    // 2. 从本地缓存中提取（最准）
+    const cachedUser = cachedMembers.find(m => String(m.user_id) === targetQQ);
+    if (cachedUser) qqValue = cachedUser.card || cachedUser.nickname || qqValue;
+
+    if (operatorQQ && operatorQQ !== '0') {
+        const cachedOp = cachedMembers.find(m => String(m.user_id) === operatorQQ);
+        if (cachedOp) opValue = cachedOp.card || cachedOp.nickname || opValue;
+    }
+
+    // 3. 如果退群事件中 raw 和缓存都没拿到昵称，或者入群事件拿不到，尝试调用 API
+    // 退群 (kick/decrease) 时 QQ 服务器通常已经查不到此人，只能依赖缓存，查不到就保留 QQ 号。
+    // 入群 (welcome) 时，API 可以查到，所以这里补一个兜底 API 查询。
+    if (qqValue === targetQQ && (key === 'welcome' || !cachedUser)) {
+        const apiName = await getGroupName(e.groupId, targetQQ, ws);
+        if (apiName) qqValue = apiName;
+    }
+
+    if (opValue === operatorQQ && operatorQQ && operatorQQ !== '0') {
+        const apiOpName = await getGroupName(e.groupId, operatorQQ, ws);
+        if (apiOpName) opValue = apiOpName;
     }
 
     const msg = render(key, { qq: qqValue, operator: opValue });
@@ -324,14 +334,14 @@ export default {
                     message_type: 'group',
                     group_id: Number(e.groupId),
                     message: [{ type: 'image', data: { file: `base64://${imageBuffer.toString('base64')}` } }],
-                }, 10000, ws); // 🌟 传入 ws
+                }, 10000, ws);
                 console.log(`✅ [${key}] → 群 ${e.groupId}: [图片卡片已发送]`);
             } else {
                 await globalThis.wsCall('send_msg', {
                     message_type: 'group',
                     group_id: Number(e.groupId),
                     message: parseMessage(msg),
-                }, 10000, ws); // 🌟 传入 ws
+                }, 10000, ws);
                 console.log(`✅ [${key}] → 群 ${e.groupId} (文本降级): ${msg}`);
             }
         } catch (err) {

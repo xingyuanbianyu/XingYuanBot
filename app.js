@@ -20,6 +20,9 @@ import { initSender, bindWs, sendMessage } from './xy-bot/sender.js';
 
 globalThis.print = globalThis.print || console.log;
 
+// 🌟 核心修复 1：全局挂载 sleep 兜底，防止未加载时崩溃
+globalThis.sleep = globalThis.sleep || ((ms) => new Promise(r => setTimeout(r, ms)));
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const dataDir = join(__dirname, 'xy-data');
 const configPath = join(__dirname, 'xy-config', 'config.yaml');
@@ -29,6 +32,14 @@ const ownerFilePath = join(__dirname, 'xy-data', 'owner.json');
 const plugins = [];
 let reloadLock = false;
 let watchTimer = null;
+
+// ==================== 安全全局拦截 ====================
+process.on('unhandledRejection', (reason, promise) => {
+    globalThis.print(`🚨 [未捕获的Promise异常] ${reason?.stack || reason}`);
+});
+process.on('uncaughtException', (err) => {
+    globalThis.print(`🚨 [致命的未捕获异常] ${err?.stack || err.message}`);
+});
 
 // 端口清理函数
 function killPort(port) {
@@ -68,7 +79,6 @@ const sharedState = {
 globalThis.sharedState = sharedState; 
 globalThis._commandAliases = new Map();
 
-// 🌟 全局挂载配置对象
 const cmdConfig = { enable: true, prefixes: ['#', '/'] };
 const whitelistConfig = { enable: false, list: [] };
 
@@ -76,7 +86,6 @@ globalThis._cmdConfig = cmdConfig;
 globalThis._whitelistConfig = whitelistConfig;
 globalThis._priorityPlugins = new Set(); 
 
-// 递归寻找 alias.db
 function findAliasDb(dir) {
     if (!fs.existsSync(dir)) return null;
     const files = fs.readdirSync(dir);
@@ -116,15 +125,12 @@ async function loadCommandAliases() {
     }
 }
 
-// 🌟 核心新增：将加载函数暴露给全局，供 alias-mapping 插件修改后主动呼叫！
 globalThis._loadCommandAliases = loadCommandAliases;
-
 globalThis._groupMembersCache = new Map();
 globalThis.getGroupMembers = (groupId) => {
     return globalThis._groupMembersCache.get(String(groupId)) || [];
 };
 
-// 🌟 暗雷修复 1：加入防抖锁，防止群友频繁进退群导致 API 被刷爆
 const cacheUpdateLocks = new Set();
 async function updateGroupMembersCache(groupId, ws = null) {
     if (typeof globalThis.wsCall !== 'function') return;
@@ -136,12 +142,14 @@ async function updateGroupMembersCache(groupId, ws = null) {
     try {
         const res = await globalThis.wsCall('get_group_member_list', { group_id: gid, no_cache: true }, 15000, ws || globalThis.activeWs);
         if (res && res.status === 'ok' && Array.isArray(res.data)) {
+            await sleep(1000); // 🌟 使用全局兜底的 sleep
             const cleanList = res.data.map(m => ({
                 user_id: m.user_id,
                 nickname: m.nickname,
                 card: m.card || '',
                 role: m.role || 'member'
             }));
+            await sleep(1000);
             globalThis._groupMembersCache.set(String(gid), cleanList);
             globalThis.print(`🔄 [缓存更新] 群 ${gid} 成员列表已刷新，共 ${cleanList.length} 人。`);
         }
@@ -162,12 +170,12 @@ async function initAllGroupMembersCache(ws = null, retries = 3) {
             globalThis.print(`🔍 [系统] 发现 ${groups.length} 个群，开始拉取成员信息...`);
             for (const group of groups) {
                 await updateGroupMembersCache(group.group_id, ws);
-                await new Promise(r => setTimeout(r, 800)); 
+                await globalThis.sleep(500); // 🌟 使用全局兜底的 sleep
             }
             globalThis.print('✅ [系统] 所有群成员数据缓存完毕！');
         } else if (retries > 0) {
             globalThis.print(`⚠️ [系统] 全量缓存失败，${retries} 次重试中...`);
-            await new Promise(r => setTimeout(r, 3000));
+            await globalThis.sleep(3000);
             await initAllGroupMembersCache(ws, retries - 1);
         }
     } catch (e) {
@@ -229,7 +237,6 @@ async function handleIncomingMessage(rawData, ws, registry, pluginsArg) {
             }
         }
 
-        // 进群/退群等事件更新缓存
         if (parsed.post_type === 'notice' && ['group_increase', 'group_decrease', 'group_kick', 'group_card'].includes(parsed.notice_type)) {
             if (parsed.group_id) updateGroupMembersCache(parsed.group_id, ws);
         }
@@ -237,7 +244,7 @@ async function handleIncomingMessage(rawData, ws, registry, pluginsArg) {
         const stdMsg = registry.parseMessage(parsed);
         if (!stdMsg) return;
 
-        if (parsed.post_type === 'message') {
+        if (parsed.post_type === 'message' || parsed.post_type === 'message_sent') {
           const senderQQ = stdMsg.senderId;
           const chatId = stdMsg.chatId;
           const isGroup = stdMsg.chatType === 'group';
@@ -304,6 +311,9 @@ async function handleIncomingMessage(rawData, ws, registry, pluginsArg) {
             }
           }
 
+          // 🌟 修复 2：补充 messageId 和 isSelf 的兜底提取，防止部分适配器不传导致插件失效
+          const isSelfMsg = stdMsg.isSelf !== undefined ? stdMsg.isSelf : (parsed.user_id === parsed.self_id);
+
           const msg = {
             type: 'receive',
             post_type: parsed.post_type,
@@ -317,11 +327,14 @@ async function handleIncomingMessage(rawData, ws, registry, pluginsArg) {
             pureText: stdMsg.pureText,       
             content: stdMsg.content,         
             message: stdMsg.messageSegments, 
+            message_id: parsed.message_id,   // 🌟 补全 message_id 顶层字段
+            messageId: parsed.message_id,    // 🌟 补全 messageId 驼峰字段
             raw_message: parsed.raw_message,
             rawData: parsed,
             botId: stdMsg.selfId ? String(stdMsg.selfId) : null,
             _ws: ws,
-            _isMapped: stdMsg._isMapped
+            _isMapped: stdMsg._isMapped,
+            isSelf: isSelfMsg                 // 🌟 安全传递 isSelf
           };
 
           const context = { 
@@ -332,7 +345,9 @@ async function handleIncomingMessage(rawData, ws, registry, pluginsArg) {
           };
           await dispatcher.dispatch(msg, activePlugins, context);
         }
-    } catch (e) { globalThis.print(`[处理异常] ${e.message}`); }
+    } catch (e) { 
+        globalThis.print(`[处理异常] ${e.stack || e.message}`); 
+    }
 }
 
 function loadCmdConfig() {
@@ -499,8 +514,19 @@ main().catch(e => {
   process.exit(1);
 });
 
+// ==================== 优雅退出 ====================
 function cleanupAllInstances() {
     globalThis.print('⚠️ 接收到退出信号，正在清理所有子进程...');
+    
+    for (const [botId, ws] of sharedState.botIdToWs.entries()) {
+        try {
+            if (ws) ws.close();
+        } catch(e) {}
+        sharedState.botIdToWs.delete(botId);
+    }
+    sharedState.wsToBotId.clear();
+    sharedState.wsPool.clear();
+
     for (const [id, inst] of sharedState.instances) {
         try {
             if (inst.child && !inst.child.killed) {
@@ -508,6 +534,7 @@ function cleanupAllInstances() {
             }
         } catch(e) {}
     }
+    
     process.exit(0);
 }
 

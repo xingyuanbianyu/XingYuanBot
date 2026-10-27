@@ -1,12 +1,12 @@
 {
   "enable": true,
   "entries": [
-    "index.js", 
-    "db.cjs", 
-    "http.cjs", 
-    "log.js", 
-    "msg.js", 
-    "ws_clinet.js", 
+    "index.js",
+    "log.js",
+    "db.cjs",
+    "http.cjs",
+    "msg.js",
+    "ws_client.js",
     "ws_server.js"
   ]
 }

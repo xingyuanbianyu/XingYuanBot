@@ -76,10 +76,18 @@ export default {
                 message: messages 
             }, 15000, msg._ws); 
             
-            if (res && res.retcode !== 0) {
-                 return `❌ 发送失败，NapCat 返回错误: ${res.msg || res.wording}`;
+            // 🌟 修复：兼容各种框架的返回值，防止误报错
+            let isSuccess = true;
+            if (res) {
+                if (res.status && res.status !== 'ok') isSuccess = false;
+                if (res.retcode !== undefined && res.retcode !== 0 && res.retcode !== 1) isSuccess = false;
             }
-            return true;
+            
+            if (!isSuccess) {
+                 const errDetail = res?.msg || res?.wording || res?.message || JSON.stringify(res) || '未知错误';
+                 return `❌ 发送失败，NapCat 返回错误: ${errDetail}`;
+            }
+            return true; // 成功则不回复任何多余文字，让图片安静地发出去
         } catch (e) {
             globalThis.print(`[赞助系统] ❌ 发送抛出异常: ${e.message}`);
             return `❌ 发送失败: ${e.message}`;

@@ -4,7 +4,5 @@ bot:
 
 # 🌟 新增的文案配置
 messages:
-  # @别人点赞成功的回复
-  like_reply: "✨ 已成功为 {name} 点赞 {times} 次！"
-  # 赞自己成功的回复
-  like_self_reply: "✨ 点赞成功！[目标: 你] [关系: {relation}] 本次共为你点赞 {times} 次~"
+  like_reply: "✨ 叮！已成功为 {name}({qq}) 点赞 {times} 次！我们是 {relation} 哦~"
+  like_self_reply: "💖 点赞成功！[目标: 你] [关系: {relation}] 本次共为你点赞 {times} 次~"

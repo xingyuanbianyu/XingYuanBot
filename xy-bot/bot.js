@@ -1,7 +1,7 @@
 // xy-bot/bot.js
-import readline from 'readline';
+import repl from 'repl';
 
-// ANSI 颜色转义码，让终端更好看
+// ANSI 颜色转义码
 const color = {
   green: (s) => `\x1b[32m${s}\x1b[0m`,
   red: (s) => `\x1b[31m${s}\x1b[0m`,
@@ -10,24 +10,57 @@ const color = {
   gray: (s) => `\x1b[90m${s}\x1b[0m`,
 };
 
+let isProcessing = false;
+
 export function startBot() {
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
+  // 使用 repl 模块，原生支持上下键历史记录和 Tab 补全
+  const rl = repl.start({
     prompt: color.cyan('\nXingYuanBot > '),
+    eval: (cmd, context, filename, callback) => {
+      handleCommand(cmd.trim(), rl).then(() => callback(null, undefined));
+    }
   });
 
-  console.log(color.green('✅ Bot 核心已就绪'));
-  console.log(color.gray('💡 输入 help 查看可用命令'));
-  rl.prompt();
+  // 🌟 核心修复：防止后台日志打断用户的输入，同时兼容 pm2 等非 TTY 环境
+  const originalPrint = globalThis.print || console.log;
+  globalThis.print = (...args) => {
+    if (process.stdout.isTTY && typeof process.stdout.clearLine === 'function') {
+      // 在真实终端环境下：清除当前行 -> 打印日志 -> 重绘输入提示符
+      process.stdout.clearLine(0);
+      process.stdout.cursorTo(0);
+      originalPrint(...args);
+      rl.displayPrompt();
+    } else {
+      // 在 pm2、docker 或 重定向到文件 等非 TTY 环境下：直接打印，绝不清行
+      originalPrint(...args);
+    }
+  };
 
-  rl.on('line', async (line) => {
-    const input = line.trim();
-    if (!input) return rl.prompt();
+  console.log(color.green('✅ Bot 核心已就绪'));
+  console.log(color.gray('💡 输入 help 查看可用命令，按上下键可翻阅历史'));
+
+  async function handleCommand(input, replInstance) {
+    if (!input) return;
+    
+    if (isProcessing) {
+      console.log(color.yellow('⏳ 上一条指令仍在处理中，请稍候...'));
+      return;
+    }
 
     const [cmd, ...args] = input.split(/\s+/);
     const command = cmd.toLowerCase();
     const arg1 = args[0]?.toLowerCase();
+
+    // 退出逻辑特殊处理，不需要解锁
+    if (command === 'quit' || command === 'exit') {
+      console.log(color.yellow('👋 正在关闭 XingYuanBot，请稍候...'));
+      replInstance.close();
+      isProcessing = true; 
+      process.emit('SIGINT'); 
+      return;
+    }
+
+    isProcessing = true;
 
     try {
       switch (command) {
@@ -44,9 +77,7 @@ export function startBot() {
         case 'status': {
           console.log(color.cyan('\n📊 当前系统状态:'));
           
-          // 通过全局变量获取状态，不再依赖单一的 client 参数
           const activeWs = globalThis.activeWs;
-          const wsPool = globalThis.sharedState?.wsPool;
           const botIdToWs = globalThis.sharedState?.botIdToWs;
           
           if (activeWs && activeWs.readyState === 1) {
@@ -73,9 +104,16 @@ export function startBot() {
           const categories = {};
           
           for (const p of plugins) {
-            if (!categories[p.category]) categories[p.category] = [];
+            if (!p || !p.name) continue;
+            const cat = p.category || '未分类';
+            if (!categories[cat]) categories[cat] = [];
+            
             const codeStr = p.code !== undefined ? color.yellow(`[代号:${p.code}]`) : '';
-            categories[p.category].push(`${p.name} ${codeStr}`);
+            categories[cat].push(`${p.name} ${codeStr}`);
+          }
+
+          if (Object.keys(categories).length === 0) {
+             console.log(color.gray('  (暂无插件)'));
           }
 
           for (const [cat, names] of Object.entries(categories)) {
@@ -96,7 +134,7 @@ export function startBot() {
           } else {
             if (typeof globalThis._xyReloadPlugins === 'function') {
               console.log(color.yellow('🔄 正在全量热重载插件...'));
-              await globalThis._xyReloadPlugins(); // 传空参数默认全量重载
+              await globalThis._xyReloadPlugins();
               console.log(color.green('✅ 插件全量重载完毕'));
             } else {
               console.log(color.red('⚠️ 全局未挂载 _xyReloadPlugins 方法'));
@@ -106,15 +144,12 @@ export function startBot() {
 
         case 'clear':
         case 'cls':
-          console.clear();
-          break;
-
-        case 'quit':
-        case 'exit':
-          console.log(color.yellow('👋 正在关闭 XingYuanBot...'));
-          rl.close();
-          // 优先触发优雅退出信号，让 main.js 里的 cleanupAllInstances 执行
-          process.kill(process.pid, 'SIGINT'); 
+          // 🌟 加个小保护，防止在 pm2 下 console.clear 把日志清空导致什么都看不到
+          if (process.stdout.isTTY) {
+            console.clear();
+          } else {
+            console.log('当前处于后台运行环境，无法清屏。');
+          }
           break;
 
         default:
@@ -123,8 +158,17 @@ export function startBot() {
       }
     } catch (e) {
       console.log(color.red(`❌ 执行命令 [${cmd}] 时发生异常: ${e.message}`));
+    } finally {
+      // 解锁
+      isProcessing = false;
     }
+  }
 
-    rl.prompt();
+  // 处理 Ctrl+C 直接退出
+  rl.on('SIGINT', () => {
+    console.log(color.yellow('\n👋 接收到 Ctrl+C，正在关闭...'));
+    rl.close();
+    isProcessing = true;
+    process.emit('SIGINT');
   });
 }

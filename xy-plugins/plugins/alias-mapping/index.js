@@ -42,25 +42,26 @@ function cleanPrefix(str) {
 export default {
     name: '指令映射',
     
+    // 🌟 修复 1：匹配前先洗掉前缀，防止用户发 "#指令映射" 匹配不到
     match(text) {
         if (!text || typeof text !== 'string') return false;
-        const cmd = text.trim();
+        const cmd = cleanPrefix(text);
         return cmd.startsWith('指令映射') || cmd.startsWith('删除映射') || cmd.startsWith('查看映射');
     },
 
     async handle(msg) {
         if (!msg.isGroup) return false;
 
-        let cmd = (msg.pureText || "").trim();
+        // 🌟 修复 2：这里也洗掉前缀
+        let cmd = cleanPrefix(msg.pureText || "");
         const groupId = String(msg.chatId);
         const senderQQ = String(msg.senderQQ);
-        const ws = msg._ws; 
+        const ws = msg._ws || globalThis.activeWs; // 🌟 补上兜底
         
         let isMaster = false;      
         let isLocalAdmin = false;  
         
         if (typeof getRole === 'function') {
-            // 🌟 补上 botId
             const role = getRole(senderQQ, msg.botId);
             if (['master', 'owner'].includes(role)) isMaster = true;
             if (['admin'].includes(role)) isLocalAdmin = true;
@@ -72,7 +73,9 @@ export default {
                     group_id: Number(groupId), 
                     user_id: Number(senderQQ) 
                 }, 3000, ws);
-                if (['owner', 'admin'].includes(res?.data?.role)) isLocalAdmin = true;
+                // 🌟 修复 3：兼容不带 data 的返回层级
+                const role = res?.data?.role || res?.role;
+                if (['owner', 'admin'].includes(role)) isLocalAdmin = true;
             } catch (e) {}
         }
 
@@ -85,7 +88,7 @@ export default {
         // ==========================================
         if (cmd.startsWith('指令映射')) {
             const rawArgs = cmd.replace('指令映射', '').trim();
-            if (!rawArgs) return '⚠️ 用法：指令映射 [原指令] [新指令]';
+            if (!rawArgs) return '⚠️ 用法：指令映射 [原指令系列] [新指令名]\n💡 如果指令带空格，请用引号包裹新指令名，例如：\n指令映射 $禁言 {QQ} 5分钟 "天选之人"';
 
             let original, alias;
             const quoteMatch = rawArgs.match(/^(.*?)\s*["'](.*?)["']$/);
@@ -110,14 +113,12 @@ export default {
 
             if (isMaster) {
                 db.prepare('INSERT OR REPLACE INTO group_aliases (group_id, alias_cmd, original_cmd) VALUES (?, ?, ?)').run('global', alias, original);
-                // 🌟 呼叫主框架重新读取数据库
                 if (typeof globalThis._loadCommandAliases === 'function') await globalThis._loadCommandAliases();
                 
                 const overridden = existingGlobal ? `（覆盖了旧全局映射 ${existingGlobal.original_cmd}）` : '';
                 return `✅ 【全局映射】成功！${overridden}\n(您是大主人) 任何群发送【${alias}】都会执行【${original}】。`;
             } else if (isLocalAdmin) {
                 db.prepare('INSERT OR REPLACE INTO group_aliases (group_id, alias_cmd, original_cmd) VALUES (?, ?, ?)').run(groupId, alias, original);
-                // 🌟 呼叫主框架重新读取数据库
                 if (typeof globalThis._loadCommandAliases === 'function') await globalThis._loadCommandAliases();
                 
                 const overridden = existingLocal ? `（覆盖了旧局部映射 ${existingLocal.original_cmd}）` : '';
@@ -147,7 +148,6 @@ export default {
             }
 
             if (deleted) {
-                // 🌟 呼叫主框架重新读取数据库
                 if (typeof globalThis._loadCommandAliases === 'function') await globalThis._loadCommandAliases();
                 return `✅ 已删除【${delType}】映射【${alias}】。`;
             }

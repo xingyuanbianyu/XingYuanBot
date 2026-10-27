@@ -3,6 +3,9 @@ import yaml from 'yaml';
 import { fileURLToPath } from 'url';
 import path from 'path';
 
+// 🌟 引入数据库权限管理接口
+import { setLocalPermission, removeLocalPermission, listUserPermissions } from '../../../xy-config/config/permissions.js';
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CONFIG_PATH = path.resolve(__dirname, '../../../xy-config/config/config.yaml');
 
@@ -51,25 +54,20 @@ function ensurePermissions(config) {
     if (!config.permissions.owner_permission) config.permissions.owner_permission = {};
 }
 
-// 🌟 核心解析函数：自动识别 Bot号、目标QQ
 function parseArgs(args, targetQQFromAt = null) {
-    let rest = args.slice(1); // 去掉指令头
-    
-    // 过滤掉 @文本，防止污染参数
+    let rest = args.slice(1);
     rest = rest.filter(a => !a.includes('@') && !a.includes('[CQ:at'));
 
     let botId = null;
     let targetQQ = targetQQFromAt;
 
     if (targetQQFromAt) {
-        // 如果有 at，剩下的参数只能是 Bot 号
         if (rest.length >= 1) botId = String(rest[0]);
     } else {
-        // 纯手动输入，按数量判定
         if (rest.length === 1) {
-            targetQQ = String(rest[0]); // 1个参数 -> 全局操作目标
+            targetQQ = String(rest[0]); 
         } else if (rest.length >= 2) {
-            botId = String(rest[0]);    // 2个参数 -> 第1个是Bot号，第2个是目标
+            botId = String(rest[0]);    
             targetQQ = String(rest[1]);
         }
     }
@@ -111,7 +109,7 @@ export default {
         return null;
     },
 
-    // 1. 首次验证（全局大主人）
+    // 1. 首次验证（不变）
     async handleSetMaster(args, senderQQ) {
         const config = loadConfig();
         if (!config) return '❌ 配置文件不存在';
@@ -152,7 +150,7 @@ export default {
         return '📌 格式：\n  首次：设置主人\n  验证：设置主人 <你的QQ号> <验证码>';
     },
 
-    // 2. 设置局部大主人
+    // 2. 设置局部大主人 (改为写数据库)
     async handleSetBigOwner(args, senderQQ, targetQQFromAt) {
         const config = loadConfig();
         if (String(senderQQ) !== String(getMasterQQ(config))) return '❌ 只有全局大主人可以设置局部大主人';
@@ -161,22 +159,19 @@ export default {
         if (!botId) return '❌ 必须提供 Bot 号\n格式：设置大主人 [Bot号] [目标QQ/at]';
         if (!targetQQ || !/^\d{5,12}$/.test(targetQQ)) return '❌ 目标 QQ 格式不正确';
 
-        ensurePermissions(config);
-        let current = config.permissions.owners[targetQQ];
+        // 检查是否已经是全局身份
+        const current = config.permissions?.owners?.[targetQQ];
         if (current === true) return `❌ ${targetQQ} 已经是全局大主人，无需设置局部`;
         if (current === false) return `❌ ${targetQQ} 已经是全局小主人，如需局部提升，请先删除全局身份`;
 
-        let botArray = Array.isArray(current) ? current : [];
-        // 移除旧的同 Bot 记录，重新推入 master
-        botArray = botArray.filter(item => String(item).split(':')[0] !== botId);
-        botArray.push(`${botId}:master`);
+        // 🌟 写入 SQLite 数据库
+        const res = setLocalPermission(targetQQ, botId, 'master');
+        if (!res.success) return `❌ 设置失败: ${res.error}`;
         
-        config.permissions.owners[targetQQ] = botArray;
-        saveConfig(config);
         return `✅ 已成功将 ${targetQQ} 设置为 Bot [${botId}] 的【局部大主人】`;
     },
 
-    // 3. 设置全局/局部小主人
+    // 3. 设置全局/局部小主人 (局部写数据库)
     async handleSetOwner(args, senderQQ, targetQQFromAt) {
         const config = loadConfig();
         if (String(senderQQ) !== String(getMasterQQ(config))) return '❌ 只有全局大主人可以设置小主人';
@@ -185,30 +180,27 @@ export default {
         if (!targetQQ || !/^\d{5,12}$/.test(targetQQ)) return '❌ 目标 QQ 格式不正确';
 
         ensurePermissions(config);
-        let current = config.permissions.owners[targetQQ];
+        const current = config.permissions?.owners?.[targetQQ];
         if (current === true) return `❌ ${targetQQ} 已经是全局大主人，无法降级`;
 
         if (!botId) {
-            // 设全局小主人
-            if (Array.isArray(current)) return `❌ ${targetQQ} 已经是局部主人，请先删除其局部身份`;
+            // 设全局小主人 (写 YAML)
             config.permissions.owners[targetQQ] = false;
             config.permissions.owner_permission[targetQQ] = 0;
             saveConfig(config);
             return `✅ 已将 ${targetQQ} 设置为【全局小主人】\n（默认权限关闭，使用"权限状态 开 ${targetQQ}"开启）`;
         } else {
-            // 设局部小主人
+            // 设局部小主人 (写 SQLite)
             if (current === false) return `❌ ${targetQQ} 已经是全局小主人，请先删除全局身份`;
-            let botArray = Array.isArray(current) ? current : [];
-            botArray = botArray.filter(item => String(item).split(':')[0] !== botId);
-            botArray.push(`${botId}:owner`);
             
-            config.permissions.owners[targetQQ] = botArray;
-            saveConfig(config);
+            const res = setLocalPermission(targetQQ, botId, 'owner');
+            if (!res.success) return `❌ 设置失败: ${res.error}`;
+            
             return `✅ 已成功将 ${targetQQ} 设置为 Bot [${botId}] 的【局部小主人】`;
         }
     },
 
-    // 4. 删除全局/局部主人
+    // 4. 删除全局/局部主人 (局部删数据库)
     async handleRemoveOwner(args, senderQQ, targetQQFromAt) {
         const config = loadConfig();
         if (String(senderQQ) !== String(getMasterQQ(config))) return '❌ 只有全局大主人可以删除主人';
@@ -217,27 +209,21 @@ export default {
         if (!targetQQ) return '📌 格式：删除主人 [Bot号] [目标QQ/at]';
         if (targetQQ === String(getMasterQQ(config))) return '❌ 不能删除全局大主人的身份';
 
-        const owners = config.permissions?.owners || {};
-        if (owners[targetQQ] === undefined) return `❌ ${targetQQ} 不是主人`;
-
         if (!botId) {
             // 删除全局
+            const owners = config.permissions?.owners || {};
+            if (owners[targetQQ] === undefined) return `❌ ${targetQQ} 没有任何全局身份`;
+
             delete config.permissions.owners[targetQQ];
             if (config.permissions.owner_permission) delete config.permissions.owner_permission[targetQQ];
             saveConfig(config);
             return `✅ 已完全删除 ${targetQQ} 的所有全局身份`;
         } else {
-            // 删除局部
-            let current = owners[targetQQ];
-            if (!Array.isArray(current)) return `❌ ${targetQQ} 不是局部主人`;
+            // 删除局部 (从 SQLite 删)
+            const res = removeLocalPermission(targetQQ, botId);
+            if (!res.success) return `❌ 删除失败: ${res.error}`;
             
-            let newArray = current.filter(item => String(item).split(':')[0] !== botId);
-            if (newArray.length === current.length) return `❌ ${targetQQ} 不在 Bot [${botId}] 的局部权限列表中`;
-            
-            if (newArray.length === 0) delete config.permissions.owners[targetQQ];
-            else config.permissions.owners[targetQQ] = newArray;
-            
-            saveConfig(config);
+            // 注意：即使数据库里没数据，better-sqlite3 的 delete 也是成功，可以顺便查一下是否为空，或者直接返回成功。
             return `✅ 已删除 ${targetQQ} 在 Bot [${botId}] 的局部身份`;
         }
     },
@@ -259,39 +245,48 @@ export default {
         if (action === '查询') {
             const owners = config.permissions?.owners || {};
             const permStatus = config.permissions?.owner_permission || {};
-            if (owners[finalTarget] === undefined) return `❌ ${finalTarget} 不是主人`;
             
-            const val = owners[finalTarget];
+            const globalVal = owners[finalTarget];
+            // 🌟 从数据库拉取这个人的所有局部权限
+            const localList = listUserPermissions(finalTarget);
+
+            if (globalVal === undefined && localList.length === 0) return `❌ ${finalTarget} 不是主人`;
+
             let res = `📌 【${finalTarget}】的权限状态：\n`;
             
-            if (val === true) {
-                res += `👑 身份：全局大主人（所有 Bot 可用，永久开启）`;
-            } else if (val === false) {
+            // 全局状态
+            if (globalVal === true) {
+                res += `👑 全局身份：大主人（所有 Bot 可用）\n`;
+            } else if (globalVal === false) {
                 const status = Number(permStatus[finalTarget]) === 0 ? '❌ 关闭（无权限）' : '✅ 开启（全局小主人）';
-                res += `🌐 身份：全局小主人\n当前状态：${status}`;
-            } else if (Array.isArray(val)) {
-                res += `🎯 身份：局部主人\n`;
-                val.forEach(item => {
-                    const [b, r] = String(item).split(':');
-                    const rName = r === 'owner' ? '小主人' : '大主人';
-                    res += `  - Bot [${b}]：${rName}\n`;
+                res += `🌐 全局身份：小主人\n当前状态：${status}\n`;
+            }
+
+            // 局部状态
+            if (localList.length > 0) {
+                res += `🎯 局部身份：\n`;
+                localList.forEach(item => {
+                    const rName = item.role === 'owner' ? '小主人' : '大主人';
+                    res += `  - Bot [${item.bot_id}]：${rName}\n`;
                 });
 
                 if (botId) {
-                    const matched = val.find(item => String(item).split(':')[0] === botId);
-                    if (matched) res += `\n👉 在 Bot [${botId}] 上：✅ 有权 (${matched.includes('owner') ? '小主人' : '大主人'})`;
+                    const matched = localList.find(item => item.bot_id === botId);
+                    if (matched) res += `\n👉 在 Bot [${botId}] 上：✅ 有权 (${matched.role === 'owner' ? '小主人' : '大主人'})`;
                     else res += `\n👉 在 Bot [${botId}] 上：❌ 无权`;
                 }
+            } else if (botId) {
+                res += `\n👉 在 Bot [${botId}] 上：❌ 无权`;
             }
+            
             return res;
         }
 
-        // 开/关操作
+        // 开/关操作 (只能修改全局小主人的状态)
         if (String(senderQQ) !== String(masterQQ)) return '❌ 只有全局大主人可以修改权限状态';
         const owners = config.permissions?.owners || {};
-        if (owners[finalTarget] === undefined) return `❌ ${finalTarget} 不是主人`;
+        if (owners[finalTarget] === undefined) return `❌ ${finalTarget} 没有全局身份，无法操作`;
         if (owners[finalTarget] === true) return '❌ 全局大主人权限永久开启，无法修改';
-        if (Array.isArray(owners[finalTarget])) return '❌ 局部主人权限默认开启，无法修改';
 
         ensurePermissions(config);
         if (action === '开') {

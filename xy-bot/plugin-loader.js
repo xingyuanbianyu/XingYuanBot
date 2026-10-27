@@ -1,7 +1,7 @@
 import { readdirSync, statSync, readFileSync, existsSync } from 'fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'url';
-import { createHash } from 'crypto'; // 🌟 引入加密库计算内容指纹
+import { createHash } from 'crypto';
 
 const PLUGINS_DIR = resolve(process.cwd(), 'xy-plugins');
 const log = (msg) => (globalThis.print || console.log)(msg);
@@ -13,13 +13,12 @@ const pluginHandlers = new Map();
 const eventRegistrations = new Map(); 
 const pluginCacheMap = new Map();
 
-let globalCodeCounter = 0; 
-let isFirstLoad = true; 
+// 🌟 核心修改 1：删除了 globalCodeCounter，不再使用全局计数
 
 const pluginKeyOf = (category, name) => `${category}/${name}`;
 
 // ============================================================
-// 🌟 新增：计算文件内容的 SHA256 指纹
+// 🌟 计算文件内容的 SHA256 指纹（带 stat 预检优化）
 // ============================================================
 function getFileHash(filePath) {
     try {
@@ -40,7 +39,7 @@ function makeListener(pluginKey, eventName) {
     try {
       await current.onEvent({ event: eventName, ...payload }, { ws: null });
     } catch (err) {
-      console.error(`❌ [事件插件报错] ${pluginKey} -> ${eventName}:`, err.message);
+      console.error(`❌ [事件插件报错] ${pluginKey} -> ${eventName}:\n${err.stack || err.message}`);
     }
   };
 }
@@ -146,7 +145,6 @@ async function scanAndLoadAll(adapterRegistry) {
       }
 
       try {
-        // 🌟 核心替换：使用 Hash 比对代替时间戳
         const entryHash = getFileHash(entryPath);
         const ruleHash = getFileHash(rulePath);
         
@@ -160,7 +158,6 @@ async function scanAndLoadAll(adapterRegistry) {
 
         const cached = pluginCacheMap.get(pluginKey);
         
-        // 🌟 如果 Hash 完全一致，说明内容根本没变，直接复用，绝对不消耗代号
         if (cached && cached.entryHash === entryHash && cached.ruleHash === ruleHash) {
           plugins.push({ category: catName, name: dirName, rule, handler: cached.handler, code: cached.code });
           bindHandler(pluginKey, cached.handler);
@@ -168,21 +165,20 @@ async function scanAndLoadAll(adapterRegistry) {
           continue; 
         }
 
-        // 内容发生变化或全新插件
         const isNew = !cached;
         const handler = await importPluginModule(entryPath);
 
+        // 🌟 核心修改 2：基于自身旧代号 +1，首次加载给 0
         let currentCode = 0;
-        if (isFirstLoad) {
+        if (isNew) {
             currentCode = 0;
         } else {
-            if (globalCodeCounter === 0) globalCodeCounter = 1;
-            currentCode = globalCodeCounter++;
+            currentCode = (cached.code || 0) + 1;
         }
 
         pluginCacheMap.set(pluginKey, {
           code: currentCode,
-          entryHash: entryHash, // 🌟 存入 Hash
+          entryHash: entryHash,
           ruleHash: ruleHash,
           handler: handler,
           rule: rule
@@ -199,7 +195,7 @@ async function scanAndLoadAll(adapterRegistry) {
           log(`🔄 插件 [${catName}/${dirName}] 发现内容变更，已增量更新 (新代号: ${currentCode})`);
         }
       } catch (e) {
-        log(`❌ 插件 [${catName}/${dirName}] 加载失败: ${e.message}`);
+        log(`❌ 插件 [${catName}/${dirName}] 加载失败:\n${e.stack || e.message}`);
         errors.push(`${catName}/${dirName}: ${e.message}`);
         stat.failed++;
       }
@@ -213,7 +209,6 @@ async function scanAndLoadAll(adapterRegistry) {
     }
   }
 
-  isFirstLoad = false;
   return { plugins, errors, log: loadLog };
 }
 
@@ -250,12 +245,10 @@ export async function hotReloadPlugin(pluginNames, adapterRegistry) {
     const pluginKey = pluginKeyOf(p.category, p.name);
 
     try {
-      // 🌟 同样进行 Hash 校验
       const entryHash = getFileHash(entryPath);
       const ruleHash = getFileHash(rulePath);
       const cached = pluginCacheMap.get(pluginKey);
       
-      // 如果你没改代码，手动触发热重载，直接跳过
       if (cached && cached.entryHash === entryHash && cached.ruleHash === ruleHash) {
           log(`♻️ 插件 ${name} 内容未发生修改，跳过强制编译，保持原代号: ${cached.code}`);
           continue;
@@ -265,15 +258,15 @@ export async function hotReloadPlugin(pluginNames, adapterRegistry) {
       const handler = await importPluginModule(entryPath);
 
       if (typeof p.handler?.destroy === 'function') {
-        try { await p.handler.destroy(); } catch (e) {}
+        try { await p.handler.destroy(); } catch (e) { log(`⚠️ 插件 ${name} 的 destroy 执行异常: ${e.message}`); }
       }
 
       const oldEvents = new Set(p.handler?.events ?? []);
       const newEvents = new Set(handler?.events ?? []);
       const eventsChanged = oldEvents.size !== newEvents.size || [...newEvents].some(ev => !oldEvents.has(ev));
 
-      if (globalCodeCounter === 0) globalCodeCounter = 1;
-      const currentCode = globalCodeCounter++;
+      // 🌟 核心修改 3：取缓存中的当前代号 +1
+      const currentCode = (cached?.code || 0) + 1;
 
       p.handler = handler;
       p.code = currentCode;
@@ -293,7 +286,7 @@ export async function hotReloadPlugin(pluginNames, adapterRegistry) {
 
       log(`✅ 插件 ${name} 热重载成功！(新代号: ${currentCode})`);
     } catch (e) {
-      log(`❌ 插件 ${name} 热重载失败，已保留旧版本: ${e.message}`);
+      log(`❌ 插件 ${name} 热重载失败，已保留旧版本:\n${e.stack || e.message}`);
     }
   }
 }
@@ -307,7 +300,7 @@ export async function reloadAllPlugins(adapterRegistry = null) {
   const oldPlugins = _pluginsCache?.plugins ?? [];
   for (const p of oldPlugins) {
     if (typeof p.handler?.destroy === 'function') {
-      try { await p.handler.destroy(); } catch (e) {}
+      try { await p.handler.destroy(); } catch (e) { log(`⚠️ 插件 ${p.name} destroy 异常: ${e.message}`); }
     }
   }
 

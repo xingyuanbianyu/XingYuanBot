@@ -2,7 +2,6 @@ import { readdirSync, existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { pathToFileURL } from 'url';
 
-// 🌟 统一日志
 const log = (msg) => (globalThis.print || console.log)(msg);
 const logErr = (msg) => (globalThis.print || console.error)(msg);
 
@@ -11,8 +10,13 @@ export class AdapterRegistry {
     this.list = new Map();
   }
 
-  async scan(adaptersDir) {
+  /**
+   * 扫描适配器目录
+   */
+  async scan(adaptersDir, hotReload = false) {
     if (!existsSync(adaptersDir)) return;
+
+    const validAdapterNames = new Set();
 
     for (const entry of readdirSync(adaptersDir, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
@@ -26,44 +30,68 @@ export class AdapterRegistry {
       try {
         const meta = JSON.parse(readFileSync(cfgPath, 'utf8'));
         
-        // 检查名称冲突
+        if (!meta.name) {
+          logErr(`⚠️ [适配器] ${entry.name}/adapter.json 缺少 "name" 字段，已跳过`);
+          continue;
+        }
+
+        validAdapterNames.add(meta.name);
+
+        // 🌟 修复 1：如果是热重载，允许覆盖旧的适配器实例
         if (this.list.has(meta.name)) {
-            logErr(`⚠️ [适配器] 发现同名适配器 [${meta.name}]，将被忽略: ${entry.name}`);
-            continue;
+            if (!hotReload) {
+                logErr(`⚠️ [适配器] 发现同名适配器 [${meta.name}]，将被忽略: ${entry.name}`);
+                continue;
+            }
         }
 
         const entryPath = join(adapterPath, meta.entry || 'index.js');
+        const url = pathToFileURL(entryPath).href;
+        const entryUrl = hotReload ? `${url}?t=${Date.now()}` : url;
         
-        // 破除 ESM 缓存 (如果支持热重载适配器)
-        const entryUrl = pathToFileURL(entryPath).href + `?t=${Date.now()}`;
         const AdapterClass = (await import(entryUrl)).default;
 
-        if (!AdapterClass) {
-            logErr(`⚠️ [适配器] ${entry.name} 未导出 default 类`);
+        if (!AdapterClass || typeof AdapterClass !== 'function') {
+            logErr(`⚠️ [适配器] ${entry.name} 未导出 default class`);
             continue;
         }
 
         const instance = new AdapterClass(meta);
         instance.name = meta.name;
         instance.platform = meta.platform || 'unknown';
-        this.list.set(meta.name, instance);
         
+        this.list.set(meta.name, instance);
         log(`✅ [适配器] 加载 ${instance.name} (${instance.platform})`);
       } catch (e) {
-        logErr(`❌ [适配器] ${entry.name} 加载失败: ${e.message}`);
+        logErr(`❌ [适配器] ${entry.name} 加载失败: ${e.stack || e.message}`);
       }
+    }
+
+    // 🌟 修复 2：清理已被物理删除的旧适配器（幽灵适配器）
+    for (const existingName of this.list.keys()) {
+        if (!validAdapterNames.has(existingName)) {
+            log(`🗑️ [适配器] 移除已删除的适配器: ${existingName}`);
+            this.list.delete(existingName);
+        }
     }
   }
 
+  /**
+   * 挂载网络连接
+   */
   mountNetwork(connections) {
     if (!connections || connections.length === 0) return;
 
     for (const conn of connections) {
       for (const adapter of this.list.values()) {
+        if (conn.platform && adapter.platform !== conn.platform && adapter.platform !== 'all') {
+          continue; 
+        }
+
         if (typeof adapter.mount === 'function') {
           try {
             adapter.mount(conn);
-            log(`🔗 [适配器] ${adapter.name} 已挂载到 ${conn.role} 连接`);
+            log(`🔗 [适配器] ${adapter.name} 已挂载到 ${conn.role || conn.name || '未知'} 连接`);
           } catch (e) {
             logErr(`❌ [适配器] ${adapter.name} 挂载失败: ${e.message}`);
           }
@@ -79,37 +107,40 @@ export class AdapterRegistry {
     return null;
   }
 
-  // ============================================================
-  // 🌟 核心：统一消息解析入口，严格分离“消息”与“事件”
-  // ============================================================
   /**
-   * 根据原始数据寻找匹配的适配器，并转换为标准消息/事件
-   * @param {Object} parsed 原始 JSON 数据
-   * @returns {Object|null} 标准消息对象，无适配器匹配或发生事件则返回 null
+   * 统一消息解析入口
    */
   parseMessage(parsed) {
     for (const adapter of this.list.values()) {
+      // 🌟 修复 3：为每个适配器单独 try-catch，防止一个适配器崩溃影响其他适配器
       try {
         if (typeof adapter.match === 'function' && adapter.match(parsed)) {
+          
           const result = adapter.toStandard(parsed);
           
-          if (!result) return null; // 适配器解析失败或忽略此包
+          if (!result) return null; 
 
-          // 🌟 核心修复：拦截事件，主动触发 emitEvent！
+          // 🌟 修复 4：安全触发事件，防止 emitEvent 内的异常阻断主消息流
           if (result.type === 'notice' || result.type === 'request') {
-              if (typeof adapter.emitEvent === 'function') {
-                  // 触发事件，将消息分发给监听该事件的插件（如防撤回、入群验证）
-                  adapter.emitEvent(result.event, result);
+            if (typeof adapter.emitEvent === 'function') {
+              try {
+                // 如果 emitEvent 是异步的，加上 Promise.catch 防漏网之鱼
+                const p = adapter.emitEvent(result.event, result);
+                if (p && typeof p.catch === 'function') {
+                    p.catch(err => logErr(`❌ [事件分发] ${adapter.name} 执行异常: ${err.stack || err.message}`));
+                }
+              } catch (err) {
+                logErr(`❌ [事件分发] ${adapter.name} 同步执行异常: ${err.stack || err.message}`);
               }
-              // 返回 null，表示事件已被拦截，不需要交给 main.js 的消息主流程处理
-              return null; 
+            }
+            return null; 
           }
           
-          // 如果是普通消息，直接返回给 main.js 继续走后续流程
           return result;
         }
       } catch (e) {
-        logErr(`❌ [适配器] ${adapter.name} 解析消息失败: ${e.message}`);
+        logErr(`❌ [适配器] ${adapter.name} 解析数据时发生崩溃:\n${e.stack || e.message}`);
+        // 继续尝试下一个适配器，不直接 return
       }
     }
     return null;
