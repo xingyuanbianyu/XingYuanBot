@@ -22,37 +22,7 @@
 - 🚀 **全链路 WebSocket**：底层直连 WS，自带心跳保活、断线重连与 Token 鉴权，响应零延迟。
 - ♻️ **插件热重载**：修改插件代码后无需重启主控，终端输入 `reload` 即可增量更新。
 
-### 📦 插件开发示例
 
-在 `xy-plugins/` 下创建文件夹（例如 `hello`），并添加以下两个文件：
-
-**1. `rule.json` (插件配置)**
-```json
-{
-  "name": "你好世界",
-  "enabled": true,
-  "type": "command",
-  "entry": "index.js"
-}
-```
-```js
-export default {
-  name: '你好世界',
-
-  // 匹配规则：剥离前缀后的纯文本为“你好”时触发
-  match(text) {
-    return text === '你好';
-  },
-
-  // 处理逻辑
-  async handle(msg) {
-    return [
-      { type: 'at', data: { qq: msg.senderQQ } },
-      { type: 'text', data: { text: ' 你好！欢迎使用 XingYuanBot 4.0.0 🎉' } }
-    ];
-  }
-};
-```
 
 ## 🚀 快速开始
 

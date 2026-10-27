@@ -31,47 +31,43 @@
 
 ```
 xy-plugins/
-└── my-plugin/
-    ├── rule.json    # 插件描述文件（必须）
-    ├── index.js     # 插件入口文件（必须）
-    └── README.md    # 使用说明（推荐）
+└── XXX/
+        └─hello
+              ├── rule.json    # 插件描述文件（必须）
+              ├── index.js     # 插件入口文件（必须）
+              └── README.md    # 使用说明（推荐）
 ```
+### 📦 插件开发示例
 
-### rule.json
+在 `xy-plugins/` 下创建文件夹（例如 `hello`），并添加以下两个文件：
 
+**1. `rule.json` (插件配置)**
 ```json
 {
-  "name": "my-plugin",
-  "version": "1.0.0",
-  "author": "你的名字",
+  "name": "你好世界",
+  "enabled": true,
+  "type": "command",
   "entry": "index.js"
 }
 ```
-
-`entry` 字段指定入口文件名，不填则默认为 `index.js`。
-
-### 插件代码模板
-
-`plugin-loader.js` 会加载你的入口文件，需 `export default` 一个包含 `match` 和 `handle` 的对象：
-
-```javascript
+- index.js
+```js
 export default {
-  match: (text) => {
-    return text.startsWith('/hello')
+  name: '你好世界',
+
+  // 匹配规则：剥离前缀后的纯文本为“你好”时触发
+  match(text) {
+    return text === '你好';
   },
 
-  handle: async (msg) => {
-    // msg.text    - 消息内容
-    // msg.chatId  - 会话ID
-    // msg.isGroup - 是否群聊
-    // msg.senderName - 发送者昵称
-    // msg.senderQQ  - 发送者QQ号
-    // msg.role    - 发送者角色
-
-    console.log(`收到消息：${msg.text}，来自 ${msg.senderName}`)
-    // 发送回复：await adapter.sendMsg(msg.chatId, '你好！')
+  // 处理逻辑
+  async handle(msg) {
+    return [
+      { type: 'at', data: { qq: msg.senderQQ } },
+      { type: 'text', data: { text: ' 你好！欢迎使用 XingYuanBot 4.0.0 🎉' } }
+    ];
   }
-}
+};
 ```
 
 ## 制作共享库教程
