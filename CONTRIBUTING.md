@@ -39,7 +39,7 @@ xy-plugins/
 ```
 ### 📦 插件开发示例
 
-在 `xy-plugins/` 下创建文件夹（例如 `hello`），并添加以下两个文件：
+在 `xy-plugins/XXX/` 下创建文件夹（例如 `hello`），并添加以下两个文件：
 
 **1. `rule.json` (插件配置)**
 ```json
