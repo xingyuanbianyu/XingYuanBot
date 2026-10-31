@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import yaml from 'yaml';
 import os from 'os'; 
+import { exec } from 'child_process'; // 🌟 修复：把 exec 提上来
 import { fileURLToPath } from 'url';
 import { manageBlacklist } from '../../../xy-bot/blacklist.js';
 import { hasPermission, getRole } from '../../../xy-config/config/permissions.js';
@@ -14,7 +15,6 @@ const CONFIG_PATH = path.join(PROJECT_ROOT, 'xy-config/config.yaml');
 const MENU_PATH = path.join(__dirname, 'menu.json');
 const CACHE_DIR = path.join(PROJECT_ROOT, 'temp/cache');
 
-// 🌟 修复 1：状态浏览器变量与并发锁
 let statusBrowser = null;
 let statusBrowserLaunching = null;
 
@@ -66,16 +66,15 @@ function forceRefreshHelp(chatId, isGroup) {
     return deletedCount;
 }
 
+// 🌟 修复：用 Document 解析修改 YAML，防止注释被洗掉
 function updateYamlConfig(mutatorFn) {
     try {
-        const config = yaml.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) || {};
-        const resultMsg = mutatorFn(config);
+        const content = fs.readFileSync(CONFIG_PATH, 'utf8');
+        const doc = yaml.parseDocument(content);
+        const resultMsg = mutatorFn(doc);
         
         if (resultMsg && !resultMsg.startsWith('❌') && !resultMsg.startsWith('⚠️')) {
-            const tmpPath = CONFIG_PATH + '.tmp';
-            fs.writeFileSync(tmpPath, yaml.stringify(config), 'utf8');
-            fs.renameSync(tmpPath, CONFIG_PATH); 
-            
+            fs.writeFileSync(CONFIG_PATH, doc.toString(), 'utf8'); 
             if (typeof globalThis._configReload === 'function') globalThis._configReload();
         }
         return resultMsg;
@@ -244,32 +243,38 @@ export default {
         if (/^(启用|禁用|查询)前缀$/.test(pureText) || pureText.startsWith('添加前缀') || pureText.startsWith('删除前缀')) {
             if (!isMaster) return '❌ 权限不足：仅大主人可管理前缀。';
             
-            return updateYamlConfig((config) => {
-                if (!config.command_prefix) config.command_prefix = { enable: true, prefixes: ['#', '/'] };
-                const cp = config.command_prefix;
+            return updateYamlConfig((doc) => {
+                const cp = doc.get('command_prefix') || doc.set('command_prefix', doc.createNode({ enable: true, prefixes: ['#', '/'] })).get('command_prefix');
 
                 if (pureText === '查询前缀') {
-                    return `⚙️ 当前前缀配置：\n状态：${cp.enable ? '✅ 启用' : '❌ 禁用'}\n前缀列表：${cp.prefixes?.join(' , ') || '空'}`;
+                    const isEnable = cp.get('enable') !== false;
+                    const prefixes = cp.get('prefixes')?.toJSON() || [];
+                    return `⚙️ 当前前缀配置：\n状态：${isEnable ? '✅ 启用' : '❌ 禁用'}\n前缀列表：${prefixes.join(' , ') || '空'}`;
                 }
-                if (pureText === '启用前缀') { cp.enable = true; return '✅ 已启用指令前缀。'; }
-                if (pureText === '禁用前缀') { cp.enable = false; return '✅ 已禁用指令前缀。'; }
+                if (pureText === '启用前缀') { cp.set('enable', true); return '✅ 已启用指令前缀。'; }
+                if (pureText === '禁用前缀') { cp.set('enable', false); return '✅ 已禁用指令前缀。'; }
 
                 if (pureText.startsWith('添加前缀')) {
                     const newPrefix = pureText.replace('添加前缀', '').trim();
                     if (!newPrefix) return '⚠️ 用法：添加前缀 !';
                     if (newPrefix.length > 3) return '❌ 前缀过长：最多 3 个字符。';
-                    if (!cp.prefixes) cp.prefixes = [];
-                    if (cp.prefixes.includes(newPrefix)) return '⚠️ 该前缀已经存在了。';
-                    cp.prefixes.push(newPrefix);
-                    return `✅ 已添加前缀 [${newPrefix}]，当前：${cp.prefixes.join(' , ')}`;
+                    
+                    let prefixes = cp.get('prefixes')?.toJSON() || [];
+                    if (prefixes.includes(newPrefix)) return '⚠️ 该前缀已经存在了。';
+                    prefixes.push(newPrefix);
+                    cp.set('prefixes', prefixes);
+                    return `✅ 已添加前缀 [${newPrefix}]，当前：${prefixes.join(' , ')}`;
                 }
 
                 if (pureText.startsWith('删除前缀')) {
                     const delPrefix = pureText.replace('删除前缀', '').trim();
                     if (!delPrefix) return '⚠️ 用法：删除前缀 !';
-                    if (!cp.prefixes || !cp.prefixes.includes(delPrefix)) return '⚠️ 该前缀不存在。';
-                    cp.prefixes = cp.prefixes.filter(p => p !== delPrefix);
-                    return `✅ 已删除前缀 [${delPrefix}]，当前：${cp.prefixes.join(' , ') || '空'}`;
+                    
+                    let prefixes = cp.get('prefixes')?.toJSON() || [];
+                    if (!prefixes.includes(delPrefix)) return '⚠️ 该前缀不存在。';
+                    prefixes = prefixes.filter(p => p !== delPrefix);
+                    cp.set('prefixes', prefixes);
+                    return `✅ 已删除前缀 [${delPrefix}]，当前：${prefixes.join(' , ') || '空'}`;
                 }
             });
         }
@@ -278,30 +283,34 @@ export default {
         if (pureText === '启用指令白名单' || pureText === '禁用指令白名单' || pureText === '查询指令白名单' || pureText.startsWith('添加指令白名单') || pureText.startsWith('删除指令白名单')) {
             if (!isMaster) return '❌ 权限不足：仅大主人可管理指令白名单。';
 
-            return updateYamlConfig((config) => {
-                if (!config.whitelist) config.whitelist = { enable: false, list: [] };
-                const wl = config.whitelist;
+            return updateYamlConfig((doc) => {
+                const wl = doc.get('whitelist') || doc.set('whitelist', doc.createNode({ enable: false, list: [] })).get('whitelist');
 
                 if (pureText === '查询指令白名单') {
-                    return `🛡️ 当前免前缀指令白名单：\n状态：${wl.enable ? '✅ 启用' : '❌ 禁用'}\n特权指令：${wl.list?.join(' , ') || '空'}`;
+                    const isEnable = wl.get('enable') === true;
+                    const list = wl.get('list')?.toJSON() || [];
+                    return `🛡️ 当前免前缀指令白名单：\n状态：${isEnable ? '✅ 启用' : '❌ 禁用'}\n特权指令：${list.join(' , ') || '空'}`;
                 }
-                if (pureText === '启用指令白名单') { wl.enable = true; return '✅ 已启用指令白名单。'; }
-                if (pureText === '禁用指令白名单') { wl.enable = false; return '✅ 已禁用指令白名单。'; }
+                if (pureText === '启用指令白名单') { wl.set('enable', true); return '✅ 已启用指令白名单。'; }
+                if (pureText === '禁用指令白名单') { wl.set('enable', false); return '✅ 已禁用指令白名单。'; }
 
                 if (pureText.startsWith('添加指令白名单')) {
                     const newCmd = pureText.replace('添加指令白名单', '').trim();
                     if (!newCmd) return '⚠️ 用法：添加指令白名单 帮助';
-                    if (!wl.list) wl.list = [];
-                    if (wl.list.includes(newCmd)) return '⚠️ 该指令已经在白名单中了。';
-                    wl.list.push(newCmd);
+                    let list = wl.get('list')?.toJSON() || [];
+                    if (list.includes(newCmd)) return '⚠️ 该指令已经在白名单中了。';
+                    list.push(newCmd);
+                    wl.set('list', list);
                     return `✅ 已将 [${newCmd}] 加入白名单。`;
                 }
 
                 if (pureText.startsWith('删除指令白名单')) {
                     const delCmd = pureText.replace('删除指令白名单', '').trim();
                     if (!delCmd) return '⚠️ 用法：删除指令白名单 帮助';
-                    if (!wl.list || !wl.list.includes(delCmd)) return '⚠️ 该指令不在白名单中。';
-                    wl.list = wl.list.filter(c => c !== delCmd);
+                    let list = wl.get('list')?.toJSON() || [];
+                    if (!list.includes(delCmd)) return '⚠️ 该指令不在白名单中。';
+                    list = list.filter(c => c !== delCmd);
+                    wl.set('list', list);
                     return `✅ 已将 [${delCmd}] 移出白名单。`;
                 }
             });
@@ -309,7 +318,7 @@ export default {
 
         // 8. 状态 (带完整 HTML 面板)
         if (pureText === '状态') {
-          if (!isOwner && !hasPermission(senderId, 'admin', botId)) return '❌ 权限不足。';
+          if (!isOwner && !hasPermission(senderId, 'member', botId)) return '❌ 权限不足。';
           
           const mem = process.memoryUsage();
           const totalMem = os.totalmem();
@@ -333,7 +342,6 @@ export default {
           let page = null;
           let context = null;
           try {
-              // 🌟 修复 2：动态兼容 Playwright 和 Puppeteer
               let chromium = null;
               try { chromium = (await import('playwright')).chromium; } catch (e) {
                   try { chromium = (await import('puppeteer')).default || (await import('puppeteer')); } catch (e2) {}
@@ -371,22 +379,29 @@ export default {
           }
         }
 
-        // 9. 重启
+        // ==========================================
+        // 🌟 9. 重启 (完美交接给 script.py)
+        // ==========================================
         if (pureText === '重启') {
           if (!isOwner) return '❌ 权限不足。';
-          setTimeout(async () => {
-            const { spawn } = await import('child_process');
-            const pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
-            const scriptPath = path.join(PROJECT_ROOT, 'restart.py'); 
+          
+          setTimeout(() => {
+            globalThis.print(`🔄 [系统] 接收到远程重启指令，正在交给 script.py 处理...`);
+            const scriptPath = path.join(PROJECT_ROOT, 'script.py');
             
-            const pyProcess = spawn(pythonCmd, [scriptPath, process.pid.toString()], {
-              detached: true,
-              stdio: 'ignore',
-              cwd: PROJECT_ROOT 
-            });
-            pyProcess.unref();
-            setTimeout(() => { process.exit(0); }, 1500);
+            if (fs.existsSync(scriptPath)) {
+                // 传入当前 PID 和 -d 参数，让脚本后台拉起新进程
+                exec(`python3 ${scriptPath} ${process.pid}`, (err) => {
+                    if (err) globalThis.print(`❌ [系统] 调用 script.py 失败: ${err.message}`);
+                });
+                // 留出 1.5 秒让 script.py 接收指令，然后本进程自行了断
+                setTimeout(() => process.exit(0), 1500);
+            } else {
+                globalThis.print('⚠️ [系统] 未找到 script.py，强制退出进程...');
+                process.exit(0);
+            }
           }, 500);
+          
           return '🔷 Bot 正在重启，请稍候...';
         }
 
@@ -405,11 +420,13 @@ export default {
           }
         }
 
-        // 11. 退出
+        // ==========================================
+        // 🌟 11. 退出 (直接杀进程)
+        // ==========================================
         if (pureText === '退出') {
           if (!isOwner) return '❌ 权限不足。';
           setTimeout(() => { process.exit(0); }, 1000);
-          return '🔷 Bot已退出。';
+          return '🔷 收到退出指令，Bot 正在关闭...';
         }
 
         return null;

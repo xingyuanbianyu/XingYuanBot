@@ -28,7 +28,7 @@ const pendingRequests = new Map();
 const userBlastTracker = new Map();
 const groupBlastTracker = new Map();
 
-// 🌟 统一 API 成功判断 (防 null 报错)
+// 🌟 统一 API 成功判断
 function isApiSuccess(res) {
     if (res === null || res === undefined) return true; 
     if (typeof res === 'object') {
@@ -37,7 +37,6 @@ function isApiSuccess(res) {
     return false;
 }
 
-// 🌟 统一提取 API 错误信息
 function getApiError(res) {
     if (!res) return '接口无返回(超时或未响应)';
     return res?.msg || res?.message || res?.wording || JSON.stringify(res) || '未知错误';
@@ -46,19 +45,13 @@ function getApiError(res) {
 setInterval(() => {
     const now = Date.now();
     for (const [id, req] of pendingRequests.entries()) {
-        if (now - req.createTime > 10 * 60 * 1000) {
-            pendingRequests.delete(id);
-        }
+        if (now - req.createTime > 10 * 60 * 1000) pendingRequests.delete(id);
     }
     for (const [key, timestamps] of userBlastTracker.entries()) {
-        if (timestamps.length === 0 || now - timestamps[timestamps.length - 1] > 5 * 60 * 1000) {
-            userBlastTracker.delete(key);
-        }
+        if (timestamps.length === 0 || now - timestamps[timestamps.length - 1] > 5 * 60 * 1000) userBlastTracker.delete(key);
     }
     for (const [gid, timestamps] of groupBlastTracker.entries()) {
-        if (timestamps.length === 0 || now - timestamps[timestamps.length - 1] > 5 * 60 * 1000) {
-            groupBlastTracker.delete(gid);
-        }
+        if (timestamps.length === 0 || now - timestamps[timestamps.length - 1] > 5 * 60 * 1000) groupBlastTracker.delete(gid);
     }
 }, 60 * 1000);
 
@@ -80,7 +73,6 @@ function checkIsBanned(groupId, userId) {
         readDb = new Database(targetPath, { readonly: true, fileMustExist: true });
         const tableExists = readDb.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='group_reject_list'`).get();
         if (!tableExists) return false;
-        
         const row = readDb.prepare('SELECT user_id FROM group_reject_list WHERE group_id = ? AND user_id = ?').get(String(groupId), String(userId));
         return !!row; 
     } catch (e) {
@@ -106,6 +98,7 @@ function addToBlacklist(groupId, userId, nickname, reason) {
     let writeDb = null;
     try {
         writeDb = new Database(targetPath);
+        writeDb.pragma('busy_timeout = 2000'); // 🌟 增加写锁等待
         writeDb.pragma('journal_mode = WAL');
         writeDb.prepare(`CREATE TABLE IF NOT EXISTS group_reject_list (
             group_id TEXT, user_id TEXT, nickname TEXT, create_time INTEGER, PRIMARY KEY(group_id, user_id)
@@ -129,18 +122,14 @@ export default {
             enabled: 0, auto_process: 0, auto_answers: [],
             anti_blast_enabled: 1, blast_max_count: 5, blast_time_window: 60
         };
-        
         try {
             const row = db.prepare('SELECT * FROM request_settings WHERE group_id = ?').get(String(groupId));
             if (row) {
                 let answers = [];
                 try {
                     const rawAns = row.auto_answer || '[]';
-                    if (rawAns.startsWith('[')) {
-                        answers = JSON.parse(rawAns);
-                    } else if (rawAns) {
-                        answers = [rawAns];
-                    }
+                    if (rawAns.startsWith('[')) answers = JSON.parse(rawAns);
+                    else if (rawAns) answers = [rawAns];
                 } catch(e) { answers = []; }
 
                 return {
@@ -160,9 +149,7 @@ export default {
         try {
             const gid = String(groupId);
             let storeValue = value;
-            if (key === 'auto_answer' && Array.isArray(value)) {
-                storeValue = JSON.stringify(value);
-            }
+            if (key === 'auto_answer' && Array.isArray(value)) storeValue = JSON.stringify(value);
             
             db.prepare(`
                 INSERT INTO request_settings (group_id, ${key}) VALUES (?, ?)
@@ -192,21 +179,25 @@ export default {
 
         const settings = this.getGroupSettings(groupId);
 
-        let nickname = '未知';
-        try {
-            const info = await globalThis.wsCall('get_stranger_info', { user_id: Number(userId) }, 3000, ws);
-            nickname = info?.data?.nickname || info?.nickname || nickname;
-        } catch(e) {}
+        // 🌟 修复核心：三段式获取昵称，杜绝“未知”
+        let nickname = raw.nickname || raw.sender?.nickname || '';
+        
+        // 如果事件里没带，去查接口
+        if (!nickname && typeof globalThis.wsCall === 'function') {
+            try {
+                const info = await globalThis.wsCall('get_stranger_info', { user_id: Number(userId), no_cache: false }, 3000, ws);
+                nickname = info?.data?.nickname || info?.nickname || '';
+            } catch(e) {}
+        }
+        // 最终兜底
+        if (!nickname) nickname = '神秘人';
 
         const avatarUrl = `https://q1.qlogo.cn/g?b=qq&nk=${userId}&s=640`;
 
-        // ==========================================
         // 第一道防线：精准防爆破
-        // ==========================================
         if (settings.anti_blast_enabled === 1) {
             const trackerKey = `${groupId}_${userId}`;
             let userTimestamps = userBlastTracker.get(trackerKey) || [];
-            
             userTimestamps = userTimestamps.filter(t => now - t < settings.blast_time_window * 1000);
             userTimestamps.push(now);
             userBlastTracker.set(trackerKey, userTimestamps);
@@ -240,9 +231,7 @@ export default {
             }
         }
 
-        // ==========================================
         // 第二道防线：黑名单自动秒拒
-        // ==========================================
         const isBanned = checkIsBanned(groupId, userId);
         if (isBanned) {
             try {
@@ -251,41 +240,46 @@ export default {
             return; 
         }
 
-        // ==========================================
         // 第三道防线：常规入群逻辑
-        // ==========================================
         if (settings.enabled !== 1) return;
 
         let botRole = 'member';
         try {
-            const info = await globalThis.wsCall('get_group_member_info', { group_id: Number(groupId), user_id: globalThis.botInfo?.qq }, 3000, ws);
-            botRole = info?.data?.role || info?.role || 'member'; // 🌟 兼容层级
+            const info = await globalThis.wsCall('get_group_member_info', { group_id: String(groupId), user_id: String(globalThis.botInfo?.qq) }, 3000, ws);
+            botRole = info?.data?.role || info?.role || 'member';
         } catch(e) {}
         
         if (botRole !== 'owner' && botRole !== 'admin') return;
 
-        // 🌟 核心：多答案匹配
-        if (settings.auto_process === 1 && settings.auto_answers.length > 0) {
+        // 🌟 自动处理：无答案 = 全放行；有答案 = 按答案匹配
+        if (settings.auto_process === 1) {
+            const hasAnswers = settings.auto_answers.length > 0;
             const lowerComment = comment.toLowerCase();
-            const isMatch = settings.auto_answers.some(ans => ans && lowerComment.includes(ans.toLowerCase()));
-            
+            const isMatch = hasAnswers
+                ? settings.auto_answers.some(ans => ans && lowerComment.includes(ans.toLowerCase()))
+                : true;
+
             try {
                 await globalThis.wsCall('set_group_add_request', {
                     flag: flag, sub_type: raw.sub_type, approve: isMatch, reason: isMatch ? '' : '入群附言验证错误'
                 }, 3000, ws);
 
-                const tipMsg = isMatch 
-                    ? `🤖 已自动同意 ${nickname}(${userId}) 的入群申请。(附言验证通过)`
-                    : `🤖 已自动拒绝 ${nickname}(${userId}) 的入群申请。(附言错误)`;
+                const displayComment = comment ? `[${comment}]` : '[无附言]';
+                let tipMsg;
+                if (!hasAnswers) {
+                    tipMsg = `🤖 已自动同意 ${nickname}(${userId}) 的入群申请。\n📝 附言：${displayComment} (无答案模式，直接放行)`;
+                } else if (isMatch) {
+                    tipMsg = `🤖 已自动同意 ${nickname}(${userId}) 的入群申请。\n📝 附言：${displayComment} (验证通过)`;
+                } else {
+                    tipMsg = `🤖 已自动拒绝 ${nickname}(${userId}) 的入群申请。\n📝 附言：${displayComment} (答案错误)`;
+                }
 
                 await globalThis.wsCall('send_group_msg', { group_id: Number(groupId), message: [{ type: 'text', data: { text: tipMsg } }] }, 3000, ws);
                 return; 
             } catch (err) {}
         }
 
-        // ==========================================
         // 发送审批通知
-        // ==========================================
         const noticeMsg = [
             { type: 'image', data: { file: avatarUrl } },
             { type: 'text', data: { text: `\n📥 收到新的入群申请：\n` } },
@@ -295,11 +289,10 @@ export default {
 
         try {
             const sendRes = await globalThis.wsCall('send_group_msg', { group_id: Number(groupId), message: noticeMsg }, 5000, ws);
-            // 🌟 兼容层级
             const sentMessageId = sendRes?.data?.message_id || sendRes?.message_id;
             if (sentMessageId) {
                 pendingRequests.set(String(sentMessageId), { 
-                    groupId, userId, flag, subType: raw.sub_type, createTime: Date.now() 
+                    groupId, userId, nickname, flag, subType: raw.sub_type, createTime: Date.now() 
                 });
             }
         } catch (e) {
@@ -331,9 +324,7 @@ export default {
         const senderQQ = msg.senderQQ;
         const ws = msg._ws || globalThis.activeWs; 
 
-        // ==========================================
         // 同意/拒绝 的静默处理
-        // ==========================================
         if (cmd === '同意' || cmd === '拒绝') {
             let replyId = null;
             if (Array.isArray(msg.message)) {
@@ -343,7 +334,6 @@ export default {
                 }
             }
 
-            // 如果没引用任何消息，说明不是审批操作，直接静默跳过
             if (!replyId) return false;
 
             const requestInfo = pendingRequests.get(String(replyId));
@@ -355,10 +345,16 @@ export default {
                     flag: requestInfo.flag, sub_type: requestInfo.subType, approve: isApprove, reason: isApprove ? '' : '管理员拒绝了你的入群申请'
                 }, 5000, ws); 
 
-                // 🌟 修复：使用 isApiSuccess 防 null 报错
                 if (isApiSuccess(res)) {
                     pendingRequests.delete(String(replyId));
-                    return isApprove ? `✅ 已同意 ${requestInfo.userId} 的入群申请。` : `✅ 已拒绝 ${requestInfo.userId} 的入群申请。`;
+                    
+                    const displayTarget = (requestInfo.nickname && requestInfo.nickname !== '未知') 
+                        ? `${requestInfo.nickname}(${requestInfo.userId})` 
+                        : requestInfo.userId;
+
+                    return isApprove 
+                        ? `✅ 已同意 ${displayTarget} 的入群申请。` 
+                        : `✅ 已拒绝 ${displayTarget} 的入群申请。`;
                 } else {
                     return `❌ 操作失败：${getApiError(res)}`;
                 }
@@ -367,13 +363,11 @@ export default {
             }
         }
 
-        // ==========================================
         // 其他管理指令的权限校验
-        // ==========================================
         let hasPermission = false;
         try {
-            const res = await globalThis.wsCall('get_group_member_info', { group_id: Number(groupId), user_id: Number(senderQQ) }, 3000, ws);
-            const role = res?.data?.role || res?.role; // 🌟 兼容层级
+            const res = await globalThis.wsCall('get_group_member_info', { group_id: String(groupId), user_id: String(senderQQ) }, 3000, ws);
+            const role = res?.data?.role || res?.role; 
             if (['owner', 'admin'].includes(role)) hasPermission = true;
         } catch (e) {}
         
@@ -403,8 +397,10 @@ export default {
             if (answers.includes(answer)) return `⚠️ 答案【${answer}】已存在，无需重复添加。`;
 
             answers.push(answer);
-            this.setGroupSetting(groupId, 'auto_answer', answers);
-            return `✅ 已成功添加入群答案：【${answer}】\n(当前共 ${answers.length} 个答案)`;
+            if (!this.setGroupSetting(groupId, 'auto_answer', answers)) {
+                return '❌ 保存失败，请稍后重试。';
+            }
+            return `✅ 已成功添加入群答案：【${answer}】\n(当前共 ${answers.length} 个答案)\n💡 自动处理将按答案匹配，不再全放行。`;
         }
 
         if (cmd.startsWith('删除入群答案')) {
@@ -418,12 +414,16 @@ export default {
             if (index >= answers.length) return '⚠️ 索引越界：找不到该答案，请先发送 查看入群答案。';
 
             const removed = answers.splice(index, 1)[0];
-            this.setGroupSetting(groupId, 'auto_answer', answers);
+            if (!this.setGroupSetting(groupId, 'auto_answer', answers)) {
+                return '❌ 保存失败，请稍后重试。';
+            }
             return `✅ 已成功删除答案：【${removed}】\n(当前剩余 ${answers.length} 个答案)`;
         }
 
         if (cmd === '清空入群答案') {
-            this.setGroupSetting(groupId, 'auto_answer', []);
+            if (!this.setGroupSetting(groupId, 'auto_answer', [])) {
+                return '❌ 保存失败，请稍后重试。';
+            }
             return '✅ 已清空本群所有入群答案。';
         }
 
@@ -433,7 +433,7 @@ export default {
         }
         if (cmd === '开启防爆破') {
             this.setGroupSetting(groupId, 'anti_blast_enabled', 1);
-            return '✅ 已开启防爆破保护。';
+            return '✅ 已开启本群防爆破保护。';
         }
 
         if (cmd === '开启入群申请' || cmd === '关闭入群申请') {
@@ -444,11 +444,15 @@ export default {
 
         if (cmd === '开启自动处理' || cmd === '关闭自动处理') {
             const enable = cmd === '开启自动处理';
-            this.setGroupSetting(groupId, 'auto_process', enable ? 1 : 0);
+            if (!this.setGroupSetting(groupId, 'auto_process', enable ? 1 : 0)) {
+                return '❌ 设置写入失败，请稍后重试。';
+            }
             if (enable) {
                 const settings = this.getGroupSettings(groupId);
-                if (settings.auto_answers.length === 0) return '⚠️ 已开启自动处理，但尚未设置答案。请发送：添加入群答案 [内容]';
-                return `✅ 已开启自动处理，附言包含已设置的任意答案即可自动同意。`;
+                if (settings.auto_answers.length === 0) {
+                    return '⚠️ 已开启自动处理（无答案模式，将自动同意所有申请）。\n💡 如需按答案验证，请发送：添加入群答案 [内容]';
+                }
+                return '✅ 已开启自动处理，附言包含已设置的任意答案即可自动同意。';
             }
             return '✅ 已关闭自动处理，恢复人工审批。';
         }

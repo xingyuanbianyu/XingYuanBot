@@ -5,10 +5,105 @@ export class PluginDispatcher {
     this._getPlugins = typeof plugins === 'function' ? plugins : () => plugins;
     // 避免高频解析正则，将其提取到常量
     this.adminCmdRegex = /^(启用前缀|禁用前缀|查询前缀|添加前缀|删除前缀|启用指令白名单|禁用指令白名单|查询指令白名单|添加指令白名单|删除指令白名单)/;
+
+    // ============================================================
+    // 🌟 交互会话的通用匹配基础设施
+    // ------------------------------------------------------------
+    // session 里除"保留字段"外的所有键，都视为"必须等于 msg 上同名字段"的条件。
+    // 为让插件能用 userId/groupId 这种直观名字，这里维护一份别名映射。
+    // ============================================================
+    this._sessionReserved = new Set(['pluginName', 'expireAt', 'matcher', 'priority']);
+    this._fieldAlias = {
+      userId: 'senderQQ',
+      qq: 'senderQQ',
+      senderId: 'senderQQ',
+      groupId: 'chatId',
+      group: 'chatId',
+    };
   }
 
   get plugins() {
     return this._getPlugins() ?? [];
+  }
+
+  // 🌟 把 session 里的字段名解析成 msg 上的真实字段
+  _resolveField(msg, name) {
+    if (!msg) return undefined;
+    if (Object.prototype.hasOwnProperty.call(msg, name)) return msg[name];
+    const real = this._fieldAlias[name];
+    if (real && Object.prototype.hasOwnProperty.call(msg, real)) return msg[real];
+    return undefined;
+  }
+
+  // 🌟 遍历所有会话，返回条件最多（最精确）的那一条；一个条件都没有的会话视为无效
+  _findSession(msg, sessions) {
+    const now = Date.now();
+    let best = null;
+    let bestScore = -1;
+
+    for (const [key, sess] of sessions) {
+      if (!sess) { sessions.delete(key); continue; }
+      if (!sess.expireAt || sess.expireAt <= now) { sessions.delete(key); continue; }
+
+      let ok = true;
+      let condCount = 0;
+
+      // 自定义 matcher 最自由，也计入一个条件
+      if (typeof sess.matcher === 'function') {
+        condCount++;
+        try { ok = !!sess.matcher(msg); } catch { ok = false; }
+      }
+
+      if (ok) {
+        for (const [k, v] of Object.entries(sess)) {
+          if (this._sessionReserved.has(k)) continue;
+          if (v === undefined) continue;
+          condCount++;
+          const actual = this._resolveField(msg, k);
+          if (actual === undefined || String(actual) !== String(v)) {
+            ok = false;
+            break;
+          }
+        }
+      }
+
+      // 条件越多越精确，优先返回；同条件数取先遍历到的
+      if (ok && condCount > 0 && condCount > bestScore) {
+        bestScore = condCount;
+        best = { key, session: sess };
+      }
+    }
+    return best;
+  }
+
+  // 🌟 登记交互会话：支持 true（默认群+人）或 { userId/groupId/.../matcher/ttl/key }
+  _registerSession(interactiveSessions, pluginName, msg, interceptConfig) {
+    const inc = (interceptConfig && typeof interceptConfig === 'object') ? interceptConfig : {};
+    const ttl = typeof inc.ttl === 'number' ? inc.ttl : 3 * 60 * 1000;
+    const session = {
+      pluginName,
+      expireAt: Date.now() + ttl,
+    };
+
+    // 把自定义条件字段并入（ttl/key 只用于配置，不参与匹配）
+    for (const [k, v] of Object.entries(inc)) {
+      if (k === 'ttl' || k === 'key') continue;
+      session[k] = v;
+    }
+
+    // 没显式条件时，默认按"本群+本人"锁（保持旧行为向后兼容）
+    const hasCond = (typeof session.matcher === 'function') ||
+      Object.keys(session).some(k => !this._sessionReserved.has(k));
+    if (!hasCond) {
+      session.groupId = msg.chatId;
+      session.userId = msg.senderQQ;
+    }
+
+    const key = inc.key
+      ? String(inc.key)
+      : `${pluginName}_${msg.chatId}_${msg.senderQQ}`;
+
+    interactiveSessions.set(key, session);
   }
 
   // 🌟 统一安全发送函数，防止 globalThis.bot 未就绪导致崩溃
@@ -28,22 +123,20 @@ export class PluginDispatcher {
     const priorityPlugins = context.priorityPlugins || globalThis._priorityPlugins || new Set();
     const interactiveSessions = context.interactiveSessions || globalThis._interactiveSessions || new Map();
 
-    // 🌟 修复 1：交互式会话的 Key 加上 chatId，防止跨群/私聊串台！
-    const sessionKey = `${msg.chatId}_${msg.senderQQ}`;
-    const session = interactiveSessions.get(sessionKey);
-    
-    if (session) {
-      if (session.expireAt > Date.now()) {
-        // 命中有效会话，强制交给特定插件处理
-        const targetPlugin = activePlugins.find(p => (p.handler?.name || p.name) === session.pluginName);
-        if (targetPlugin) {
-          await this.runPlugin(targetPlugin, msg, context, true); 
-          return; 
-        }
-      } else {
-        // 会话已过期，主动删除，防止内存泄漏
-        interactiveSessions.delete(sessionKey);
+    // ============================================================
+    // 🌟 通用会话匹配：遍历所有 session，按字段/matcher 判断，命中一个就强制交给对应插件
+    // ============================================================
+    const sessionHit = this._findSession(msg, interactiveSessions);
+    if (sessionHit) {
+      const targetPlugin = activePlugins.find(
+        p => (p.handler?.name || p.name) === sessionHit.session.pluginName
+      );
+      if (targetPlugin) {
+        await this.runPlugin(targetPlugin, msg, context, true);
+        return;
       }
+      // 找不到对应插件（被卸载/改名），清掉这条死会话，继续正常分发
+      interactiveSessions.delete(sessionHit.key);
     }
 
     // 正常插件遍历
@@ -57,7 +150,8 @@ export class PluginDispatcher {
 
       // 如果插件处理了消息，且不是旁路监听（priority），则终止后续分发
       if (handled && !isPriority) {
-        break; 
+        (globalThis.print || console.log)(`[Dispatcher] 🛑 插件【${pluginName}】拦截了指令 "${msg.pureText}"，中止后续分发。`);
+        break;
       }
     }
   }
@@ -89,11 +183,14 @@ export class PluginDispatcher {
     // 阶段 1：统一剥离前缀
     // ============================================================
     let hasValidPrefix = false;
-    // 🌟 修复 2：不论是强制接管还是正常匹配，都应该把前缀剥干净，防止用户输入 "/1234" 导致验证失败
-    for (const p of cmdConfig.prefixes) {
+
+    // 🌟 前缀按长度倒序排列，防止短前缀吃掉长前缀（如 "#" 吃掉 "##"）
+    const sortedPrefixes = [...(cmdConfig.prefixes || [])].sort((a, b) => b.length - a.length);
+
+    for (const p of sortedPrefixes) {
       if (finalPureText.startsWith(p)) {
         hasValidPrefix = true;
-        finalPureText = finalPureText.slice(p.length).trim(); 
+        finalPureText = finalPureText.slice(p.length).trim();
         break;
       }
     }
@@ -124,40 +221,38 @@ export class PluginDispatcher {
         // ============================================================
         if (matchFn) {
           try {
-            if (!matchFn(finalPureText, msg)) return false; 
-          } catch (e) { 
+            if (!matchFn(finalPureText, msg)) return false;
+          } catch (e) {
             // 插件自定义的 match 写错了不应导致整个程序崩溃
-            return false; 
+            return false;
           }
         }
     }
 
     // 构造插件消息体
+    // 🌟 先铺底层 rawData，再用标准化 msg 覆盖，防止适配器解析好的 message(引用) 被覆盖丢失
     const pluginMsg = {
-      ...msg,               
-      ...(msg.rawData || {}),       
-      content: msg.content,               
-      text: msg.message || [],            
-      pureText: finalPureText, 
+      ...(msg.rawData || {}),
+      ...msg,
+      content: msg.content,
+      text: msg.message || [],
+      pureText: finalPureText,
       raw_message: msg.raw_message,
-      botId: msg.botId, 
+      botId: msg.botId,
       _ws: msg._ws
     };
 
     try {
       const result = await handleFn(pluginMsg);
-      
+
       if (!result) return false;
 
-      // 设置交互式会话
-      if (typeof result === 'object' && result.__interceptNext === true) {
-          // 🌟 修复 1 配套：Key 也改为 chatId_senderQQ
-          const sessionKey = `${msg.chatId}_${msg.senderQQ}`;
-          interactiveSessions.set(sessionKey, { 
-              pluginName: pluginName, 
-              expireAt: Date.now() + 3 * 60 * 1000 
-          });
-          return false; 
+      // ============================================================
+      // 🌟 登记交互会话：兼容 true（默认群+人）和自定义条件对象
+      // ============================================================
+      if (typeof result === 'object' && result.__interceptNext) {
+        this._registerSession(interactiveSessions, pluginName, msg, result.__interceptNext);
+        return false;
       }
 
       // ============================================================
@@ -165,23 +260,26 @@ export class PluginDispatcher {
       // ============================================================
       if (typeof result === 'string') {
         this._safeSend({ chatId: msg.chatId, isGroup: msg.isGroup, content: result, botId: msg.botId, _ws: msg._ws });
-        return true; 
-      } 
-      
+        return true;
+      }
+
       if (typeof result === 'object' && result !== null) {
-        const sendContent = result.file || result.content || result.message;
-        if (sendContent) {
-          this._safeSend({ 
-            chatId: msg.chatId, 
-            isGroup: msg.isGroup, 
-            content: sendContent, 
-            botId: msg.botId, 
-            _ws: msg._ws 
+        const file = result.file;
+        const content = result.content || result.message;
+
+        if (file || content) {
+          this._safeSend({
+            chatId: msg.chatId,
+            isGroup: msg.isGroup,
+            file: file,
+            content: content,
+            botId: msg.botId,
+            _ws: msg._ws
           });
           return true;
         }
       }
-      
+
       if (result === true) return true;
       return false;
     } catch (e) {

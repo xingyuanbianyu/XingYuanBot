@@ -54,8 +54,19 @@ try {
     `);
 }
 
+// ==========================================
+// 🌟 优化 1：定时清理缓存，防止 setTimeout 堆积导致内存泄漏
+// ==========================================
 const backupCache = new Map();
 const CACHE_TIME = 5 * 60 * 1000;
+setInterval(() => {
+    const now = Date.now();
+    for (const [msgId, data] of backupCache.entries()) {
+        if (now - data._cacheTime > CACHE_TIME) {
+            backupCache.delete(msgId);
+        }
+    }
+}, 60000); // 每分钟清理一次过期缓存
 
 let friendListCache = new Set();
 let lastFriendFetchTime = 0;
@@ -63,6 +74,7 @@ const FRIEND_CACHE_EXPIRE = 5 * 60 * 1000;
 
 let recallBrowser = null;
 let browserLaunching = null;
+let isRendering = false; // 🌟 核心修复：渲染并发锁
 
 function escapeHtml(str) {
     return String(str).replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));
@@ -79,11 +91,11 @@ function parseSegmentsToHtml(segments) {
             let url = seg.data.url || seg.data.file;
             if (url && !url.startsWith('base64://')) {
                 if (url.startsWith('http')) {
-                    html += `<div class="img-box"><img src="${url}" /></div>`;
+                    html += `<div class="img-box"><img src="${url}" onerror="this.style.display='none'" /></div>`; // 🌟 优化：加载失败的图片自动隐藏
                 } else if (url.startsWith('{')) {
                     try {
                         const json = JSON.parse(url);
-                        if (json.url) html += `<div class="img-box"><img src="${json.url}" /></div>`;
+                        if (json.url) html += `<div class="img-box"><img src="${json.url}" onerror="this.style.display='none'" /></div>`;
                     } catch(e) {}
                 }
             } else {
@@ -202,12 +214,11 @@ export default {
             senderId: senderQQ,
             groupId: currentGroupId,
             groupName: msg.isGroup ? (raw.group_name || null) : null,
-            content: raw.message || [] 
+            content: raw.message || [],
+            _cacheTime: Date.now() // 🌟 记录时间戳用于清理
         });
         
         globalThis.print(`[防撤回] 已缓存消息: ${raw.message_id}`);
-        
-        setTimeout(() => backupCache.delete(String(raw.message_id)), CACHE_TIME);
     }
     return false; 
   },
@@ -262,7 +273,7 @@ export default {
                         lastFriendFetchTime = Date.now();
                     }
                 } catch(e) {
-                    globalThis.print(`[防撤回] 获取好友列表异常: ${e.message}，将尝试尝试盲目发送...`);
+                    globalThis.print(`[防撤回] 获取好友列表异常: ${e.message}，将尝试盲目发送...`);
                     lastFriendFetchTime = Date.now();
                 }
             }
@@ -323,30 +334,44 @@ export default {
             `;
 
             let imageBuffer = null;
-            try {
-                let chromium = null;
-                try { chromium = (await import('playwright')).chromium; } catch (e) {}
-                if (chromium) {
-                    if (!recallBrowser || !recallBrowser.isConnected()) {
-                        if (!browserLaunching) {
-                            browserLaunching = chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--no-zygote'] }).then(b => {
-                                recallBrowser = b; browserLaunching = null; return b;
-                            });
+
+            // 🌟 核心修复 2：渲染并发锁，防止大量撤回瞬间导致内存爆炸
+            if (!isRendering) {
+                isRendering = true;
+                try {
+                    let chromium = null;
+                    try { chromium = (await import('playwright')).chromium; } catch (e) {}
+                    if (chromium) {
+                        if (!recallBrowser || !recallBrowser.isConnected()) {
+                            if (!browserLaunching) {
+                                browserLaunching = chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--no-zygote'] }).then(b => {
+                                    recallBrowser = b; browserLaunching = null; return b;
+                                });
+                            }
+                            await browserLaunching;
                         }
-                        await browserLaunching;
+                        const browserContext = await recallBrowser.newContext({ deviceScaleFactor: 2, viewport: { width: 600, height: 800 } });
+                        try { 
+                            const page = await browserContext.newPage();
+                            // 🌟 核心修复 3：改用 domcontentloaded 并增加超时，防止外部图片卡死渲染
+                            await page.setContent(html, { waitUntil: 'domcontentloaded', timeout: 5000 });
+                            await page.waitForTimeout(300); // 给图片300ms加载时间
+                            
+                            const cardElement = await page.$('.card');
+                            if (cardElement) {
+                                imageBuffer = await cardElement.screenshot({ type: 'png', omitBackground: true });
+                            }
+                        } finally {
+                            await browserContext.close().catch(()=>{});
+                        }
                     }
-                    const browserContext = await recallBrowser.newContext({ deviceScaleFactor: 2, viewport: { width: 600, height: 800 } });
-                    try { 
-                        const page = await browserContext.newPage();
-                        await page.setContent(html, { waitUntil: 'networkidle' });
-                        const cardElement = await page.$('.card');
-                        imageBuffer = await cardElement.screenshot({ type: 'png', omitBackground: true });
-                    } finally {
-                        await browserContext.close().catch(()=>{});
-                    }
+                } catch (err) {
+                    console.error('❌ [防撤回] 渲染图片失败，将降级为纯文本:', err.message);
+                } finally {
+                    isRendering = false; // 释放渲染锁
                 }
-            } catch (err) {
-                console.error('❌ [防撤回] 渲染图片失败，将降级为纯文本:', err.message);
+            } else {
+                globalThis.print(`[防撤回] ⚠️ 渲染并发过高，自动降级为纯文本发送。`);
             }
 
             const alertText = config.alert_text || '🛑 【防撤回拦截】\n';
@@ -366,18 +391,16 @@ export default {
                 { type: 'text', data: { text: `${alertText}来源：${locationStr}\n发送者：${backup.name}(${backup.senderId})\n内容：${rawContentStr}\n` } }
             ];
 
-            // 🌟 新增核心逻辑：提取需要额外发送的动图 / 视频 / 语音
+            // 提取需要额外发送的动图 / 视频 / 语音
             const extraMediaMsgs = [];
             if (Array.isArray(backup.content)) {
                 for (const seg of backup.content) {
-                    // 视频和语音直接透传
                     if (seg.type === 'video' || seg.type === 'record') {
                         let fileUrl = seg.data.url || seg.data.file;
                         if (fileUrl) {
                             extraMediaMsgs.push({ type: seg.type, data: { file: fileUrl } });
                         }
                     } 
-                    // 动图判断（sub_type === 1 或者后缀名包含 .gif）
                     else if (seg.type === 'image') {
                         let fileUrl = seg.data.url || seg.data.file;
                         let isGif = (seg.data.sub_type === 1) || (fileUrl && fileUrl.toLowerCase().includes('.gif'));
@@ -391,7 +414,7 @@ export default {
                 globalThis.print(`[防撤回] 发现 ${extraMediaMsgs.length} 个视频/动图，准备额外发送。`);
             }
 
-            // 🌟 核心修改：获取所有绑定关系并按用户分组
+            // 获取所有绑定关系并按用户分组
             const boundGroupsMap = new Map();
             const rows = db.prepare('SELECT user_id, group_id FROM exclusive_push').all();
             rows.forEach(r => {
@@ -408,13 +431,11 @@ export default {
                     continue; 
                 }
 
-                // 🌟 核心修改：多群判断逻辑
                 const userBoundGroups = boundGroupsMap.get(String(owner));
                 let shouldSend = true;
 
                 // 如果该主人配置了指定群，则只有当当前群在他的绑定列表中时才发送
                 if (userBoundGroups && userBoundGroups.size > 0) {
-                    // 如果是私聊消息（currentGroupId 为 null），默认允许发送，或者可以根据需求忽略
                     if (currentGroupId && !userBoundGroups.has(String(currentGroupId))) {
                         shouldSend = false;
                     }
@@ -453,7 +474,7 @@ export default {
                         }
                     }
 
-                    // 🌟 2. 如果存在动图/视频/语音，额外发送原始媒体文件
+                    // 2. 如果存在动图/视频/语音，额外发送原始媒体文件
                     if (extraMediaMsgs.length > 0) {
                         await new Promise(r => setTimeout(r, 1000)); // 稍微停顿一下，防止风控
                         try {
@@ -469,6 +490,7 @@ export default {
                     }
                 }
             }
+            // 🌟 及时清理当前撤回的消息缓存，防止重复触发
             backupCache.delete(String(raw.message_id));
         }
     }

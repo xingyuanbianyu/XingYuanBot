@@ -7,17 +7,17 @@ import Database from 'better-sqlite3';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// 🌟 黑名单共享库路径
 const SHARED_DB_PATH = path.resolve(__dirname, '../../plugins/event-settings/group_data.db');
 
 let eventBrowser = null;
 let browserLaunching = null;
 
-// 🌟 优化 1：群配置缓存 (防止高频连接外部数据库)
+// 🌟 优化 1：群配置缓存
 const groupSettingsCache = new Map();
 function getGroupSettings(groupId) {
     const gid = String(groupId);
     
-    // 检查缓存 (有效期 5 秒)
     const cached = groupSettingsCache.get(gid);
     if (cached && Date.now() - cached.time < 5000) {
         return cached.data;
@@ -50,6 +50,33 @@ function getGroupSettings(groupId) {
         if (db && db.open) db.close();
     }
     return null;
+}
+
+// 🌟 优化 2：加入黑名单的重试与容错处理，防止高并发导致 SQLITE_BUSY
+function addToBlacklist(groupId, userId, nickname) {
+    let writeDb = null;
+    try {
+        const dbDir = path.dirname(SHARED_DB_PATH);
+        if (!fs.existsSync(dbDir)) fs.mkdirSync(dbDir, { recursive: true });
+
+        writeDb = new Database(SHARED_DB_PATH);
+        // 设置超时时间（如果数据库被锁，最多等 2 秒再报错）
+        writeDb.pragma('busy_timeout = 2000');
+        writeDb.pragma('journal_mode = WAL');
+        
+        writeDb.prepare(`CREATE TABLE IF NOT EXISTS group_reject_list (
+            group_id TEXT, user_id TEXT, nickname TEXT, create_time INTEGER, PRIMARY KEY(group_id, user_id)
+        )`).run();
+        
+        writeDb.prepare('INSERT OR REPLACE INTO group_reject_list (group_id, user_id, nickname, create_time) VALUES (?, ?, ?, ?)').run(
+            String(groupId), String(userId), nickname || '未知昵称', Math.floor(Date.now() / 1000)
+        );
+        console.log(`✅ [群事件] 已将 ${nickname}(${userId}) 自动加入黑名单`);
+    } catch (err) {
+        console.error(`❌ [群事件] 写入黑名单失败: ${err.message}`);
+    } finally {
+        if (writeDb && writeDb.open) writeDb.close();
+    }
 }
 
 function getTemplateConfig() {
@@ -85,7 +112,6 @@ function escapeHtml(str) {
     return String(str).replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));
 }
 
-// 🌟 渲染并发锁
 let isRendering = false;
 
 async function generateEventImage(eventType, textMsg, qq) {
@@ -164,7 +190,7 @@ async function generateEventImage(eventType, textMsg, qq) {
         <body>
             <div class="card">
                 <div class="content">
-                    <div class="avatar-box"><img src="${avatarUrl}" alt="avatar"><div class="badge">${icon}</div></div>
+                    <div class="avatar-box"><img src="${avatarUrl}" alt="avatar" onerror="this.style.display='none'"><div class="badge">${icon}</div></div>
                     <div class="text-box"><div class="title">群事件提示</div><div class="message">${htmlText}</div></div>
                 </div>
                 <div class="footer">XingYuanBot 自动播报</div>
@@ -175,9 +201,14 @@ async function generateEventImage(eventType, textMsg, qq) {
 
         context = await eventBrowser.newContext({ deviceScaleFactor: 2, viewport: { width: 600, height: 800 } });
         const page = await context.newPage();
-        await page.setContent(html, { waitUntil: 'networkidle' });
+        
+        // 🌟 修复：防止外部网络卡死渲染
+        await page.setContent(html, { waitUntil: 'domcontentloaded', timeout: 5000 });
+        await page.waitForTimeout(300); // 给图片短暂加载时间
         
         const cardElement = await page.$('.card');
+        if (!cardElement) throw new Error("找不到 .card 元素");
+        
         const buffer = await cardElement.screenshot({ type: 'png', omitBackground: true });
         return buffer;
     } catch (e) {
@@ -197,45 +228,54 @@ async function generateEventImage(eventType, textMsg, qq) {
     }
 }
 
+// 🌟 优化 3：更安全的 CQ 码解析
 function parseMessage(cqString) {
+  if (!cqString || typeof cqString !== 'string') return [{ type: 'text', data: { text: String(cqString || '') } }];
+  
   const result = [];
   let lastIndex = 0;
-  const regex = /\[CQ:(\w+),([^\]]*)\]/g;
+  const regex = /\[CQ:(\w+)(?:,([^\]]*))?\]/g; // 兼容没有参数的 CQ 码
   let match;
 
-  while ((match = regex.exec(cqString)) !== null) {
-    if (match.index > lastIndex) {
-      result.push({ type: 'text', data: { text: cqString.slice(lastIndex, match.index) } });
-    }
-    const type = match[1];
-    const data = {};
-    match[2].split(',').forEach(item => {
-      const eqIdx = item.indexOf('=');
-      if (eqIdx === -1) return;
-      data[item.slice(0, eqIdx)] = item.slice(eqIdx + 1);
-    });
-    result.push({ type, data });
-    lastIndex = regex.lastIndex;
-  }
+  try {
+      while ((match = regex.exec(cqString)) !== null) {
+        if (match.index > lastIndex) {
+          result.push({ type: 'text', data: { text: cqString.slice(lastIndex, match.index) } });
+        }
+        const type = match[1];
+        const data = {};
+        if (match[2]) {
+            // 正确切分键值对，防止 base64 或特殊字符中包含逗号
+            match[2].split(',').forEach(item => {
+              const eqIdx = item.indexOf('=');
+              if (eqIdx === -1) return;
+              data[item.slice(0, eqIdx)] = item.slice(eqIdx + 1);
+            });
+        }
+        result.push({ type, data });
+        lastIndex = regex.lastIndex;
+      }
 
-  if (lastIndex < cqString.length) {
-    result.push({ type: 'text', data: { text: cqString.slice(lastIndex) } });
+      if (lastIndex < cqString.length) {
+        result.push({ type: 'text', data: { text: cqString.slice(lastIndex) } });
+      }
+  } catch(e) {
+      console.error(`❌ [群事件] CQ码解析异常: ${e.message}`);
+      return [{ type: 'text', data: { text: cqString } }];
   }
 
   return result.length > 0 ? result : [{ type: 'text', data: { text: cqString } }];
 }
 
-// 🌟 核心修复：兼容多种返回格式的 API 查询
 async function getGroupName(groupId, userId, ws) {
   if (typeof globalThis.wsCall !== 'function') return null;
   try {
     const res = await globalThis.wsCall('get_group_member_info', {
-      group_id: Number(groupId),
-      user_id: Number(userId),
+      group_id: String(groupId),
+      user_id: String(userId),
       no_cache: false
     }, 3000, ws);
     
-    // 🌟 兼容不同框架的返回层级 (NapCat/LLOneBot 等)
     const memberInfo = res?.data || res;
     return memberInfo?.card || memberInfo?.nickname || null;
   } catch (e) { 
@@ -283,7 +323,6 @@ export default {
     const targetQQ = String(e.userId || raw.target_id || raw.user_id || '未知');
     const operatorQQ = String(e.operatorId || raw.operator_id || '');
 
-    // 最终赋给文本的变量
     let qqValue = targetQQ;
     let opValue = operatorQQ || '系统';
 
@@ -309,9 +348,7 @@ export default {
         if (cachedOp) opValue = cachedOp.card || cachedOp.nickname || opValue;
     }
 
-    // 3. 如果退群事件中 raw 和缓存都没拿到昵称，或者入群事件拿不到，尝试调用 API
-    // 退群 (kick/decrease) 时 QQ 服务器通常已经查不到此人，只能依赖缓存，查不到就保留 QQ 号。
-    // 入群 (welcome) 时，API 可以查到，所以这里补一个兜底 API 查询。
+    // 3. 兜底 API 查询
     if (qqValue === targetQQ && (key === 'welcome' || !cachedUser)) {
         const apiName = await getGroupName(e.groupId, targetQQ, ws);
         if (apiName) qqValue = apiName;
@@ -322,8 +359,20 @@ export default {
         if (apiOpName) opValue = apiOpName;
     }
 
+    // ==========================================
+    // 🌟 核心新增：如果是退群或被踢，自动将其加入黑名单
+    // ==========================================
+    if (key === 'decrease' || key === 'kick') {
+        if (targetQQ && targetQQ !== '未知') {
+            addToBlacklist(e.groupId, targetQQ, qqValue);
+        }
+    }
+
     const msg = render(key, { qq: qqValue, operator: opValue });
-    if (!msg) return;
+    if (!msg) {
+        console.warn(`⚠️ [群事件] 未找到模板: ${key}`);
+        return;
+    }
 
     if (typeof globalThis.wsCall === 'function') {
         const imageBuffer = await generateEventImage(key, msg, targetQQ);

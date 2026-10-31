@@ -25,13 +25,23 @@ db.exec(`
 // 浏览器实例
 let warnBrowser = null;
 let browserLaunching = null;
+let isRendering = false; // 🌟 核心修复 1：渲染互斥锁，防止高并发时内存爆炸
 
-// 缓存违禁词，减少数据库压力
+// 缓存违禁词
 const badWordsCache = new Map(); 
 function refreshBadWordsCache(groupId) {
     const rows = db.prepare('SELECT word, match_type FROM group_bad_words WHERE group_id = ?').all(groupId);
     badWordsCache.set(groupId, rows);
     return rows;
+}
+
+// 🌟 核心修复 2：群管权限本地缓存，防止 API 被刷爆
+const permCache = new Map(); 
+function getCachedPermission(groupId, senderQQ, msg) {
+    const key = `${groupId}_${senderQQ}`;
+    const cached = permCache.get(key);
+    if (cached && cached.expire > Date.now()) return cached.isAdmin;
+    return null; // 没缓存，需要去查
 }
 
 function getDynamicPrefixes() {
@@ -61,10 +71,7 @@ export default {
     async handle(msg) {
         if (!msg.isGroup) return false;
         
-        // ==========================================
-        // 🌟 锁 1：防止自己杀自己！
-        // 只要是机器人发出的消息，或者上号的人发的消息，统统放行，绝不检测！
-        // ==========================================
+        // 锁 1：防止自己杀自己
         if (msg.isSelf) return false;
 
         let cmd = (msg.pureText || "").trim();
@@ -80,7 +87,7 @@ export default {
         const groupId = String(msg.chatId);
         const senderQQ = String(msg.senderQQ);
         const senderName = msg.senderName || '未知';
-        const ws = msg._ws;
+        const ws = msg._ws || globalThis.activeWs;
 
         // ==========================================
         // 1. 快速处理管理指令
@@ -90,18 +97,26 @@ export default {
         if (isCmd) {
             let hasPermission = false;
             
-            const cachedMembers = globalThis.getGroupMembers ? globalThis.getGroupMembers(groupId) : [];
-            const member = cachedMembers.find(m => String(m.user_id) === senderQQ);
-            
-            if (member && ['owner', 'admin'].includes(member.role)) {
-                hasPermission = true;
-            } else if (typeof getRole === 'function' && ['master', 'owner', 'admin'].includes(getRole(senderQQ, msg.botId))) {
+            // 先查本地缓存
+            const cachedPerm = getCachedPermission(groupId, senderQQ, msg);
+            if (cachedPerm === true) {
                 hasPermission = true;
             } else {
-                try {
-                    const res = await globalThis.wsCall('get_group_member_info', { group_id: Number(groupId), user_id: Number(senderQQ) }, 3000, ws);
-                    if (['owner', 'admin'].includes(res?.data?.role)) hasPermission = true;
-                } catch (e) {}
+                const cachedMembers = globalThis.getGroupMembers ? globalThis.getGroupMembers(groupId) : [];
+                const member = cachedMembers.find(m => String(m.user_id) === senderQQ);
+                
+                if (member && ['owner', 'admin'].includes(member.role)) {
+                    hasPermission = true;
+                } else if (typeof getRole === 'function' && ['master', 'owner', 'admin'].includes(getRole(senderQQ, msg.botId))) {
+                    hasPermission = true;
+                } else {
+                    try {
+                        const res = await globalThis.wsCall('get_group_member_info', { group_id: Number(groupId), user_id: Number(senderQQ) }, 3000, ws);
+                        if (['owner', 'admin'].includes(res?.data?.role)) hasPermission = true;
+                        // 写入缓存 5 分钟
+                        permCache.set(`${groupId}_${senderQQ}`, { isAdmin: hasPermission, expire: Date.now() + 300000 });
+                    } catch (e) {}
+                }
             }
 
             if (!hasPermission) return '❌ 权限不足：仅群管或主人可设置违禁词。';
@@ -141,7 +156,6 @@ export default {
                 });
                 return reply.trim();
             }
-            // 🌟 锁 2：只要是管理指令，处理完直接 return，绝对不进入下面的检测！
             return false;
         }
 
@@ -149,7 +163,7 @@ export default {
         // 2. 违禁词检测
         // ==========================================
         let badWords = badWordsCache.get(groupId);
-        if (!badWords) {
+        if (badWords === undefined) { // 🌟 修复：空数组也是有效值，不能单用 !badWords
             badWords = refreshBadWordsCache(groupId);
         }
         if (badWords.length === 0) return false;
@@ -172,13 +186,20 @@ export default {
         // 3. 触发违禁词后的权限豁免检查
         // ==========================================
         let isExempt = false;
-        const cachedMembers = globalThis.getGroupMembers ? globalThis.getGroupMembers(groupId) : [];
-        const member = cachedMembers.find(m => String(m.user_id) === senderQQ);
-        
-        if (member && ['owner', 'admin'].includes(member.role)) {
+        const cachedPerm = getCachedPermission(groupId, senderQQ, msg);
+        if (cachedPerm === true) {
             isExempt = true;
-        } else if (typeof getRole === 'function' && ['master', 'owner', 'admin'].includes(getRole(senderQQ, msg.botId))) {
-            isExempt = true;
+        } else {
+            const cachedMembers = globalThis.getGroupMembers ? globalThis.getGroupMembers(groupId) : [];
+            const member = cachedMembers.find(m => String(m.user_id) === senderQQ);
+            
+            if (member && ['owner', 'admin'].includes(member.role)) {
+                isExempt = true;
+                permCache.set(`${groupId}_${senderQQ}`, { isAdmin: true, expire: Date.now() + 300000 });
+            } else if (typeof getRole === 'function' && ['master', 'owner', 'admin'].includes(getRole(senderQQ, msg.botId))) {
+                isExempt = true;
+                permCache.set(`${groupId}_${senderQQ}`, { isAdmin: true, expire: Date.now() + 300000 });
+            }
         }
         
         if (isExempt) return false;
@@ -203,23 +224,23 @@ export default {
         let muteSuccess = false;
         let failReason = '未知错误';
 
-        // 🌟 优化：如果目标本身就是群主，就别去调接口了，必定失败
-        if (member && member.role === 'owner') {
+        // 尝试获取一下成员角色（用于防群主禁言报错）
+        const membersList = globalThis.getGroupMembers ? globalThis.getGroupMembers(groupId) : [];
+        const targetMember = membersList.find(m => String(m.user_id) === senderQQ);
+
+        if (targetMember && targetMember.role === 'owner') {
             failReason = '目标为群主，无法禁言';
         } else {
             try {
-                // 🌟 优化：超时时间从 3 秒延长到 6 秒，防止 API 响应慢导致超时
                 const res = await globalThis.wsCall('set_group_ban', { 
                     group_id: Number(groupId), 
                     user_id: Number(senderQQ), 
                     duration: Number(muteTime) 
                 }, 6000, ws);
                 
-                // 兼容多种成功返回值格式
                 if (res && (res.status === 'ok' || res.retcode === 0)) {
                     muteSuccess = true;
                 } else if (res === null) {
-                    // 如果返回 null，当作成功处理（部分框架成功也返回null）
                     muteSuccess = true;
                 } else {
                     failReason = res?.msg || res?.wording || res?.message || JSON.stringify(res) || '接口超时无响应';
@@ -231,8 +252,6 @@ export default {
 
         const avatarUrl = `https://q1.qlogo.cn/g?b=qq&nk=${senderQQ}&s=640`;
         const warnText = escapeHtml(config.warn_text);
-        
-        // 🌟 如果失败，把真实的失败原因显示出来，而不是统一写“权限不足”
         const muteText = muteSuccess ? `禁言 ${Math.floor(muteTime / 60)} 分钟` : `禁言失败(${failReason})`;
 
         const html = `
@@ -276,36 +295,62 @@ export default {
         `;
 
         let imageBuffer = null;
-        try {
-            let chromium = null;
-            try { chromium = (await import('playwright')).chromium; } catch (e) {}
-            if (chromium) {
-                if (!warnBrowser || !warnBrowser.isConnected()) {
-                    if (!browserLaunching) {
-                        browserLaunching = chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--no-zygote'] }).then(b => {
-                            warnBrowser = b; browserLaunching = null; return b;
-                        });
+
+        // 🌟 核心修复 3：加入渲染锁，如果正在渲染，直接降级发纯文本，防止并发截图导致 OOM
+        if (!isRendering) {
+            isRendering = true;
+            try {
+                let chromium = null;
+                try { chromium = (await import('playwright')).chromium; } catch (e) {}
+                
+                if (chromium) {
+                    if (!warnBrowser || !warnBrowser.isConnected()) {
+                        if (!browserLaunching) {
+                            browserLaunching = chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--no-zygote'] }).then(b => {
+                                warnBrowser = b; browserLaunching = null; return b;
+                            });
+                        }
+                        await browserLaunching;
                     }
-                    await browserLaunching;
+                    
+                    const ctx = await warnBrowser.newContext({ deviceScaleFactor: 2, viewport: { width: 600, height: 800 } });
+                    try { 
+                        const page = await ctx.newPage();
+                        // 🌟 核心修复 4：把加载条件改为 domcontentloaded 并加超时，防止腾讯头像接口卡死整个渲染
+                        await page.setContent(html, { waitUntil: 'domcontentloaded', timeout: 5000 });
+                        // 稍等一下图片加载
+                        await page.waitForTimeout(300);
+                        
+                        const el = await page.$('.card');
+                        if (el) imageBuffer = await el.screenshot({ type: 'png', omitBackground: true });
+                    } finally {
+                        await ctx.close().catch(()=>{});
+                    }
                 }
-                const ctx = await warnBrowser.newContext({ deviceScaleFactor: 2, viewport: { width: 600, height: 800 } });
-                try { 
-                    const page = await ctx.newPage();
-                    await page.setContent(html, { waitUntil: 'networkidle' });
-                    const el = await page.$('.card');
-                    imageBuffer = await el.screenshot({ type: 'png', omitBackground: true });
-                } finally {
-                    await ctx.close().catch(()=>{});
-                }
+            } catch (err) {
+                console.error('❌ [违禁词] 渲染图片失败:', err.message);
+            } finally {
+                isRendering = false; // 释放锁
             }
-        } catch (err) {
-            console.error('❌ [违禁词] 渲染图片失败:', err.message);
+        } else {
+            globalThis.print(`[违禁词] ⚠️ 渲染并发过高，自动降级为纯文本警告。`);
         }
 
-        if (imageBuffer) {
-            globalThis.bot.send({ chatId: Number(groupId), isGroup: true, file: imageBuffer, botId: msg.botId, _ws: ws });
-        } else {
-            globalThis.bot.send({ chatId: Number(groupId), isGroup: true, content: `⚠️ 警告：${senderName} 触发违禁词【${triggeredWord}】，处罚：${muteText}！`, botId: msg.botId, _ws: ws });
+        // 🌟 核心修复 5：统一使用 wsCall 发送，兼容性更好，带超时控制
+        try {
+            if (imageBuffer) {
+                await globalThis.wsCall('send_group_msg', {
+                    group_id: Number(groupId),
+                    message: [{ type: 'image', data: { file: `base64://${imageBuffer.toString('base64')}` } }]
+                }, 10000, ws);
+            } else {
+                await globalThis.wsCall('send_group_msg', {
+                    group_id: Number(groupId),
+                    message: [{ type: 'text', data: { text: `⚠️ 警告：${senderName} 触发违禁词【${triggeredWord}】，处罚：${muteText}！` } }]
+                }, 5000, ws);
+            }
+        } catch (e) {
+            globalThis.print(`[违禁词] ❌ 警告消息发送失败: ${e.message}`);
         }
 
         return true; 

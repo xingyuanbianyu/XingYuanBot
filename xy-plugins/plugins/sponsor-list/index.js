@@ -6,6 +6,12 @@ import { getRole } from '../../../xy-config/config/permissions.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DB_PATH = path.join(__dirname, 'sponsor.db');
+const IMG_DIR = path.join(__dirname, 'sponsor_images'); // 🌟 新增：本地图片存储目录
+
+// 确保图片目录存在
+if (!fs.existsSync(IMG_DIR)) {
+    fs.mkdirSync(IMG_DIR, { recursive: true });
+}
 
 const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
@@ -18,12 +24,17 @@ db.exec(`
   );
 `);
 
+// 🌟 新增：管理员权限缓存 Map
+// 结构：Map<群号_QQ号, { hasPermission: boolean, expire: number }>
+const roleCache = new Map(); 
+
 export default {
     name: '赞助系统',
     
     match(text) {
         if (!text || typeof text !== 'string') return false;
-        return text.startsWith('赞助');
+        // 🌟 优化：精确匹配，防止“群主赞助我点钱”误触发
+        return /^赞助(?:\s*\d+|\s*(?:设置|查询|删除).*)?$/.test(text);
     },
 
     async handle(msg) {
@@ -63,10 +74,24 @@ export default {
     },
 
     async sendSponsor(msg, item) {
-        // 🌟 因为存的是 base64，所以这里发出去绝对稳
+        // 兼容处理：如果是旧数据（base64开头）直接发；如果是新数据（文件名），则读取本地文件转base64
+        let finalImageUrl = item.qr_url;
+        if (!finalImageUrl.startsWith('base64://')) {
+            const filePath = path.join(IMG_DIR, finalImageUrl);
+            if (!fs.existsSync(filePath)) {
+                return `❌ 发送失败：本地图片丢失（${finalImageUrl}）`;
+            }
+            try {
+                const buffer = fs.readFileSync(filePath);
+                finalImageUrl = `base64://${buffer.toString('base64')}`;
+            } catch (err) {
+                return `❌ 读取本地图片失败：${err.message}`;
+            }
+        }
+
         const messages = [
             { type: 'text', data: { text: `💎 【赞助通道】\n📢 ${item.title}\n👇 请使用下方赞助码：` } },
-            { type: 'image', data: { file: item.qr_url } }
+            { type: 'image', data: { file: finalImageUrl } }
         ];
         
         try {
@@ -76,7 +101,6 @@ export default {
                 message: messages 
             }, 15000, msg._ws); 
             
-            // 🌟 修复：兼容各种框架的返回值，防止误报错
             let isSuccess = true;
             if (res) {
                 if (res.status && res.status !== 'ok') isSuccess = false;
@@ -87,7 +111,7 @@ export default {
                  const errDetail = res?.msg || res?.wording || res?.message || JSON.stringify(res) || '未知错误';
                  return `❌ 发送失败，NapCat 返回错误: ${errDetail}`;
             }
-            return true; // 成功则不回复任何多余文字，让图片安静地发出去
+            return true; 
         } catch (e) {
             globalThis.print(`[赞助系统] ❌ 发送抛出异常: ${e.message}`);
             return `❌ 发送失败: ${e.message}`;
@@ -96,40 +120,49 @@ export default {
 
     async handleAdmin(msg, cmd, groupId, senderQQ) {
         let hasPermission = false;
+        const cacheKey = `${groupId}_${senderQQ}`;
 
-        try {
-            const cachedMembers = globalThis.getGroupMembers ? globalThis.getGroupMembers(groupId) : [];
-            let memberInfo = cachedMembers.find(m => String(m.user_id) === senderQQ);
+        // 🌟 优化 1：先查内存缓存
+        const cached = roleCache.get(cacheKey);
+        if (cached && cached.expire > Date.now()) {
+            hasPermission = cached.hasPermission;
+        } else {
+            // 缓存失效或没有，去查真实数据
+            try {
+                const cachedMembers = globalThis.getGroupMembers ? globalThis.getGroupMembers(groupId) : [];
+                let memberInfo = cachedMembers.find(m => String(m.user_id) === senderQQ);
 
-            if (!memberInfo) {
-                const res = await globalThis.wsCall('get_group_member_info', { 
-                    group_id: Number(groupId), user_id: Number(senderQQ) 
-                }, 5000, msg._ws);
-                if (res?.data) memberInfo = res.data;
+                if (!memberInfo) {
+                    const res = await globalThis.wsCall('get_group_member_info', { 
+                        group_id: Number(groupId), user_id: Number(senderQQ) 
+                    }, 5000, msg._ws);
+                    if (res?.data) memberInfo = res.data;
+                }
+                if (memberInfo && ['owner', 'admin'].includes(memberInfo.role)) hasPermission = true;
+            } catch (e) {}
+
+            if (!hasPermission && typeof getRole === 'function') {
+                if (['master', 'owner', 'admin'].includes(getRole(senderQQ, msg.botId))) hasPermission = true;
             }
-            if (memberInfo && ['owner', 'admin'].includes(memberInfo.role)) hasPermission = true;
-        } catch (e) {}
 
-        if (!hasPermission && typeof getRole === 'function') {
-            if (['master', 'owner', 'admin'].includes(getRole(senderQQ, msg.botId))) hasPermission = true;
+            // 写入缓存，有效期 5 分钟 (300,000 毫秒)
+            roleCache.set(cacheKey, { hasPermission, expire: Date.now() + 300000 });
         }
         
         if (!hasPermission) return '❌ 权限不足：仅群管或主人可操作。';
 
         // ==========================================
-        // 赞助设置 (核心：下载并转 Base64)
+        // 赞助设置
         // ==========================================
         if (cmd.startsWith('赞助设置')) {
             const title = cmd.replace('赞助设置', '').trim() || '赞助码';
             let targetUrl = null;
 
-            // 1. 找当前消息里的图
             if (Array.isArray(msg.message)) {
                 const imgItem = msg.message.find(item => item?.type === 'image');
                 if (imgItem && imgItem.data) targetUrl = imgItem.data.url || imgItem.data.file;
             }
 
-            // 2. 找引用消息里的图
             if (!targetUrl && Array.isArray(msg.message)) {
                 const replyItem = msg.message.find(item => item?.type === 'reply');
                 if (replyItem && replyItem.data && replyItem.data.id) {
@@ -149,22 +182,38 @@ export default {
 
             if (!targetUrl) return '❌ 设置失败：未检测到图片！请直接附带图片发送，或引用一张图片发送该指令。';
 
-            // 🌟 核心修复：下载图片转为 Base64
             globalThis.print(`[赞助系统] 正在下载并保存图片...`);
-            let base64Image = '';
+            let fileName = '';
             try {
                 if (targetUrl.startsWith('base64://')) {
-                    base64Image = targetUrl;
+                    // 如果直接传的是 base64，也存为本地文件
+                    const rawBase64 = targetUrl.replace('base64://', '');
+                    fileName = `${Date.now()}.jpg`;
+                    fs.writeFileSync(path.join(IMG_DIR, fileName), Buffer.from(rawBase64, 'base64'));
                 } else {
-                    const fetchRes = await fetch(targetUrl);
+                    // 🌟 优化 2：SSRF 防护，检查域名是否属于腾讯 QQ 相关域名
+                    const urlObj = new URL(targetUrl);
+                    const allowedHosts = ['qq.com', 'qpic.cn', 'gchat.qpic.cn', 'qlogo.cn'];
+                    const isAllowed = allowedHosts.some(host => urlObj.hostname.endsWith(host));
+                    
+                    if (!isAllowed) {
+                        globalThis.print(`[赞助系统] 拦截到非法图片域名请求: ${urlObj.hostname}`);
+                        return `❌ 图片域名不被信任，请直接从 QQ 发送或引用图片。`;
+                    }
+
+                    const fetchRes = await fetch(targetUrl, { signal: AbortSignal.timeout(10000) }); // 10秒超时
                     if (!fetchRes.ok) throw new Error(`HTTP ${fetchRes.status}`);
+                    
                     const arrayBuffer = await fetchRes.arrayBuffer();
                     const buffer = Buffer.from(arrayBuffer);
-                    base64Image = `base64://${buffer.toString('base64')}`;
+                    
+                    // 生成随机文件名，避免高并发时重名覆盖
+                    fileName = `${Date.now()}_${Math.floor(Math.random() * 10000)}.jpg`; 
+                    fs.writeFileSync(path.join(IMG_DIR, fileName), buffer);
                 }
             } catch (e) {
                 globalThis.print(`[赞助系统] 下载图片失败: ${e.message}`);
-                return `❌ 图片下载失败（可能链接已过期），请直接发送图片并输入指令，不要引用太久的旧消息。`;
+                return `❌ 图片下载失败（可能链接已过期或网络问题），请直接发送图片并输入指令。`;
             }
 
             let targetId = 1;
@@ -174,11 +223,11 @@ export default {
                 targetId++;
             }
 
-            // 把永久有效的 base64Image 存入数据库
+            // 存的是本地的文件名
             db.prepare('INSERT INTO sponsor_items (id, title, qr_url, create_time) VALUES (?, ?, ?, ?)')
-              .run(targetId, title, base64Image, Math.floor(Date.now() / 1000));
+              .run(targetId, title, fileName, Math.floor(Date.now() / 1000));
             
-            return `✅ 赞助设置成功！\n📢 标签：${title}\n🖼️ 图片已永久保存至本地数据库。\n[🏷️ 自动分配 ID: ${targetId}]`;
+            return `✅ 赞助设置成功！\n📢 标签：${title}\n🖼️ 图片已永久保存至本地服务器。\n[🏷️ 自动分配 ID: ${targetId}]`;
         }
 
         // ==========================================
@@ -198,8 +247,18 @@ export default {
         if (cmd.startsWith('赞助删除')) {
             const id = parseInt(cmd.replace('赞助删除', '').trim());
             if (isNaN(id)) return '⚠️ 用法：赞助删除 [ID]';
+            
+            // 🌟 优化 3：删除记录时，同步删除本地图片文件，防止磁盘空间被垃圾文件占满
+            const item = db.prepare('SELECT qr_url FROM sponsor_items WHERE id = ?').get(id);
+            if (item && item.qr_url && !item.qr_url.startsWith('base64://')) {
+                const filePath = path.join(IMG_DIR, item.qr_url);
+                if (fs.existsSync(filePath)) {
+                    try { fs.unlinkSync(filePath); } catch(e) { globalThis.print(`[赞助系统] 清理旧图片失败: ${e.message}`); }
+                }
+            }
+
             const info = db.prepare('DELETE FROM sponsor_items WHERE id = ?').run(id);
-            return info.changes > 0 ? `✅ 已删除 [ID: ${id}] 的赞助码。` : `⚠️ 找不到该赞助码。`;
+            return info.changes > 0 ? `✅ 已删除 [ID: ${id}] 的赞助码及本地缓存。` : `⚠️ 找不到该赞助码。`;
         }
     }
 };
