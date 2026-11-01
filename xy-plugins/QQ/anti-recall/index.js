@@ -154,7 +154,6 @@ export default {
             const targetRole = getRole(targetQQ, msg.botId);
             if (targetRole !== 'master' && targetRole !== 'owner') return `❌ 设置失败：${targetQQ} 不在有效主人列表中（或权限已关闭）。`;
 
-            // 🌟 使用 INSERT OR IGNORE 防止重复插入
             const info = db.prepare('INSERT OR IGNORE INTO exclusive_push (user_id, group_id) VALUES (?, ?)').run(targetQQ, targetGroup);
             
             if (info.changes > 0) {
@@ -177,11 +176,9 @@ export default {
             }
 
             if (targetGroup) {
-                // 取消指定群的拦截
                 const info = db.prepare('DELETE FROM exclusive_push WHERE user_id = ? AND group_id = ?').run(targetQQ, targetGroup);
                 return info.changes > 0 ? `✅ 已取消！主人 ${targetQQ} 不再单独接收群 ${targetGroup} 的通知。` : `⚠️ 主人 ${targetQQ} 当前没有绑定群 ${targetGroup}。`;
             } else {
-                // 取消该用户的所有拦截
                 const info = db.prepare('DELETE FROM exclusive_push WHERE user_id = ?').run(targetQQ);
                 return info.changes > 0 ? `✅ 已取消！主人 ${targetQQ} 的所有专属拦截绑定已清空，恢复接收所有群通知。` : `⚠️ 主人 ${targetQQ} 当前没有设置任何专属拦截。`;
             }
@@ -191,7 +188,6 @@ export default {
             const rows = db.prepare('SELECT user_id, group_id FROM exclusive_push').all();
             if (rows.length === 0) return '⚙️ 当前没有任何主人设置专属拦截。';
             
-            // 🌟 按用户分组显示
             const userGroups = {};
             rows.forEach(r => {
                 if (!userGroups[r.user_id]) userGroups[r.user_id] = [];
@@ -207,7 +203,21 @@ export default {
     }
 
     if (raw.post_type === 'message' && raw.message_id) {
-        if (senderQQ === String(msg.botId)) return false;
+        if (senderQQ === String(msg.botId)) return false; // 机器人自己
+
+        // 🌟 核心新增：判断发言人身份，如果是主人/管理员，直接跳过，不进入缓存
+        let role = 'member';
+        try {
+            if (typeof getRole === 'function') {
+                role = getRole(senderQQ, msg.botId);
+            }
+        } catch (e) {}
+        
+        if (['master', 'owner', 'admin'].includes(role)) {
+            // 如果你想在控制台看到跳过记录，可以取消下面这行的注释
+            // globalThis.print(`[防撤回] 跳过特权用户消息缓存: ${msg.senderName}(${senderQQ})`);
+            return false; 
+        }
 
         backupCache.set(String(raw.message_id), {
             name: msg.senderName || '未知',
@@ -215,7 +225,7 @@ export default {
             groupId: currentGroupId,
             groupName: msg.isGroup ? (raw.group_name || null) : null,
             content: raw.message || [],
-            _cacheTime: Date.now() // 🌟 记录时间戳用于清理
+            _cacheTime: Date.now()
         });
         
         globalThis.print(`[防撤回] 已缓存消息: ${raw.message_id}`);
@@ -335,7 +345,6 @@ export default {
 
             let imageBuffer = null;
 
-            // 🌟 核心修复 2：渲染并发锁，防止大量撤回瞬间导致内存爆炸
             if (!isRendering) {
                 isRendering = true;
                 try {
@@ -353,9 +362,8 @@ export default {
                         const browserContext = await recallBrowser.newContext({ deviceScaleFactor: 2, viewport: { width: 600, height: 800 } });
                         try { 
                             const page = await browserContext.newPage();
-                            // 🌟 核心修复 3：改用 domcontentloaded 并增加超时，防止外部图片卡死渲染
                             await page.setContent(html, { waitUntil: 'domcontentloaded', timeout: 5000 });
-                            await page.waitForTimeout(300); // 给图片300ms加载时间
+                            await page.waitForTimeout(300); 
                             
                             const cardElement = await page.$('.card');
                             if (cardElement) {
@@ -368,7 +376,7 @@ export default {
                 } catch (err) {
                     console.error('❌ [防撤回] 渲染图片失败，将降级为纯文本:', err.message);
                 } finally {
-                    isRendering = false; // 释放渲染锁
+                    isRendering = false;
                 }
             } else {
                 globalThis.print(`[防撤回] ⚠️ 渲染并发过高，自动降级为纯文本发送。`);
@@ -391,7 +399,6 @@ export default {
                 { type: 'text', data: { text: `${alertText}来源：${locationStr}\n发送者：${backup.name}(${backup.senderId})\n内容：${rawContentStr}\n` } }
             ];
 
-            // 提取需要额外发送的动图 / 视频 / 语音
             const extraMediaMsgs = [];
             if (Array.isArray(backup.content)) {
                 for (const seg of backup.content) {
@@ -414,7 +421,6 @@ export default {
                 globalThis.print(`[防撤回] 发现 ${extraMediaMsgs.length} 个视频/动图，准备额外发送。`);
             }
 
-            // 获取所有绑定关系并按用户分组
             const boundGroupsMap = new Map();
             const rows = db.prepare('SELECT user_id, group_id FROM exclusive_push').all();
             rows.forEach(r => {
@@ -434,7 +440,6 @@ export default {
                 const userBoundGroups = boundGroupsMap.get(String(owner));
                 let shouldSend = true;
 
-                // 如果该主人配置了指定群，则只有当当前群在他的绑定列表中时才发送
                 if (userBoundGroups && userBoundGroups.size > 0) {
                     if (currentGroupId && !userBoundGroups.has(String(currentGroupId))) {
                         shouldSend = false;
@@ -446,7 +451,6 @@ export default {
                     
                     let sendSuccess = false;
 
-                    // 1. 先发防撤回卡片
                     if (imageBuffer) {
                         try {
                             await globalThis.wsCall('send_msg', {
@@ -474,9 +478,8 @@ export default {
                         }
                     }
 
-                    // 2. 如果存在动图/视频/语音，额外发送原始媒体文件
                     if (extraMediaMsgs.length > 0) {
-                        await new Promise(r => setTimeout(r, 1000)); // 稍微停顿一下，防止风控
+                        await new Promise(r => setTimeout(r, 1000)); 
                         try {
                             await globalThis.wsCall('send_msg', {
                                 message_type: 'private',
@@ -490,7 +493,6 @@ export default {
                     }
                 }
             }
-            // 🌟 及时清理当前撤回的消息缓存，防止重复触发
             backupCache.delete(String(raw.message_id));
         }
     }
